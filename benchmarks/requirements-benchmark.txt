@@ -1,0 +1,10 @@
+langchain
+langchain-google-genai
+langchain-community
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2
+sqlalchemy
+psycopg2-binary
+tavily-python
+python-dotenv

@@ -1,0 +1,1 @@
+"""Internal calendar tool implementation."""
