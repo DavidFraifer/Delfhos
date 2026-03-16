@@ -208,6 +208,6 @@ async def sql_tool(
             )
             raise
 
-    raise ToolExecutionError(tool_name="sql", detail=f"Unsupported SQL tool action '{action}'. Use SCHEMA, QUERY, or EXECUTE.")
+            raise ToolExecutionError(tool_name="sql", detail=f"Unsupported SQL tool action '{action}'.\n\n📋 Available SQL actions:\n    • SCHEMA - Get database schema information\n    • QUERY - Execute a SELECT query\n    • EXECUTE - Execute INSERT/UPDATE/DELETE operations\n\nUse one of these actions in your next request.")
 
 

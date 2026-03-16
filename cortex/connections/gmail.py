@@ -9,13 +9,13 @@ Example (Service Account — recommended for servers):
     gmail = GmailConnection(
         service_account="path/to/service-account.json",
         delegated_user="admin@company.com",
-        actions=["read"],
+        allowed=["read"],
     )
 
 Example (OAuth — for personal accounts):
     gmail = GmailConnection(
         oauth_credentials="path/to/client_secrets.json",
-        actions=["read", "send"],
+        allowed=["read", "send"],
     )
 """
 
@@ -40,6 +40,7 @@ class GmailConnection(GoogleBaseConnection):
     """
 
     TOOL_NAME = "gmail"
+    ALLOWED_ACTIONS = ["read", "send"]
 
     def __init__(
         self,
@@ -47,17 +48,15 @@ class GmailConnection(GoogleBaseConnection):
         service_account: Optional[str] = None,
         oauth_credentials: Optional[str] = None,
         delegated_user: Optional[str] = None,
-        actions: Optional[List[str]] = None,
+        allowed: Optional[Union[str, List[str]]] = None,
         name: str = "gmail",
         metadata: Optional[Dict[str, Any]] = None,
-        confirm: Union[str, bool] = False,
     ):
         super().__init__(
             service_account=service_account,
             oauth_credentials=oauth_credentials,
             delegated_user=delegated_user,
-            actions=actions,
+            allowed=allowed,
             name=name,
             metadata=metadata,
-            confirm=confirm,
         )

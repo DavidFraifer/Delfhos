@@ -28,21 +28,20 @@ class WebSearchConnection(BaseConnection):
     """
 
     TOOL_NAME = "websearch"
+    ALLOWED_ACTIONS = ["search"]
 
     def __init__(
         self,
         api_key: Optional[str] = None,
-        actions: Optional[List[str]] = None,
+        allowed: Optional[Union[str, List[str]]] = None,
         name: str = "websearch",
         metadata: Optional[Dict[str, Any]] = None,
-        confirm: Union[str, bool] = False,
     ):
         credentials = {"api_key": api_key} if api_key else {}
         super().__init__(
             credentials=credentials,
-            actions=actions,
+            allowed=allowed,
             name=name,
             auth_type=AuthType.API_KEY if api_key else AuthType.NONE,
             metadata=metadata,
-            confirm=confirm,
         )

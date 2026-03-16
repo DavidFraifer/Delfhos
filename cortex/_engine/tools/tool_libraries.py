@@ -25,15 +25,15 @@ def _normalize_confirm_policy(confirm_policy: Any) -> Union[bool, List[str], str
     return False
 
 
-def _requires_approval(confirm_policy: Union[bool, List[str], str], tool_kind: str) -> bool:
+def _requires_approval(confirm_policy: Union[bool, List[str], str], tool_name: str, action_name: Optional[str] = None) -> bool:
     if isinstance(confirm_policy, bool):
         return confirm_policy
     if isinstance(confirm_policy, list):
-        return tool_kind in confirm_policy
+        return tool_name in confirm_policy or (action_name and action_name in confirm_policy)
     if isinstance(confirm_policy, str):
         if confirm_policy == "all":
             return True
-        return tool_kind == confirm_policy
+        return tool_name == confirm_policy or (action_name and action_name == confirm_policy)
     return False
 
 
@@ -58,11 +58,6 @@ def _resolve_effective_confirm_policy(
     return _normalize_confirm_policy(fallback_confirm_policy), False
 
 
-def _detect_operation_kind(tool_name: str, action_name: Optional[str] = None, description: str = "") -> str:
-    target = action_name or tool_name
-    if is_delete_tool(target, description):
-        return "delete"
-    return "read" if classify_tool(target, description) == "read" else "write"
 
 
 async def _request_unified_approval(
@@ -71,7 +66,6 @@ async def _request_unified_approval(
     task_id: str,
     tool_name: str,
     action_name: Optional[str],
-    operation_kind: str,
     confirm_policy: Union[bool, List[str], str],
     agent_confirm_policy: Optional[Union[bool, List[str], str]] = None,
     tool_confirm_policy: Optional[bool] = None,
@@ -92,19 +86,19 @@ async def _request_unified_approval(
         agent_confirm_policy=agent_confirm_policy,
         tool_confirm_policy=tool_confirm_policy,
     )
-    if not hard_override and not _requires_approval(normalized_policy, operation_kind):
+    if not hard_override and not _requires_approval(normalized_policy, tool_name, action_name):
         return True
 
     if action_name:
-        default_message = f"Approve {operation_kind.upper()} operation: {tool_name}.{action_name}"
+        default_message = f"Approve {action_name.upper()} operation: {tool_name}.{action_name}"
     else:
-        default_message = f"Approve {operation_kind.upper()} operation: {tool_name}"
+        default_message = f"Approve {tool_name.upper()} operation: {tool_name}"
 
     approval_payload = {
         "action": "tool.confirm",
         "tool": tool_name,
         "method": action_name,
-        "operation_kind": operation_kind,
+        "action_name": action_name,
         "confirm_policy": normalized_policy,
         "agent_confirm_policy": _normalize_confirm_policy(agent_confirm_policy) if agent_confirm_policy is not None else None,
         "tool_confirm_policy": tool_confirm_policy,
@@ -123,7 +117,7 @@ async def _request_unified_approval(
         "approval_kind": "tool_confirm",
         "tool_name": tool_name,
         "tool_method": action_name,
-        "operation_kind": operation_kind,
+        "action_name": action_name,
         "confirm_policy": normalized_policy,
         "agent_confirm_policy": _normalize_confirm_policy(agent_confirm_policy) if agent_confirm_policy is not None else None,
         "tool_confirm_policy": tool_confirm_policy,
@@ -284,14 +278,14 @@ class ToolLibraryBase:
     """Base class for all tool libraries"""
     
     def __init__(self, tool_manager, task_id: str, agent_id: str, light_llm: str, heavy_llm: str, tool_tracker=None,
-                 vision_model: Optional[str] = None, search_model: Optional[str] = None):
+                 vision_llm: Optional[str] = None, search_llm: Optional[str] = None):
         self.tool_manager = tool_manager
         self.task_id = task_id
         self.agent_id = agent_id
         self.light_llm = light_llm
         self.heavy_llm = heavy_llm
-        self.vision_model = vision_model or self.heavy_llm
-        self.search_model = search_model or self.light_llm
+        self.vision_llm = vision_llm or self.heavy_llm
+        self.search_llm = search_llm or self.light_llm
         self.tool_tracker = tool_tracker
     
     @property
@@ -327,6 +321,10 @@ class ToolLibraryBase:
             await self.tool_tracker.track_start(tool_name, desc or f"Using {tool_name}", ui_metadata=ui_metadata)
         
         try:
+            action_name = None
+            if isinstance(context, dict) and context.get("action"):
+                action_name = str(context.get("action")).strip().lower().replace("-", "_")
+
             result = await self.tool_manager.execute_tool(
                 connection_name,
                 context=context,
@@ -334,7 +332,8 @@ class ToolLibraryBase:
                 light_llm=self.light_llm,
                 heavy_llm=self.heavy_llm,
                 agent_id=self.agent_id,
-                validation_mode=False
+                validation_mode=False,
+                action=action_name,
             )
             
             # Post-process result to generate metadata (e.g., for widgets)
@@ -582,7 +581,7 @@ class SQLLibrary(ToolLibraryBase):
         if estimated_rows is not None and estimated_rows > 10:
             approval_message += f" ({estimated_rows} rows will be deleted)"
 
-        operation_kind = "delete" if operation_type == "DELETE" else "write"
+        action_name = "delete" if operation_type == "DELETE" else "write"
         ui_metadata = {
             "sql_query": sql,
             "sql_operation": operation_type,
@@ -597,8 +596,7 @@ class SQLLibrary(ToolLibraryBase):
             task_id=self.task_id,
             tool_name="sql",
             action_name="execute",
-            operation_kind=operation_kind,
-            confirm_policy=self._get_confirm_policy(conn_name, default="write"),
+                        confirm_policy=self._get_confirm_policy(conn_name, default="write"),
             connection_name=conn_name,
             message=approval_message,
             context_payload={
@@ -811,8 +809,6 @@ class SheetsLibrary(ToolLibraryBase):
             tool_tracker=self.tool_tracker,
             task_id=self.task_id,
             tool_name="sheets",
-            action_name="write",
-            operation_kind="write",
             confirm_policy=self._get_confirm_policy(conn_name, default="write"),
             connection_name=conn_name,
             message=desc or f"Approve writing data to {sheet}!{cell}",
@@ -901,7 +897,6 @@ class GmailLibrary(ToolLibraryBase):
             task_id=self.task_id,
             tool_name="gmail",
             action_name="send",
-            operation_kind="write",
             confirm_policy=self._get_confirm_policy(conn_name, default="write"),
             connection_name=conn_name,
             message=desc or f"Approve sending email to {to}: {subject}",
@@ -1718,7 +1713,7 @@ class WebSearchLibrary(ToolLibraryBase):
             result, token_info = await web_search(
                 query=query,
                 task_id=self.task_id,
-                model=self.search_model,
+                model=self.search_llm,
                 agent_id=self.agent_id,
             )
             
@@ -1747,51 +1742,88 @@ class WebSearchLibrary(ToolLibraryBase):
 
 class LLMLibrary(ToolLibraryBase):
     """
-    LLM Library - Use AI for analysis, summarization, and content generation.
+    LLM Library - Universal AI for analysis, summarization, content generation, and structured extraction.
     
     Usage:
         from tools import llm
         
-        # Analyze data
-        summary = await llm.analyze("Summarize this sales data: " + str(data))
+        # Analyze text
+        summary = await llm.call("Summarize this sales data: " + str(data))
         
         # Generate content
-        email_body = await llm.generate("Write a professional email about project update")
+        email_body = await llm.call("Write a professional email about project update")
         
         # Extract structured data
-        extracted = await llm.extract("From this text, extract names and emails as JSON: " + text)
+        extracted = await llm.call("From this text, extract names and emails as JSON: " + text)
         
-        # Use heavy model for complex tasks
-        analysis = await llm.analyze("Deep analysis of...", model="heavy")
+        # Analyze files (images, documents, etc.)
+        analysis = await llm.call("Describe this image", file_data=[file_content])
     """
     
     @property
     def tool_name(self) -> str:
         return "llm"
     
-    async def analyze(self, prompt: str, model: str = "light", desc: str = None, images: Optional[List[Union[str, Dict[str, Any]]]] = None, max_tokens: int = 2000) -> str:
+    def __getattr__(self, name):
+        """Intercept ALL hallucinated methods (e.g. analyze_image, describe) and route to call."""
+        if name in ['__class__', '__dict__', '__bases__', 'tool_name', 'tool_tracker', 'light_llm', 'heavy_llm', 'vision_llm', 'task_id', 'agent_id']:
+            raise AttributeError(name)
+        async def wrapper(*args, **kwargs):
+            return await self.call(*args, **kwargs)
+        return wrapper
+        
+    async def __call__(self, *args, **kwargs):
+        return await self.call(*args, **kwargs)
+
+    async def call(self, *args, prompt: str = None, desc: str = None, file_data: Optional[List[Union[str, Dict[str, Any]]]] = None, max_tokens: int = 2000, **kwargs) -> str:
         """
-        Analyze data or generate insights using AI.
+        Universal AI method for text analysis, file analysis, content generation, and JSON extraction.
+        
+        The framework automatically selects the optimal model:
+        - If file_data is provided: uses vision model for accurate analysis
+        - Otherwise: uses the standard AI model for text tasks
         
         Args:
-            prompt: Description of what to analyze or generate
-            model: "light" (fast, cheap) or "heavy" (powerful, expensive)
-            desc: Optional description (e.g., "Analyzing sales trends")
-            images: Optional list of images to include. Can be:
-                - List of base64 strings: ["base64_string1", "base64_string2"]
-                - List of dicts: [{"data": "base64_string", "mime_type": "image/jpeg"}, ...]
-                - List from files.read(): await files.read("image.png") returns base64 string
-            max_tokens: Number of response tokens (default 2000)
+            prompt: Description/instruction for what to do (text analysis, generation, etc.)
+            desc: Optional description for logging (e.g., "Analyzing sales data")
+            file_data: Optional list of file content (images, documents, etc.) to analyze. Can be:
+                - List of dicts from filesystem.read_media_file(): [{"data": "base64_string", "mime_type": "image/jpeg"}]
+            max_tokens: Maximum response length (default 2000)
         """
+        # Defensive parsing against LLM hallucinating args: `llm.call(media, prompt="...")`
+        
+        # If args has a dict or a list that looks like file data, extract it
+        if args and isinstance(args[0], (dict, list)):
+            item = args[0][0] if isinstance(args[0], list) and len(args[0]) > 0 else args[0]
+            if isinstance(item, dict) and ('data' in item or 'url' in item):
+                if file_data is None:
+                    file_data = args[0] if isinstance(args[0], list) else [args[0]]
+                args = args[1:]
+            
+        if prompt is None and len(args) > 0:
+            prompt = str(args[0])
+        elif prompt is not None and len(args) > 0:
+            # Reconstruct intended prompt if LLM messed up positional/kwargs
+            prompt = str(prompt) + " " + str(args[0])
+        elif prompt is None:
+            prompt = ""
+            
+        # Catch common LLM hallucinated kwarg 'image'
+        if file_data is None and 'image' in kwargs:
+            file_data = [kwargs['image']] if not isinstance(kwargs['image'], list) else kwargs['image']
+            
+        # Catch common LLM hallucinated kwargs 'data' and 'mime_type' when trying to pass file data directly
+        if file_data is None and 'data' in kwargs:
+            mime = kwargs.get('mime_type', 'image/jpeg')
+            file_data = [{"data": kwargs['data'], "mime_type": mime}]
+            
         import time
         
-        # Determine which LLM model will be used BEFORE tracking start
-        if model == "heavy":
-            llm_model = self.heavy_llm
-        elif model == "vision" or (images and model == "light"):
-            llm_model = self.vision_model
+        # Determine which LLM model will be used BEFORE tracking start (Agent shouldn't choose)
+        if file_data:
+            llm_model = self.vision_llm
         else:
-            llm_model = self.light_llm
+            llm_model = self.heavy_llm
         
         # Track LLM call start
         start_time = time.time()
@@ -1807,8 +1839,8 @@ class LLMLibrary(ToolLibraryBase):
         
         if self.tool_tracker:
             ui_metadata = {
-                "_tool_trace_args": {"prompt": prompt[:500] + ("..." if len(prompt) > 500 else ""), "model": model, "max_tokens": max_tokens},
-                "_tool_action": "analyze"
+                "_tool_trace_args": {"prompt": prompt[:500] + ("..." if len(prompt) > 500 else ""), "max_tokens": max_tokens},
+                "_tool_action": "call"
             }
             if desc: ui_metadata["_tool_trace_args"]["desc"] = desc
             await self.tool_tracker.track_start("llm", display_desc, model=llm_model, ui_metadata=ui_metadata)
@@ -1824,7 +1856,7 @@ class LLMLibrary(ToolLibraryBase):
                 temperature=0.0,
                 max_tokens=max_tokens,
                 response_format=None,
-                images=images
+                images=file_data
             )
             
             # Normalize result and extract tokens for logging
@@ -1850,7 +1882,19 @@ class LLMLibrary(ToolLibraryBase):
             
             # Return only the content to the agent, never token info
             if isinstance(response_text, str):
-                return response_text.strip()
+                cleaned = response_text.strip()
+                
+                # Auto-parse JSON if it's strictly a json structure, removing markdown
+                if ('```json' in cleaned and '```' in cleaned.split('```json', 1)[1]) or (cleaned.startswith('{') and cleaned.endswith('}')) or (cleaned.startswith('[') and cleaned.endswith(']')):
+                    from cortex._engine.utils.llm_utils import clean_json_from_markdown
+                    import json
+                    try:
+                        parsed = clean_json_from_markdown(cleaned)
+                        return json.loads(parsed)
+                    except (json.JSONDecodeError, ValueError):
+                        pass # Fallback to string if strictly not json
+                
+                return cleaned
             return result_str
         except Exception as e:
             # Track LLM call failure
@@ -1859,39 +1903,6 @@ class LLMLibrary(ToolLibraryBase):
                 await self.tool_tracker.track_end("llm", duration, success=False, error=str(e), model=llm_model, ui_metadata={"_tool_trace_error": str(e)})
             raise
     
-    async def generate(self, prompt: str, model: str = "light", desc: str = None, images: Optional[List[Union[str, Dict[str, Any]]]] = None, max_tokens: int = 2000) -> str:
-        """
-        AI content generation (emails, reports, messages).
-        
-        Args:
-            prompt: Instructions for what to generate
-            model: "light" (standard) or "heavy" (high-quality)
-            desc: Optional description (e.g., "Writing project update email")
-            images: Optional images to analyze for generation
-            max_tokens: Number of response tokens (default 2000)
-        """
-        return await self.analyze(prompt, model, desc=desc or "Generating content", images=images, max_tokens=max_tokens)
-    
-
-    
-    async def extract(self, prompt: str, model: str = "light", desc: str = None, images: Optional[List[Union[str, Dict[str, Any]]]] = None, max_tokens: int = 2000) -> Any:
-        """
-        Extract structured data. Returns parsed JSON if possible, otherwise string.
-        
-        Example:
-            result = await llm.extract("From this data: " + data + ", return JSON with fields: name, email, phone", max_tokens=500)
-        """
-        result = await self.analyze(prompt, model, desc=desc or "Extracting structured data", images=images, max_tokens=max_tokens)
-        try:
-            # Clean markdown code blocks before parsing
-            cleaned_result = clean_json_from_markdown(result)
-            return json.loads(cleaned_result)
-        except (json.JSONDecodeError, ValueError) as e:
-            # If parsing fails, return the original result as string
-            console.debug(f"Could not parse JSON from LLM response: {str(e)}", task_id=self.task_id)
-            return result
-
-
 def _bind_arguments(fn: Any, args: tuple, kwargs: dict) -> dict:
     import inspect
 
@@ -2052,14 +2063,12 @@ def _wrap_for_tracking(tool_name: str, tool_obj: Any, tool_tracker: Any) -> Any:
 
                         conn, confirm_policy = self._find_connection_confirm_policy()
                         tool_description = self._get_mcp_tool_description(name)
-                        operation_kind = _detect_operation_kind(tool_name, name, tool_description)
                         await _request_unified_approval(
                             tool_tracker=tool_tracker,
                             task_id=tool_tracker.task_id,
                             tool_name=tool_name,
                             action_name=name,
-                            operation_kind=operation_kind,
-                            confirm_policy=confirm_policy,
+                                                        confirm_policy=confirm_policy,
                             connection_name=getattr(conn, "connection_name", tool_name),
                             message=f"Approve MCP call {full_name}",
                             context_payload={
@@ -2102,14 +2111,12 @@ def _wrap_for_tracking(tool_name: str, tool_obj: Any, tool_tracker: Any) -> Any:
                 tool_confirm_policy = getattr(self._original, "confirm", False)
                 explicit_operation = getattr(self._original, "kind", None)
                 description = getattr(self._original, "description", "")
-                operation_kind = explicit_operation if explicit_operation else _detect_operation_kind(tool_name, tool_name, description)
                 await _request_unified_approval(
                     tool_tracker=tool_tracker,
                     task_id=tool_tracker.task_id,
                     tool_name=tool_name,
                     action_name=None,
-                    operation_kind=operation_kind,
-                    confirm_policy=False,
+                                        confirm_policy=False,
                     tool_confirm_policy=tool_confirm_policy,
                     connection_name=tool_name,
                     message=f"Approve custom tool call: {tool_name}",
@@ -2131,7 +2138,7 @@ def _wrap_for_tracking(tool_name: str, tool_obj: Any, tool_tracker: Any) -> Any:
     return tool_obj
 
 def create_tool_libraries(tool_manager, task_id: str, agent_id: str, light_llm: str, heavy_llm: str, 
-                         tool_tracker=None, vision_model: Optional[str] = None, search_model: Optional[str] = None) -> dict:
+                         tool_tracker=None, vision_llm: Optional[str] = None, search_llm: Optional[str] = None) -> dict:
     """
     Create all tool library instances for a task execution.
     
@@ -2148,8 +2155,8 @@ def create_tool_libraries(tool_manager, task_id: str, agent_id: str, light_llm: 
         "light_llm": light_llm,
         "heavy_llm": heavy_llm,
         "tool_tracker": tool_tracker,
-        "vision_model": vision_model,
-        "search_model": search_model
+        "vision_llm": vision_llm,
+        "search_llm": search_llm
     }
     
     libraries = {}
@@ -2355,7 +2362,6 @@ class FilesLibrary(ToolLibraryBase):
             task_id=self.task_id,
             tool_name="files",
             action_name="save",
-            operation_kind="write",
             confirm_policy="write",
             connection_name="files",
             message=desc or f"Approve saving file: {filename}",

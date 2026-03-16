@@ -54,14 +54,22 @@ class Orchestrator:
     MAX_WAIT_TIMES_ENTRIES = 100
     PREFILTER_MEMORY_MAX_CHARS = 1200
     PREFILTER_MEMORY_MAX_LINES = 20
+    _VISIBLE_PHASES = {
+        "memory_retrieval": "Retrieving memory",
+        "prefilter": "Analyzing tools",
+        "sql_schema": "Loading schema",
+        "llm_code_generation": "Planning",
+        "awaiting_approval": "Awaiting approval",
+    }
     
     def __init__(self, light_llm: str, heavy_llm: str, logger: CORTEXLogger, agent_id: str = "unknown", 
-                 validation_mode: bool = False, enable_human_approval: bool = False, on_confirm=None,
-                 confirm: Optional[Union[bool, List[str], str]] = None, agent_context: Optional[str] = None,
-                 prefilter_model: Optional[str] = None, code_generation_model: Optional[str] = None,
-                 vision_model: Optional[str] = None, search_model: Optional[str] = None, token_usage=None,
-                 memory=None, trace_mode: Union[str, bool] = "full", trace_callback=None):
-        approval_enabled = bool(enable_human_approval or on_confirm is not None or _has_confirm_policy(confirm))
+                 on_confirm=None,
+                 confirm: Optional[Union[bool, List[str], str]] = None, system_prompt: Optional[str] = None,
+                 prefilter_llm: Optional[str] = None, code_generation_llm: Optional[str] = None,
+                 vision_llm: Optional[str] = None, search_llm: Optional[str] = None, token_usage=None,
+                 memory=None, trace_mode: Union[str, bool] = "full", trace_callback=None, llm_config: Optional[str] = None,
+                 verbose: str = "low"):
+        approval_enabled = bool(on_confirm is not None or _has_confirm_policy(confirm))
 
         # Core configuration
         self.trace_mode = trace_mode
@@ -70,18 +78,22 @@ class Orchestrator:
         self.logger = logger
         self.light_llm = light_llm
         self.heavy_llm = heavy_llm
+        self.llm_config = llm_config  # Store LLM configuration string for display in summary
+        self.verbose = verbose  # Store verbose logging mode ("low" or "high")
         
         # Specific model overrides
-        self.prefilter_model = prefilter_model or self.light_llm
-        self.code_generation_model = code_generation_model or self.heavy_llm
-        self.vision_model = vision_model or self.heavy_llm
-        self.search_model = search_model or self.light_llm
+        self.prefilter_llm = prefilter_llm or self.light_llm
+        self.code_generation_llm = code_generation_llm or self.heavy_llm
+        self.vision_llm = vision_llm or self.heavy_llm
+        self.search_llm = search_llm or self.light_llm
         
         self.agent_id = agent_id
-        self.validation_mode = validation_mode
         self.enable_human_approval = approval_enabled
         self.confirm_policy = confirm
-        self.agent_context = agent_context  # Agent's description/role/backstory for context injection
+        self.system_prompt = system_prompt  # Agent instruction injected in code-generation prompt
+        # Backward compatibility for runtime namespace (`ctx`) expected by PythonExecutor.
+        # Keep legacy shape as dict to avoid AttributeError and preserve old behavior.
+        self.agent_context = {"system_prompt": system_prompt} if system_prompt else {}
         self.token_usage = token_usage
         self.memory = memory  # Long-term Memory with embedding retrieval
         
@@ -104,6 +116,7 @@ class Orchestrator:
         self.tool_timing_callback = None
         self.on_task_complete = None  # Optional callback(task_id, final_message) — used to capture assistant responses
         self.detected_language = 'en'  # Track task language for responses
+        self._active_phase_logs = {}
         
         # SQL Schema Caching
         self._sql_schema_cache = None
@@ -363,6 +376,7 @@ class Orchestrator:
                         # Update metadata if provided (e.g., sheet_link, drive_link)
                         if metadata:
                             existing['ui_metadata'] = metadata
+                        self._emit_phase_progress(task_id, tool_name, description, is_starting=False, duration=duration)
                         return existing  # Return updated entry for callback
         
         # If this is a starting entry or no matching ongoing entry found, create new entry                                                                      
@@ -381,6 +395,7 @@ class Orchestrator:
             if metadata:
                 timing_entry['ui_metadata'] = metadata
             self.task_tool_timings[task_id].append(timing_entry)
+            self._emit_phase_progress(task_id, tool_name, description, is_starting=True, duration=None)
             return timing_entry  # Return new entry for callback
         else:
             # Completion entry but no matching starting entry found - create new entry
@@ -418,7 +433,27 @@ class Orchestrator:
             if metadata:
                 timing_entry['ui_metadata'] = metadata
             self.task_tool_timings[task_id].append(timing_entry)
+            self._emit_phase_progress(task_id, tool_name, description, is_starting=False, duration=duration)
             return timing_entry  # Return new entry for callback
+
+    def _emit_phase_progress(self, task_id: str, tool_name: str, description: Optional[str], is_starting: bool, duration: Optional[float]):
+        """Emit concise, user-facing phase updates while task is running."""
+        if tool_name not in self._VISIBLE_PHASES:
+            return
+
+        label = description or self._VISIBLE_PHASES[tool_name]
+        key = (task_id, tool_name, (label or "").strip().lower())
+
+        if is_starting:
+            if key in self._active_phase_logs:
+                return
+            self._active_phase_logs[key] = True
+            console.update_progress(task_id, description=label, advance=10)
+            return
+
+        if key in self._active_phase_logs:
+            self._active_phase_logs.pop(key, None)
+        console.update_progress(task_id, description=f"Completed {label}")
     
     def track_tool_timing(self, task_id: str, tool_name: str, duration: float, model: str = None, description: str = None, is_starting: bool = False):
         """Track tool execution timing for each task (sync version - uses asyncio.create_task for callback)
@@ -514,8 +549,6 @@ class Orchestrator:
         # Initialize tracking
         self.wait_times[task_id] = 0.0
         display_message = payload[:60] + "..." if isinstance(payload, str) and len(payload) > 60 else payload
-        console.task(f"Task {task_id} ADDED [Agent: {self.agent_id}] - {display_message}", 
-                    task_id=task_id, agent_id=self.agent_id)
         self.logger.start_task(task_id, message, self.agent_id)
 
         # Initialize Trace
@@ -545,6 +578,7 @@ class Orchestrator:
             # and code generation. Local embeddings, no LLM call needed.
             memory_context = None
             if self.memory:
+                console.info("Step", "Retrieving memories...", task_id=task_id, agent_id=self.agent_id)
                 mem_start = time.time()
                 from datetime import datetime
                 mem_start_dt = datetime.now()
@@ -579,20 +613,10 @@ class Orchestrator:
                                 f"{type(mem_err).__name__}: {mem_err}",
                                 task_id=task_id, agent_id=self.agent_id)
             
-            # Retrieve RAG context from File Search if available
-            rag_context = None
-            if hasattr(self, 'file_search_store_name') and self.file_search_store_name:
-                try:
-                    rag_context = await self.retrieve_rag_context(payload, task_id=task_id)
-                except Exception as rag_error:
-                    console.warning("RAG context retrieval failed", 
-                                f"{type(rag_error).__name__}: {str(rag_error)}", 
-                                task_id=task_id, agent_id=self.agent_id)
-            
             # Generate Python code
             code_gen_start = time.time()
             try:
-                python_code = await self.llm_generate_python(payload, task_id=task_id, sql_schema=sql_schema, relevant_connections=relevant_connections, rag_context=rag_context, memory_context=memory_context)
+                python_code = await self.llm_generate_python(payload, task_id=task_id, sql_schema=sql_schema, relevant_connections=relevant_connections, memory_context=memory_context)
             except Exception as code_gen_error:
                 console.error("Python code generation failed with exception", 
                              f"{type(code_gen_error).__name__}: {str(code_gen_error)}", 
@@ -615,6 +639,15 @@ class Orchestrator:
                 console.debug("Executing Python code", f"Code generation time: {code_gen_time:.2f}s",
                             task_id=task_id, agent_id=self.agent_id)
                 
+                # Show generated code in verbose mode
+                if self.verbose == "high":
+                    from rich.panel import Panel
+                    from rich.syntax import Syntax
+                    code_syntax = Syntax(python_code, "python", theme="monokai", line_numbers=True)
+                    code_panel = Panel(code_syntax, title="[bold yellow]Generated Code[/bold yellow]", border_style="yellow", expand=False)
+                    console.console.print(code_panel)
+                    console.console.print()  # Blank line
+                
                 from .python_executor import PythonExecutor
                 executor = PythonExecutor(
                     self.tools,
@@ -623,8 +656,8 @@ class Orchestrator:
                     self.light_llm,
                     self.heavy_llm,
                     orchestrator=self,
-                    vision_model=self.vision_model,
-                    search_model=self.search_model
+                    vision_llm=self.vision_llm,
+                    search_llm=self.search_llm
                 )
                 
                 if self.current_trace:
@@ -657,7 +690,7 @@ class Orchestrator:
                     if any(err in error_msg for err in retryable_errors):
                         console.debug("Auto-retry", f"Retrying after error: {error_msg[:200]}", 
                                     task_id=task_id, agent_id=self.agent_id)
-                        await self.track_tool_timing_async(task_id, "llm_code_generation", None, self.code_generation_model, description=self._ui_text("retrying"), is_starting=True)
+                        await self.track_tool_timing_async(task_id, "llm_code_generation", None, self.code_generation_llm, description=self._ui_text("retrying"), is_starting=True)
                         
                         # Build rich context for retry
                         partial_output = result.get("output", "").strip()
@@ -696,18 +729,18 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
                         try:
                             retry_llm_start = time.time()
                             retry_llm_result = await llm_completion_async(
-                                model=self.code_generation_model,
+                                model=self.code_generation_llm,
                                 prompt=retry_prompt,
                                 temperature=0.0,
                                 max_tokens=1500,
                                 response_format=None
                             )
                             retry_llm_duration = time.time() - retry_llm_start
-                            await self.track_tool_timing_async(task_id, "llm_code_generation", retry_llm_duration, self.code_generation_model, description=self._ui_text("retrying"), is_starting=False)
-                            self.track_tool_usage(task_id, "llm_code_generation", self.code_generation_model)
+                            await self.track_tool_timing_async(task_id, "llm_code_generation", retry_llm_duration, self.code_generation_llm, description=self._ui_text("retrying"), is_starting=False)
+                            self.track_tool_usage(task_id, "llm_code_generation", self.code_generation_llm)
                             
                             retry_response, retry_token_info = normalize_llm_result(retry_llm_result)
-                            self._safe_add_tokens(task_id, retry_token_info, self.code_generation_model, "llm_retry", duration=retry_llm_duration)
+                            self._safe_add_tokens(task_id, retry_token_info, self.code_generation_llm, "llm_retry", duration=retry_llm_duration)
                             
                             retry_code = parse_python_code(retry_response)
                             if retry_code and retry_code.strip():
@@ -766,35 +799,31 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
                 'input_tokens': task_data.get('input_tokens', 0),
                 'output_tokens': task_data.get('output_tokens', 0), 
                 'llm_calls': task_data.get('llm_calls', 0),
-                'total_cost': task_data.get('total_cost', 0.0)
             }
             
             # Print LLM call summary
-            cost_breakdown = task_data.get('cost_breakdown', [])
-            if cost_breakdown:
+            llm_breakdown = task_data.get('llm_breakdown', [])
+            if llm_breakdown:
                 summary_lines = ["LLM Call Summary:"]
-                for i, call in enumerate(cost_breakdown, 1):
+                for i, call in enumerate(llm_breakdown, 1):
                     model = call.get('model', 'unknown')
                     input_tokens = call.get('input_tokens', 0)
                     output_tokens = call.get('output_tokens', 0)
-                    cost = call.get('cost', 0.0)
                     function_name = call.get('function_name', 'unknown')
                     duration = call.get('duration')
                     dur_str = f" in {duration:.2f}s" if duration is not None else ""
-                    summary_lines.append(f"  {i}. {function_name} ({model}){dur_str}: {input_tokens} in, {output_tokens} out → ${cost:.6f}")
-                total_duration = sum(call.get('duration') or 0.0 for call in cost_breakdown)
+                    summary_lines.append(f"  {i}. {function_name} ({model}){dur_str}: {input_tokens} in, {output_tokens} out")
+                total_duration = sum(call.get('duration') or 0.0 for call in llm_breakdown)
                 total_dur_str = f" in {total_duration:.2f}s" if total_duration > 0 else ""
-                summary_lines.append(f"Total: {token_info['llm_calls']} calls{total_dur_str}, {token_info['input_tokens']} in, {token_info['output_tokens']} out → ${token_info['total_cost']:.6f}")
+                summary_lines.append(f"Total: {token_info['llm_calls']} calls{total_dur_str}, {token_info['input_tokens']} in, {token_info['output_tokens']} out")
                 console.debug("LLM Calls Summary", "\n".join(summary_lines),
                             task_id=task_id, agent_id=self.agent_id)
             
                 
                 if self.current_trace and self.current_trace.execution:
-                    exec_calls = [c for c in cost_breakdown if c.get("function_name") not in ("prefilter", "llm_code_generation", "llm_connection_filtering", "llm_rag_retrieval")]
+                    exec_calls = [c for c in llm_breakdown if c.get("function_name") not in ("prefilter", "llm_code_generation", "llm_connection_filtering", "llm_rag_retrieval")]
                     self.current_trace.execution.tokens_input = sum(c.get("input_tokens", 0) for c in exec_calls)
                     self.current_trace.execution.tokens_output = sum(c.get("output_tokens", 0) for c in exec_calls)
-            if self.current_trace:
-                self.current_trace.cost_usd = token_info.get('total_cost', 0.0)
                 
             # Print Tool Timings Summary
             tool_entries = self.task_tool_timings.get(task_id, [])
@@ -888,8 +917,18 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
                     else:
                         final_message = f"Task failed: {error_msg}"
             
-            console.task_summary(task_id, task_duration, token_info, "completed", final_message, 
-                               computational_time, wait_time=total_wait_time, agent_id=self.agent_id, task_status=task_status)
+            tools_used = [
+                entry.get("tool") if isinstance(entry, dict) else str(entry)
+                for entry in self.get_tools_used(task_id)
+            ]
+            
+            # Log final task completion status BEFORE summary
+            status_label = task_status.upper()
+            console.info(status_label, "Task has being completed", task_id=task_id, agent_id=self.agent_id)
+            
+            console.task_summary(task_id, task_duration, token_info, "completed", final_message,
+                                 computational_time, wait_time=total_wait_time, agent_id=self.agent_id, task_status=task_status, tools=tools_used, llm_config=self.llm_config)
+            
             self.logger.complete_task(task_id, task_status, computational_time)
             
             # Store task result
@@ -900,7 +939,6 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
                 "duration": task_duration,
                 "compute_time": computational_time,
                 "tokens_used": token_info.get('tokens_used', 0),
-                "cost_usd": token_info.get('total_cost', 0.0),
             }
             
             if self.current_trace:
@@ -917,183 +955,39 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
                     pass
 
             # Cleanup
+            for active_key in list(self._active_phase_logs.keys()):
+                if active_key[0] == task_id:
+                    self._active_phase_logs.pop(active_key, None)
             self.wait_times.pop(task_id, None)
             self._cleanup_wait_times_if_needed()
             
         except Exception as e:
-            report_error("SYS-001", context={
-                "task_id": task_id, 
-                "error": str(e), 
-                "error_type": type(e).__name__
-            })
             elapsed = time.time() - start_time
-            comp_time = elapsed - self.wait_times.get(task_id, 0.0)
-            self.logger.complete_task(task_id, "error", comp_time)
-            
+            total_wait_time = self.wait_times.get(task_id, 0.0)
+            comp_time = max(elapsed - total_wait_time, 0.0)
+
+            error_text = f"{type(e).__name__}: {str(e)}"
+            console.error("Task failed", error_text, task_id=task_id, agent_id=self.agent_id)
+
+            if self.logger:
+                self.logger.complete_task(task_id, "error", comp_time)
+
+            # Store task result for callers and diagnostics
+            self.task_results[task_id] = {
+                "status": "error",
+                "completed": False,
+                "final_message": f"Task failed: {error_text}",
+                "duration": elapsed,
+                "compute_time": comp_time,
+                "tokens_used": 0,
+            }
+
             # Cleanup
+            for active_key in list(self._active_phase_logs.keys()):
+                if active_key[0] == task_id:
+                    self._active_phase_logs.pop(active_key, None)
             self.wait_times.pop(task_id, None)
             self._cleanup_wait_times_if_needed()
-    
-    async def retrieve_rag_context(self, message: str, task_id: str = "") -> str:
-        """
-        Retrieve relevant context from File Search RAG.
-        
-        Args:
-            message: Task message
-            task_id: Task ID for logging
-        
-        Returns:
-            Relevant context string from knowledge base
-        """
-        # Track timing for RAG retrieval
-        await self.track_tool_timing_async(task_id, "llm_rag_retrieval", None, self.light_llm, description=self._ui_text("retrieving_knowledge"), is_starting=True)
-        
-        llm_start_time = time.time()
-        
-        try:
-            # Import here to avoid issues if genai is not installed
-            from google import genai
-            from google.genai import types
-            import os
-            
-            # Initialize Gemini client
-            api_key = os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY')
-            if not api_key:
-                console.warning("RAG retrieval skipped", "GEMINI_API_KEY not found", task_id=task_id, agent_id=self.agent_id)
-                llm_duration = time.time() - llm_start_time
-                await self.track_tool_timing_async(task_id, "llm_rag_retrieval", llm_duration, self.light_llm, description=self._ui_text("retrieving_knowledge"), is_starting=False)
-                return None
-            
-            from ..internal.llm import get_gemini_client
-            client = get_gemini_client(api_key)
-
-            # Feature-detect File Search support in the installed SDK.
-            # Some environments (e.g. older google-genai) don't expose `types.FileSearch`.
-            if not hasattr(types, "FileSearch"):
-                llm_duration = time.time() - llm_start_time
-                await self.track_tool_timing_async(
-                    task_id,
-                    "llm_rag_retrieval",
-                    llm_duration,
-                    self.light_llm,
-                    description="RAG skipped (google-genai missing FileSearch)",
-                    is_starting=False,
-                )
-                console.warning(
-                    "RAG retrieval skipped",
-                    "google-genai SDK missing types.FileSearch; upgrade google-genai to use Gemini File Search RAG",
-                    task_id=task_id,
-                    agent_id=self.agent_id,
-                )
-                return None
-            
-            # Prepare content for token counting
-            # IMPORTANT: RAG is only for knowledge-base information (e.g., contacts, procedures, definitions),
-            # NOT for dynamic facts that should come from tools like SQL.
-            prompt_text = (
-                "You are retrieving context from the Knowledge Base (RAG).\n"
-                "Goal: extract ONLY the parts of the user's request that the Knowledge Base can help with, such as:\n"
-                "- Who to contact (team members, email addresses, distribution lists)\n"
-                "- Company-specific terms, definitions, processes, templates, or conventions\n"
-                "- Background context that helps execute the task\n"
-                "Do NOT try to answer parts that require live data/tools (e.g., database metrics, externals tools too).\n"
-                "If the KB has no useful info for this request, output exactly: NONE\n\n"
-                f"User request:\n{message}\n"
-            )
-            content_for_tokens = [types.Content(role="user", parts=[types.Part.from_text(text=prompt_text)])]
-            
-            # Use File Search with Gemini to retrieve relevant context
-            response = client.models.generate_content(
-                model=self.light_llm,
-                contents=prompt_text,
-                config=types.GenerateContentConfig(
-                    tools=[
-                        types.Tool(
-                            file_search=types.FileSearch(
-                                file_search_store_names=[self.file_search_store_name]
-                            )
-                        )
-                    ],
-                    temperature=0.0,
-                    max_output_tokens=1000
-                )
-            )
-            
-            # Count tokens for cost tracking
-            try:
-                input_token_response = client.models.count_tokens(
-                    model=self.light_llm,
-                    contents=content_for_tokens
-                )
-                input_tokens = input_token_response.total_tokens
-                
-                # Extract text from response
-                context_text = None
-                if response and hasattr(response, 'text') and response.text:
-                    context_text = response.text.strip()
-                    # TEMP: print retrieved RAG context for debugging
-                    print(f"[RAG CONTEXT RETRIEVED] {context_text[:4000]}")
-                
-                # Count output tokens
-                output_tokens = 0
-                if context_text:
-                    output_content = [types.Content(role="assistant", parts=[types.Part.from_text(text=context_text)])]
-                    output_token_response = client.models.count_tokens(
-                        model=self.light_llm,
-                        contents=output_content
-                    )
-                    output_tokens = output_token_response.total_tokens
-                
-                # Track tokens and cost
-                token_info = {
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "total_tokens": input_tokens + output_tokens,
-                    "image_count": 0
-                }
-                
-                llm_duration = time.time() - llm_start_time
-                self._safe_add_tokens(task_id, token_info, self.light_llm, "llm_rag_retrieval", duration=llm_duration)
-                
-            except Exception as e:
-                console.warning("RAG token counting failed", f"{type(e).__name__}: {str(e)}", task_id=task_id, agent_id=self.agent_id)
-                # Fallback: estimate tokens
-                context_text = response.text.strip() if (response and hasattr(response, 'text') and response.text) else None
-                if context_text:
-                    estimated_input = len(prompt_text) // 4
-                    estimated_output = len(context_text) // 4
-                    token_info = {
-                        "input_tokens": estimated_input,
-                        "output_tokens": estimated_output,
-                        "total_tokens": estimated_input + estimated_output,
-                        "image_count": 0
-                    }
-                    llm_duration = time.time() - llm_start_time
-                    self._safe_add_tokens(task_id, token_info, self.prefilter_model, "llm_rag_retrieval", duration=llm_duration)
-            
-            if 'llm_duration' not in locals():
-                llm_duration = time.time() - llm_start_time
-            await self.track_tool_timing_async(task_id, "llm_rag_retrieval", llm_duration, self.prefilter_model, description=self._ui_text("retrieving_knowledge"), is_starting=False)
-            
-            # Extract text from response (if not already extracted)
-            if context_text:
-                console.debug("RAG context retrieved", 
-                             f"Retrieved {len(context_text)} chars of context", 
-                             task_id=task_id, agent_id=self.agent_id)
-                return context_text
-            else:
-                console.debug("RAG context empty", 
-                             "No relevant context found in knowledge base", 
-                             task_id=task_id, agent_id=self.agent_id)
-                return None
-                
-        except Exception as e:
-            llm_duration = time.time() - llm_start_time
-            await self.track_tool_timing_async(task_id, "llm_rag_retrieval", llm_duration, self.prefilter_model, description=self._ui_text("retrieving_knowledge"), is_starting=False)
-            console.error("RAG context retrieval failed", 
-                         f"{type(e).__name__}: {str(e)}", 
-                         task_id=task_id, agent_id=self.agent_id)
-            return None
     
     async def llm_filter_connections(self, message: str, task_id: str = "") -> list:
         """
@@ -1107,7 +1001,7 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
             List of connection IDs that are relevant to the task
         """
         # Track timing for filtering step
-        await self.track_tool_timing_async(task_id, "llm_connection_filtering", None, self.prefilter_model, description=self._ui_text("analyzing_connections"), is_starting=True)
+        await self.track_tool_timing_async(task_id, "llm_connection_filtering", None, self.prefilter_llm, description=self._ui_text("analyzing_connections"), is_starting=True)
         
         llm_start_time = time.time()
         
@@ -1116,14 +1010,14 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
         if not connections:
             # No connections to filter, return empty list
             llm_duration = time.time() - llm_start_time
-            await self.track_tool_timing_async(task_id, "llm_connection_filtering", llm_duration, self.prefilter_model, description=self._ui_text("analyzing_connections"), is_starting=False)
+            await self.track_tool_timing_async(task_id, "llm_connection_filtering", llm_duration, self.prefilter_llm, description=self._ui_text("analyzing_connections"), is_starting=False)
             return []
         
         # OPTIMIZATION: If <= 2 connections, skip LLM filtering and return all
         if len(connections) < 3:
             console.debug("Connection filtering skipped", f"Only {len(connections)} connections available", task_id=task_id, agent_id=self.agent_id)
             llm_duration = time.time() - llm_start_time
-            await self.track_tool_timing_async(task_id, "llm_connection_filtering", llm_duration, self.prefilter_model, description="Skipped filtering (low count)", is_starting=False)
+            await self.track_tool_timing_async(task_id, "llm_connection_filtering", llm_duration, self.prefilter_llm, description="Skipped filtering (low count)", is_starting=False)
             return connections
         
         # Build connection descriptions for LLM
@@ -1185,7 +1079,7 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
         
         try:
             llm_result = await llm_completion_async(
-                model=self.prefilter_model,
+                model=self.prefilter_llm,
                 prompt=prompt,
                 temperature=0.0,
                 max_tokens=50
@@ -1193,12 +1087,12 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
             llm_duration = time.time() - llm_start_time
             
             # Track completion
-            await self.track_tool_timing_async(task_id, "llm_connection_filtering", llm_duration, self.prefilter_model, description=self._ui_text("analyzing_connections"), is_starting=False)
+            await self.track_tool_timing_async(task_id, "llm_connection_filtering", llm_duration, self.prefilter_llm, description=self._ui_text("analyzing_connections"), is_starting=False)
             
             response, norm_token_info = normalize_llm_result(llm_result)
             
             # Log tokens
-            self._safe_add_tokens(task_id, norm_token_info, self.prefilter_model, "llm_connection_filtering", duration=llm_duration)
+            self._safe_add_tokens(task_id, norm_token_info, self.prefilter_llm, "llm_connection_filtering", duration=llm_duration)
             
             # Log raw response for debugging
             console.debug("Connection filtering LLM response", 
@@ -1215,7 +1109,7 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
                          task_id=task_id, agent_id=self.agent_id)
             return []
     
-    async def llm_generate_python(self, message: str, task_id: str = "", sql_schema: str = None, relevant_connections: list = None, rag_context: str = None, memory_context: str = None) -> str:
+    async def llm_generate_python(self, message: str, task_id: str = "", sql_schema: str = None, relevant_connections: list = None, memory_context: str = None) -> str:
         """
         Generate Python code to accomplish the task.
         
@@ -1224,7 +1118,6 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
             task_id: Task ID for logging
             sql_schema: Optional SQL schema string
             relevant_connections: Optional list of filtered connections (if None, uses all)
-            rag_context: Optional RAG context from File Search
             memory_context: Optional long-term memory facts retrieved via embeddings
         
         Returns:
@@ -1233,15 +1126,10 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
         # sql_schema_section will be built AFTER schema is fetched (if needed)
         sql_schema_section = ""
         
-        # Build agent context section if available
+        # Build system prompt section if available
         agent_context_section = ""
-        if self.agent_context:
-            agent_context_section = f"\n\nContext:\n{self.agent_context}"
-        
-        # Build RAG context section if available
-        rag_context_section = ""
-        if rag_context:
-            rag_context_section = f"\n\nKnowledge Base Context:\n{rag_context}"
+        if self.system_prompt:
+            agent_context_section = f"\n\nContext:\n{self.system_prompt}"
 
         # Build long-term memory section if available
         memory_context_section = ""
@@ -1304,7 +1192,7 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
                         light_llm=self.light_llm,
                         heavy_llm=self.heavy_llm,
                         agent_id=self.agent_id,
-                        validation_mode=self.validation_mode,
+                        validation_mode=False,
                     )
                     if isinstance(schema_result, dict) and "schema" in schema_result:
                         schema_text = str(schema_result.get("schema") or "")
@@ -1335,11 +1223,11 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
         connection_map = {}  # tool_name -> [connection_name, ...]
         try:
             # Track UI step for filtering
-            await self.track_tool_timing_async(task_id, "prefilter", None, self.prefilter_model, description=self._ui_text("analyzing_connections"), is_starting=True)
+            await self.track_tool_timing_async(task_id, "prefilter", None, self.prefilter_llm, description=self._ui_text("analyzing_connections"), is_starting=True)
             
             prefilter_start = time.time()
             prefilter_result = await llm_completion_async(
-                model=self.prefilter_model, # Use configured prefilter model
+                model=self.prefilter_llm, # Use configured prefilter llm
                 prompt=prefilter_prompt,
                 temperature=0.0,
                 max_tokens=1000  # Enough for direct answers or comma-separated tool list
@@ -1361,12 +1249,12 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
                 
                 # Track completion
                 await self.track_tool_timing_async(
-                    task_id, "prefilter", prefilter_duration, self.prefilter_model,
+                    task_id, "prefilter", prefilter_duration, self.prefilter_llm,
                     description="Direct answer (no tools needed)", is_starting=False,
                     metadata={"direct_answer": True}
                 )
                 # Log prefilter tokens
-                self._safe_add_tokens(task_id, prefilter_tokens, self.prefilter_model, "prefilter", duration=prefilter_duration)
+                self._safe_add_tokens(task_id, prefilter_tokens, self.prefilter_llm, "prefilter", duration=prefilter_duration)
                 
                 console.debug("Prefilter direct answer", 
                              f"Answered directly without code generation ({prefilter_duration*1000:.0f}ms)", 
@@ -1379,6 +1267,86 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
             # Parse selected actions AND connection mapping
             selected_actions, connection_map = parse_prefilter_response(prefilter_response, connections)
             
+            # Show available actions in verbose mode
+            if self.verbose == "high":
+                from rich.panel import Panel
+                from rich.table import Table
+                from collections import defaultdict
+                
+                # Group actions by tool
+                actions_by_tool = defaultdict(list)
+                if isinstance(available_actions, dict):
+                    for tool, acts_set in available_actions.items():
+                        for act in acts_set:
+                            if act not in actions_by_tool[tool]:
+                                actions_by_tool[tool].append(act)
+                else:
+                    # Fallback if it's a list (legacy)
+                    for action in available_actions:
+                        parts = action.split(":")
+                        tool = parts[0] if parts else "unknown"
+                        act = ":".join(parts[1:]) if len(parts) > 1 else tool
+                        if act not in actions_by_tool[tool]:
+                            actions_by_tool[tool].append(act)
+                
+                # Identify internal framework tools
+                internal_tool_names = {"approval", "files", "llm", "lzmafilter", "sql", "gmail", "sheets", "drive", "calendar", "docs", "websearch"}
+                
+                # Create table with tools grouped by type
+                actions_table = Table(title="Available Actions for Agent", show_header=True, header_style="bold cyan")
+                actions_table.add_column("Tool", style="cyan", width=20)
+                actions_table.add_column("Actions", style="green")
+                actions_table.add_column("Type", style="dim yellow", width=12)
+                
+                # Display user-provided tools FIRST (higher priority for agent)
+                user_tools_added = False
+                for tool_name in sorted(actions_by_tool.keys()):
+                    if tool_name not in internal_tool_names:
+                        if not user_tools_added:
+                            user_tools_added = True
+                        
+                        acts = actions_by_tool[tool_name]
+                        actions_str = ", ".join(sorted(acts))
+                        
+                        # Mark selected tools
+                        is_selected = any(a.startswith(tool_name + ":") or a == tool_name or a == f"[{tool_name}]" for a in selected_actions)
+                        status_style = "bold green" if is_selected else "dim"
+                        
+                        actions_table.add_row(
+                            f"[{status_style}]{tool_name}[/{status_style}]",
+                            f"[{status_style}]{actions_str}[/{status_style}]",
+                            f"[bold magenta]User[/bold magenta]"
+                        )
+                
+                # Add separator
+                if user_tools_added:
+                    actions_table.add_row("[dim]─[/dim]", "[dim]─[/dim]", "[dim]─[/dim]")
+                
+                # Display internal tools (sandbox/framework only)
+                for tool_name in sorted(actions_by_tool.keys()):
+                    if tool_name in internal_tool_names:
+                        acts = actions_by_tool[tool_name]
+                        actions_str = ", ".join(sorted(acts))
+                        
+                        # Mark selected tools
+                        is_selected = any(a.startswith(tool_name + ":") or a == tool_name or a == f"[{tool_name}]" for a in selected_actions)
+                        actions_table.add_row(
+                            f"[{status_style}]{tool_name}[/{status_style}]",
+                            f"[{status_style}]{actions_str}[/{status_style}]",
+                            f"[dim white]Internal[/dim white]"
+                        )
+                
+                # Add legend/explanation at the bottom
+                actions_table.caption = (
+                    "[bold]Legend:[/bold] "
+                    "[bold magenta]User[/bold magenta] = Tools you provided (desktop, MCP servers) | "
+                    "[dim white]Internal[/dim white] = Sandbox-only tools (files, llm, approval)"
+                )
+                
+                actions_panel = Panel(actions_table, border_style="cyan", expand=False)
+                console.console.print(actions_panel)
+                console.console.print()  # Blank line
+            
             # Trace updating
             if self.current_trace:
                 from datetime import datetime
@@ -1390,7 +1358,7 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
                 self.current_trace.prefilter = PrefilterTrace(
                     started_at=pf_start_dt,
                     duration_ms=int(prefilter_duration * 1000),
-                    model_used=self.prefilter_model,
+                    model_used=self.prefilter_llm,
                     tools_available=tools_avail_count,
                     tools_selected=list(base_selected),
                     tools_rejected=tools_rej,
@@ -1405,18 +1373,25 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
                 task_id, 
                 "prefilter", 
                 prefilter_duration, 
-                self.prefilter_model, 
+                self.prefilter_llm,
                 description=self._ui_text("analyzing_connections"), 
                 is_starting=False,
                 metadata={"selected_tools": selected_actions, "connection_map": connection_map}
             )
             
             # Log prefilter tokens
-            self._safe_add_tokens(task_id, prefilter_tokens, self.prefilter_model, "prefilter", duration=prefilter_duration)
+            self._safe_add_tokens(task_id, prefilter_tokens, self.prefilter_llm, "prefilter", duration=prefilter_duration)
             
-            console.debug("Prefilter selected actions", 
-                         f"{selected_actions} connections={connection_map} ({prefilter_duration*1000:.0f}ms)", 
-                         task_id=task_id, agent_id=self.agent_id)
+            # Extract tool names without :EXECUTE suffix for cleaner summary
+            selected_tools = set()
+            for action in selected_actions:
+                tool_name = action.split(':')[0] if ':' in action else action
+                selected_tools.add(tool_name)
+            
+            # Log prefiltering completion with tool count
+            tool_count = len(selected_tools)
+            tool_label = "tool" if tool_count == 1 else "tools"
+            console.info("Prefiltering", f"— {tool_count} {tool_label} selected", task_id=task_id, agent_id=self.agent_id)
             
             # Build compressed API docs for only selected actions
             python_api_docs = build_filtered_api_docs(selected_actions, custom_descriptions=self.tool_descriptions)
@@ -1440,9 +1415,15 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
         
         # Log what we're using
         tools_info = ", ".join(selected_actions) if 'selected_actions' in dir() and selected_actions else str(available_tools if 'available_tools' in dir() else 'prefiltered')
-        console.debug("Generating Python code", 
-                     f"Actions: {tools_info}", 
-                     task_id=task_id, agent_id=self.agent_id)
+        # Extract unique tool names without :EXECUTE suffix
+        selected_tools = set()
+        for action in tools_info.split(", "):
+            tool_name = action.split(':')[0] if ':' in action else action
+            if tool_name:
+                selected_tools.add(tool_name.strip())
+        tools_summary = ", ".join(sorted(selected_tools)) if selected_tools else "(none)"
+        
+        console.info("Code generation", "started", task_id=task_id, agent_id=self.agent_id)
 
         # ========== AWAIT SQL SCHEMA (already fetching in parallel) ==========
         needs_sql = any(a.lower().startswith('sql:') for a in selected_actions)
@@ -1486,7 +1467,7 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
         if python_examples:
             examples_section = f"\n\nEXAMPLES:\n{python_examples}"
 
-        python_prompt = f"""Task: "{message}"{sql_schema_section}{connection_context_section}{agent_context_section}{rag_context_section}{memory_context_section}
+        python_prompt = f"""Task: "{message}"{sql_schema_section}{connection_context_section}{agent_context_section}{memory_context_section}
 Date: {current_date_str}
 
 BEFORE CODING: Check if task is vague (missing file, email, dates, names). DO NOT guess. Output ONLY a print() asking clarification.
@@ -1503,6 +1484,7 @@ RULES:
 - ONLY Python code, NO comments/explanations/docstrings. Minimal code. All tools async (await).
 - NEVER pass connection_name to tools—auto-detected.
 - CRITICAL ASYNC: Runs in ALREADY RUNNING event loop. DO NOT use asyncio.run(). Define `async def main():...` & `await main()`.
+- RULE: INTERNAL `files` tool ONLY reads sandbox-uploaded files. DO NOT use `files` to access user desktop/system/local files. Use tools like `filesystem` instead if needed.
 - VISIBILITY: User CANNOT see local files. Only print() is visible. Use Drive/Docs/Sheets for sharing files.
 - CRITICAL LANGUAGE: Match user's language for ALL text: print(), titles, desc="...", search queries, prompts, document content.
 - FORMATTING: Markdown. **bold** titles, lists, format_table(data, title="...") for data. Always print final answer.
@@ -1518,12 +1500,12 @@ OUTPUT: Python code ONLY. NO comments. Only print() is visible, use markdown."""
         try:
             # Track starting entry BEFORE LLM call (so frontend sees "Planning..." with thinking animation)
             # Use async version to properly await the callback
-            await self.track_tool_timing_async(task_id, "llm_code_generation", None, self.code_generation_model, description=self._ui_text("planning"), is_starting=True)
+            await self.track_tool_timing_async(task_id, "llm_code_generation", None, self.code_generation_llm, description=self._ui_text("planning"), is_starting=True)
             
             llm_start_time = time.time()
             
             llm_result = await llm_completion_async(
-                model=self.code_generation_model, 
+                model=self.code_generation_llm,
                 prompt=python_prompt, 
                 temperature=0.0, 
                 max_tokens=1500,
@@ -1533,21 +1515,21 @@ OUTPUT: Python code ONLY. NO comments. Only print() is visible, use markdown."""
             
             # Track completion (this updates the starting entry with duration)
             # Use async version to properly await the callback
-            await self.track_tool_timing_async(task_id, "llm_code_generation", llm_duration, self.code_generation_model, description=self._ui_text("planning"), is_starting=False)
-            self.track_tool_usage(task_id, "llm_code_generation", self.code_generation_model)
+            await self.track_tool_timing_async(task_id, "llm_code_generation", llm_duration, self.code_generation_llm, description=self._ui_text("planning"), is_starting=False)
+            self.track_tool_usage(task_id, "llm_code_generation", self.code_generation_llm)
             
             response, norm_token_info = normalize_llm_result(llm_result)
             
             # Log tokens
             try: 
-                self._add_tokens(task_id, norm_token_info, self.code_generation_model, "llm_code_generation", duration=llm_duration)
+                self._add_tokens(task_id, norm_token_info, self.code_generation_llm, "llm_code_generation", duration=llm_duration)
             except Exception: 
                 pass
             
             # Log raw response (full, without truncation)
             console.debug(
                 "LLM Python generation",
-                response,
+                f"Generated {len(response)} chars",
                 task_id=task_id,
                 agent_id=self.agent_id,
             )
@@ -1564,7 +1546,7 @@ OUTPUT: Python code ONLY. NO comments. Only print() is visible, use markdown."""
                         self.current_trace.code_generation = CodeGenTrace(
                             started_at=cg_start_dt,
                             duration_ms=int(llm_duration * 1000),
-                            model_used=self.code_generation_model,
+                            model_used=self.code_generation_llm,
                             system_prompt=python_prompt if self.trace_mode == "full" else "...",
                             code_generated=python_code,
                             tokens_input=norm_token_info.get("input_tokens", 0),
@@ -1608,7 +1590,7 @@ OUTPUT: Python code ONLY. NO comments. Only print() is visible, use markdown."""
                                        task_id=task_id, agent_id=self.agent_id)
                 
                 console.debug("Python code extracted", 
-                             f"{len(python_code)} chars\n\nFirst 1000 chars:\n{python_code[:1000]}", 
+                             f"Ready to execute ({len(python_code)} chars)", 
                              task_id=task_id, agent_id=self.agent_id)
                 return python_code.strip()
             else:

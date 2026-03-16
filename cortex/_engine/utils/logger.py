@@ -2,14 +2,14 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any
-from .pricing import llm_pricing
+from typing import Dict, Any, Optional
 
 class CORTEXLogger:
 
-    def __init__(self, log_file: str = ".delfhos/tasks.jsonl"):
-        self.log_file = Path(log_file)
-        if self.log_file.parent and str(self.log_file.parent) != ".":
+    def __init__(self, log_file: Optional[str] = None):
+        # Legacy task-file logging is opt-in only.
+        self.log_file = Path(log_file) if log_file else None
+        if self.log_file and self.log_file.parent and str(self.log_file.parent) != ".":
             self.log_file.parent.mkdir(parents=True, exist_ok=True)
         self.active_tasks: Dict[str, Dict[str, Any]] = {}
         
@@ -31,8 +31,7 @@ class CORTEXLogger:
             "input_tokens": 0,
             "output_tokens": 0,
             "llm_calls": 0,
-            "total_cost": 0.0,
-            "cost_breakdown": [],
+            "llm_breakdown": [],
             "status": "running",
         }
     
@@ -54,23 +53,18 @@ class CORTEXLogger:
                 self.active_tasks[task_id]["image_calls"] += 1
                 self.active_tasks[task_id]["images_used"] += image_count
             
-            # Calculate cost if model is provided
+            # Track per-call usage metadata if model is provided
             if model:
-                cost, cost_breakdown = llm_pricing.calculate_cost(model, input_tokens, output_tokens, image_count=image_count)
-                self.active_tasks[task_id]["total_cost"] += cost
-                
-                # Add to cost breakdown for detailed tracking
-                cost_entry = {
+                llm_entry = {
                     "model": model,
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "image_count": image_count,
-                    "cost": cost,
                     "duration": duration,
                     "function_name": function_name or "unknown",
                     "timestamp": datetime.now().isoformat()
                 }
-                self.active_tasks[task_id]["cost_breakdown"].append(cost_entry)
+                self.active_tasks[task_id]["llm_breakdown"].append(llm_entry)
     
     def complete_task(self, task_id: str, status: str = "completed", computational_time: float = None):
         if task_id not in self.active_tasks:
@@ -94,6 +88,9 @@ class CORTEXLogger:
         
 
     def _write_log_entry(self, task_data: Dict[str, Any]):
+        if not self.log_file:
+            return
+
         try:
             log_entry = {
                 "task_id": task_data["task_id"],
@@ -108,8 +105,7 @@ class CORTEXLogger:
                 "input_tokens": task_data.get("input_tokens", 0),
                 "output_tokens": task_data.get("output_tokens", 0),
                 "llm_calls": task_data.get("llm_calls", 0),
-                "total_cost_usd": round(task_data.get("total_cost", 0.0), 6),
-                "cost_breakdown": task_data.get("cost_breakdown", []),
+                "llm_breakdown": task_data.get("llm_breakdown", []),
                 "status": task_data["status"],
             }
             
@@ -120,6 +116,9 @@ class CORTEXLogger:
             print(f"⚠️ [Logger] Failed to write log entry: {e}")
     
     def get_log_stats(self) -> Dict[str, Any]:
+        if not self.log_file:
+            return self._empty_stats()
+
         if not self.log_file.exists():
             return self._empty_stats()
         
@@ -171,4 +170,9 @@ class CORTEXLogger:
             return {"error": str(e), "total_tasks": 0, "total_tokens": 0, "log_file": str(self.log_file)}
     
     def _empty_stats(self) -> Dict[str, Any]:
-        return {"total_tasks": 0, "total_tokens": 0, "total_iterations": 0, "log_file": str(self.log_file)}
+        return {
+            "total_tasks": 0,
+            "total_tokens": 0,
+            "total_iterations": 0,
+            "log_file": str(self.log_file) if self.log_file else None,
+        }

@@ -23,7 +23,12 @@ Optional flags:
 import asyncio
 import os
 import shutil
+import warnings
 from typing import Dict, List
+
+# Suppress specific warnings
+warnings.filterwarnings("ignore", category=Warning, module="urllib3")
+warnings.filterwarnings("ignore", message="You are using a non-supported Python version")
 
 from delfhos import Agent, Chat, Memory, MCP, ToolException, WebSearch, tool
 
@@ -98,10 +103,10 @@ def build_optional_external_tools() -> List[object]:
     tools: List[object] = []
 
     if os.getenv("USE_WEBSEARCH_DEMO") == "1":
-        tools.append(WebSearch(confirm="read"))
+        tools.append(WebSearch())
 
     if os.getenv("USE_MCP_DEMO") == "1" and shutil.which("npx"):
-        tools.append(MCP("server-filesystem", args=["."], cache=True, confirm="write"))
+        tools.append(MCP("server-filesystem", args=["."], cache=True))
 
     return tools
 
@@ -121,15 +126,14 @@ async def main() -> None:
 
     with Agent(
         tools=tools,
+        llm="gemini-3.1-flash-lite-preview",
         system_prompt="You are a concise operations assistant focused on clear action plans.",
         confirm="write",
         chat=chat,
         memory=memory,
         on_confirm=on_confirm,
-        trace="minimal",
+        trace="minimal"
     ) as agent:
-        print("\\n=== Agent Showcase Start ===")
-        print(f"Agent ID: {agent.agent_id}")
 
         # Sync run: combines multiple tool types in one task.
         agent.run(
@@ -138,39 +142,11 @@ async def main() -> None:
             timeout=120,
         )
 
-        # Approval path: save_note has write confirm policy.
-        agent.run(
-            "Save a short note titled Weekly Plan with content 'Focus on retention and SLA improvements'.",
-            timeout=120,
-        )
-
-        # Async run: class-based tool + error-handled tool in same instruction.
-        await agent.arun(
-            "Use kpi_summary with metrics churn=2.1, activation=43.0, nps=58. "
-            "Then call risky_division with a=10 and b=0 and explain the safe fallback.",
-            timeout=120,
-        )
-
-        # State + telemetry APIs.
-        print("\\n=== Agent Info ===")
-        print(agent.info())
-        print("\\n=== Usage ===")
-        print(agent.usage)
-
         if agent.last_trace:
             agent.last_trace.to_json("agent_demo_trace.json")
             print("\\nTrace saved to agent_demo_trace.json")
 
-    # Headline moment: retrieval from long-term Memory after session-close extraction.
-    print("\n=== Retrieved Memory (headline) ===")
-    recalled = memory.retrieve("What is my favorite city?", top_k=3)
-    if not recalled:
-        # Keep demo output stable across model/provider differences in memory extraction.
-        memory.save("User's favorite city is Madrid.")
-        recalled = memory.retrieve("What is my favorite city?", top_k=3)
-    print(recalled or "(no memory match)")
-
-    print("=== Agent Showcase End ===")
+    
 
 
 if __name__ == "__main__":

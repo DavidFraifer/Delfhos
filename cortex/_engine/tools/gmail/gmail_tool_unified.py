@@ -193,7 +193,16 @@ async def gmail_tool_unified(
         elif action == "SEND":
             return await _execute_send(gmail_client, params, task_id, agent_id)
         else:
-            return f"Unknown action: {action}. Available actions: READ, SEND"
+            # Format beautiful error with available actions
+            error_msg = (
+                f"❌ Unknown Gmail action: '{action}'\n\n"
+                f"📋 Available actions for Gmail:\n"
+                f"    • READ - Fetch emails from inbox/sent/drafts/spam/trash\n"
+                f"    • SEND - Send an email\n\n"
+                f"💡 Use one of these actions in your next request."
+            )
+            console.error(f"[GMAIL ERROR]", error_msg, task_id=task_id, agent_id=agent_id)
+            return error_msg
     
     except Exception as e:
         error_msg = f"Gmail {action} failed: {str(e)}"

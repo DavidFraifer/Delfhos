@@ -6,9 +6,9 @@ import asyncio
 import base64
 import os
 import requests
-from typing import List, Dict, Any, Optional, Union
-from pathlib import Path
+from typing import List, Dict, Any, Optional, Union, Tuple
 from concurrent.futures import ThreadPoolExecutor
+from delfhos.errors import LLMExecutionError
 
 # Increase default thread pool for asyncio.to_thread() calls.
 # The default (min(32, os.cpu_count()+4)) can bottleneck parallel LLM calls
@@ -16,17 +16,64 @@ from concurrent.futures import ThreadPoolExecutor
 _llm_thread_pool = ThreadPoolExecutor(max_workers=20)
 
 
-def _get_api_key(model: str) -> str:
+PROVIDER_ALIASES = {
+    "google": "google",
+    "gemini": "google",
+    "openai": "openai",
+    "anthropic": "anthropic",
+    "inception": "inception",
+}
+
+
+def resolve_model(model: str) -> Tuple[str, str]:
+    """Resolve provider and provider-native model id from a user model string.
+
+    Supported forms:
+      - Plain model id: gemini-2.5-flash, gpt-4.1, claude-3-7-sonnet
+      - Provider-prefixed: google/gemini-2.5-flash, openai:gpt-4.1
+    """
+    if not model or not isinstance(model, str):
+        raise_error("LLM-001", context={"model": model, "error": "Model identifier must be a non-empty string"})
+
+    model_text = model.strip()
+    lowered = model_text.lower()
+
+    for sep in ("/", ":"):
+        if sep in model_text:
+            maybe_provider, maybe_model = model_text.split(sep, 1)
+            provider = PROVIDER_ALIASES.get(maybe_provider.strip().lower())
+            if provider and maybe_model.strip():
+                return provider, maybe_model.strip()
+
+    if lowered.startswith("gemini"):
+        return "google", model_text
+    if lowered.startswith("claude"):
+        return "anthropic", model_text
+    if lowered.startswith(("gpt", "o1", "o3", "o4", "chatgpt")) or "gpt-" in lowered:
+        return "openai", model_text
+    if lowered.startswith("mercury"):
+        return "inception", model_text
+
+    raise_error(
+        "LLM-001",
+        context={
+            "model": model,
+            "error": "Could not infer provider from model name",
+            "hint": "Use google/<model>, openai/<model>, or anthropic/<model>",
+        },
+    )
+
+
+def _get_api_key(provider: str) -> str:
     from ..config import get_cached_api_key
-    if model.startswith("gemini"):
-        return get_cached_api_key('gemini')
-    elif model.startswith("mercury"):
+
+    if provider == "inception":
         key = os.getenv("INCEPTION_AI")
         if not key:
-            raise_error("LLM-001", context={"model": model, "error": "INCEPTION_AI env var not set"})
+            raise_error("LLM-001", context={"provider": provider, "error": "INCEPTION_AI env var not set"})
         return key
-    else:
-        raise_error("LLM-001", context={"model": model, "supported_models": ["gemini*", "mercury*"]})
+
+    return get_cached_api_key(provider)
 
 
 async def llm_completion_async(
@@ -51,15 +98,16 @@ async def llm_completion_async(
         else:
             prompt = f"{current_context}\n\n{prompt}"
 
-    api_key = _get_api_key(model)
+    provider, provider_model = resolve_model(model)
+    api_key = _get_api_key(provider)
 
-    if model.startswith("gemini"):
+    if provider == "google":
         # Run Gemini in dedicated thread pool for better parallelism
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             _llm_thread_pool,
             _gemini_sync,
-            model,
+            provider_model,
             prompt,
             system_message,
             temperature,
@@ -70,12 +118,42 @@ async def llm_completion_async(
             images,
         )
 
-    elif model.startswith("mercury"):
+    if provider == "openai":
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            _llm_thread_pool,
+            _openai_sync,
+            provider_model,
+            prompt,
+            system_message,
+            temperature,
+            max_tokens,
+            response_format,
+            api_key,
+            images,
+        )
+
+    if provider == "anthropic":
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            _llm_thread_pool,
+            _anthropic_sync,
+            provider_model,
+            prompt,
+            system_message,
+            temperature,
+            max_tokens,
+            response_format,
+            api_key,
+            images,
+        )
+
+    if provider == "inception":
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             _llm_thread_pool,
             _mercury_sync,
-            model,
+            provider_model,
             prompt,
             system_message,
             temperature,
@@ -83,8 +161,7 @@ async def llm_completion_async(
             api_key,
         )
 
-    else:
-        raise_error("LLM-001", context={"model": model, "supported_models": ["gemini*", "mercury*"], "function": "llm_completion_async"})
+    raise_error("LLM-001", context={"model": model, "provider": provider, "function": "llm_completion_async"})
 
 
 # --- Client Caching -------------------------------------------------------------
@@ -142,8 +219,8 @@ def _extract_gemini_tokens(response, prompt: str, system_message: str, content: 
     """Helper to extract token usage from Gemini response, with fallback to estimation."""
     try:
         if hasattr(response, "usage_metadata") and response.usage_metadata:
-            input_tokens = response.usage_metadata.prompt_token_count
-            output_tokens = response.usage_metadata.candidates_token_count
+            input_tokens = response.usage_metadata.prompt_token_count or 0
+            output_tokens = response.usage_metadata.candidates_token_count or 0
         else:
             # Fallback to estimate if metadata is missing (saves network calls)
             total_input = prompt + (system_message or "")
@@ -166,7 +243,43 @@ def _extract_gemini_tokens(response, prompt: str, system_message: str, content: 
             "total_tokens": estimated_total,
             "image_count": len(images) if images else 0,
         }
-    return token_info
+    return _normalize_token_info(token_info, prompt=prompt, system_message=system_message, content=content, images=images)
+
+
+def _safe_non_negative_int(value: Any, fallback: int = 0) -> int:
+    try:
+        if value is None:
+            return max(int(fallback), 0)
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return max(int(fallback), 0)
+
+
+def _normalize_token_info(token_info: Optional[Dict[str, Any]], prompt: str, system_message: str, content: str, images: Optional[List[Any]] = None) -> Dict[str, int]:
+    """Return stable token accounting across providers.
+
+    Guarantees:
+    - input/output/total are non-negative ints
+    - total is at least input + output
+    - image_count is a non-negative int
+    """
+    info = token_info or {}
+    estimated_input = len((system_message or "") + (prompt or "")) // 4
+    estimated_output = len(content or "") // 4
+
+    input_tokens = _safe_non_negative_int(info.get("input_tokens"), fallback=estimated_input)
+    output_tokens = _safe_non_negative_int(info.get("output_tokens"), fallback=estimated_output)
+    provided_total = _safe_non_negative_int(info.get("total_tokens"), fallback=input_tokens + output_tokens)
+    image_count = _safe_non_negative_int(info.get("image_count"), fallback=len(images) if images else 0)
+
+    total_tokens = max(provided_total, input_tokens + output_tokens)
+
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "image_count": image_count,
+    }
 
 def _gemini_sync(model: str, prompt: str, system_message: str, temperature: float, max_tokens: int, response_format: str, api_key: str, use_web_search: bool, images: Optional[List[Union[str, Dict[str, Any]]]] = None) -> tuple[str, dict]:
     client = get_gemini_client(api_key)
@@ -246,33 +359,332 @@ def _mercury_sync(model: str, prompt: str, system_message: str, temperature: flo
     
     session = _get_mercury_session(api_key)
     
-    response = session.post(
-        "https://api.inceptionlabs.ai/v1/chat/completions",
-        json={
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "top_p": 0.6,  # Narrower sampling for faster generation
-        },
-        timeout=30
-    )
-    
-    if response.status_code != 200:
-        raise LLMExecutionError(detail=f"Mercury API error {response.status_code}: {response.text[:200]}")
+    base_payload = {
+        "model": model,
+        "messages": messages,
+        "top_p": 0.6,  # Narrower sampling for faster generation
+    }
+    payload_variants: List[Dict[str, Any]] = [
+        {"max_tokens": max_tokens, "temperature": temperature},
+        {"max_completion_tokens": max_tokens, "temperature": temperature},
+        {"max_tokens": max_tokens},
+        {"max_completion_tokens": max_tokens},
+    ]
+
+    response = None
+    last_error = None
+    for variant in payload_variants:
+        payload = dict(base_payload)
+        payload.update(variant)
+        response = session.post(
+            "https://api.inceptionlabs.ai/v1/chat/completions",
+            json=payload,
+            timeout=30,
+        )
+        if response.status_code < 400:
+            break
+
+        details = _openai_error_details(response)
+        msg_lower = (details.get("message") or "").lower()
+        code = details.get("code")
+        is_param_shape_issue = (
+            code == "unsupported_parameter"
+            or "unsupported parameter" in msg_lower
+            or "unknown parameter" in msg_lower
+            or "is not supported with this model" in msg_lower
+        )
+        last_error = response
+        if is_param_shape_issue:
+            continue
+        break
+
+    if response is None or response.status_code >= 400:
+        err_response = last_error or response
+        if err_response is None:
+            raise LLMExecutionError(detail="Mercury API error: request failed before receiving a response")
+        raise LLMExecutionError(detail=f"Mercury API error {err_response.status_code}: {err_response.text[:300]}")
     
     data = response.json()
-    content = data["choices"][0]["message"]["content"].strip()
+    choices = data.get("choices", [])
+    if not choices:
+        raise LLMExecutionError(detail="Mercury API returned no choices")
+    message = choices[0].get("message", {})
+    content = _openai_extract_content(message.get("content", ""))
     usage = data.get("usage", {})
+    prompt_tokens = usage.get("prompt_tokens")
+    completion_tokens = usage.get("completion_tokens")
+    total_tokens = usage.get("total_tokens")
+    fallback_input = len((system_message or "") + prompt) // 4
+    fallback_output = len(content) // 4
     
     token_info = {
-        "input_tokens": usage.get("prompt_tokens", len(prompt) // 4),
-        "output_tokens": usage.get("completion_tokens", len(content) // 4),
-        "total_tokens": usage.get("total_tokens", (len(prompt) + len(content)) // 4),
+        "input_tokens": prompt_tokens if isinstance(prompt_tokens, int) else fallback_input,
+        "output_tokens": completion_tokens if isinstance(completion_tokens, int) else fallback_output,
+        "total_tokens": total_tokens if isinstance(total_tokens, int) else (fallback_input + fallback_output),
         "image_count": 0,
     }
     
-    return content, token_info
+    return content, _normalize_token_info(token_info, prompt=prompt, system_message=system_message, content=content)
+
+
+def _prepare_data_url(image: Union[str, Dict[str, Any]]) -> Optional[str]:
+    if isinstance(image, dict):
+        data = image.get("data")
+        if not data:
+            return None
+        mime_type = image.get("mime_type", "image/png")
+        return f"data:{mime_type};base64,{data}"
+
+    if isinstance(image, str):
+        if image.startswith("data:"):
+            return image
+        return f"data:image/png;base64,{image}"
+
+    return None
+
+
+def _openai_extract_content(message_content: Any) -> str:
+    if isinstance(message_content, str):
+        return message_content.strip()
+    if isinstance(message_content, list):
+        parts = []
+        for part in message_content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                parts.append(str(part.get("text", "")))
+        return "".join(parts).strip()
+    return str(message_content).strip()
+
+
+def _openai_error_details(response: requests.Response) -> Dict[str, Any]:
+    try:
+        data = response.json()
+    except Exception:
+        return {
+            "code": None,
+            "param": None,
+            "message": response.text[:300],
+        }
+
+    err = data.get("error", {}) if isinstance(data, dict) else {}
+    if not isinstance(err, dict):
+        err = {}
+    return {
+        "code": err.get("code"),
+        "param": err.get("param"),
+        "message": str(err.get("message", "")),
+    }
+
+
+def _anthropic_error_details(response: requests.Response) -> Dict[str, Any]:
+    try:
+        data = response.json()
+    except Exception:
+        return {
+            "type": None,
+            "message": response.text[:300],
+        }
+
+    err = data.get("error", {}) if isinstance(data, dict) else {}
+    if not isinstance(err, dict):
+        err = {}
+    return {
+        "type": err.get("type"),
+        "message": str(err.get("message", "")),
+    }
+
+
+def _openai_sync(
+    model: str,
+    prompt: str,
+    system_message: str,
+    temperature: float,
+    max_tokens: int,
+    response_format: str,
+    api_key: str,
+    images: Optional[List[Union[str, Dict[str, Any]]]],
+) -> tuple[str, dict]:
+    session = _get_openai_session(api_key)
+
+    user_content: Union[str, List[Dict[str, Any]]] = prompt
+    if images:
+        user_parts: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for image in images:
+            data_url = _prepare_data_url(image)
+            if data_url:
+                user_parts.append({"type": "image_url", "image_url": {"url": data_url}})
+        user_content = user_parts
+
+    messages: List[Dict[str, Any]] = []
+    if system_message:
+        messages.append({"role": "system", "content": system_message})
+    messages.append({"role": "user", "content": user_content})
+
+    base_payload: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+    }
+    if response_format == "json":
+        base_payload["response_format"] = {"type": "json_object"}
+
+    # OpenAI model families differ in accepted generation params.
+    # Try modern names first, then gracefully fall back.
+    payload_variants: List[Dict[str, Any]] = [
+        {"max_completion_tokens": max_tokens, "temperature": temperature},
+        {"max_tokens": max_tokens, "temperature": temperature},
+        {"max_completion_tokens": max_tokens},
+        {"max_tokens": max_tokens},
+    ]
+
+    response = None
+    last_error = None
+    for variant in payload_variants:
+        payload = dict(base_payload)
+        payload.update(variant)
+        response = session.post(_get_openai_base_url() + "/chat/completions", json=payload, timeout=45)
+        if response.status_code < 400:
+            break
+
+        details = _openai_error_details(response)
+        msg_lower = (details.get("message") or "").lower()
+        code = details.get("code")
+
+        # Continue only for parameter-shape incompatibilities.
+        is_param_shape_issue = (
+            code == "unsupported_parameter"
+            or "unsupported parameter" in msg_lower
+            or "unknown parameter" in msg_lower
+            or "is not supported with this model" in msg_lower
+        )
+
+        if is_param_shape_issue:
+            last_error = response
+            continue
+
+        last_error = response
+        break
+
+    if response is None or response.status_code >= 400:
+        err_response = last_error or response
+        if err_response is None:
+            raise LLMExecutionError(detail="OpenAI API error: request failed before receiving a response")
+        raise LLMExecutionError(detail=f"OpenAI API error {err_response.status_code}: {err_response.text[:300]}")
+
+    data = response.json()
+    choices = data.get("choices", [])
+    if not choices:
+        raise LLMExecutionError(detail="OpenAI API returned no choices")
+
+    message = choices[0].get("message", {})
+    content = _openai_extract_content(message.get("content", ""))
+    usage = data.get("usage", {})
+    input_tokens = usage.get("prompt_tokens", len((system_message or "") + prompt) // 4)
+    output_tokens = usage.get("completion_tokens", len(content) // 4)
+
+    token_info = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": usage.get("total_tokens", input_tokens + output_tokens),
+        "image_count": len(images) if images else 0,
+    }
+    return content, _normalize_token_info(token_info, prompt=prompt, system_message=system_message, content=content, images=images)
+
+
+def _anthropic_sync(
+    model: str,
+    prompt: str,
+    system_message: str,
+    temperature: float,
+    max_tokens: int,
+    response_format: str,
+    api_key: str,
+    images: Optional[List[Union[str, Dict[str, Any]]]],
+) -> tuple[str, dict]:
+    session = _get_anthropic_session(api_key)
+
+    system_prompt = system_message or ""
+    if response_format == "json":
+        system_prompt = (system_prompt + "\n\nReturn only valid JSON.").strip()
+
+    if images:
+        user_content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for image in images:
+            data_url = _prepare_data_url(image)
+            if not data_url:
+                continue
+            header, encoded = data_url.split(",", 1)
+            mime_type = header.split(";")[0].split(":", 1)[1]
+            user_content.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": mime_type,
+                        "data": encoded,
+                    },
+                }
+            )
+    else:
+        user_content = [{"type": "text", "text": prompt}]
+
+    base_payload: Dict[str, Any] = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": user_content}],
+    }
+    if system_prompt:
+        base_payload["system"] = system_prompt
+
+    # Some Claude variants may reject optional generation params.
+    payload_variants: List[Dict[str, Any]] = [
+        {"temperature": temperature},
+        {},
+    ]
+
+    response = None
+    last_error = None
+    for variant in payload_variants:
+        payload = dict(base_payload)
+        payload.update(variant)
+        response = session.post(_get_anthropic_base_url() + "/messages", json=payload, timeout=45)
+        if response.status_code < 400:
+            break
+
+        details = _anthropic_error_details(response)
+        msg_lower = (details.get("message") or "").lower()
+        err_type = str(details.get("type") or "")
+        is_param_shape_issue = (
+            err_type == "invalid_request_error"
+            and (
+                "temperature" in msg_lower
+                or "unsupported" in msg_lower
+                or "unknown" in msg_lower
+            )
+        )
+        last_error = response
+        if is_param_shape_issue:
+            continue
+        break
+
+    if response is None or response.status_code >= 400:
+        err_response = last_error or response
+        if err_response is None:
+            raise LLMExecutionError(detail="Anthropic API error: request failed before receiving a response")
+        raise LLMExecutionError(detail=f"Anthropic API error {err_response.status_code}: {err_response.text[:300]}")
+
+    data = response.json()
+    content_parts = data.get("content", [])
+    text = "".join(str(p.get("text", "")) for p in content_parts if isinstance(p, dict) and p.get("type") == "text").strip()
+    usage = data.get("usage", {})
+
+    input_tokens = usage.get("input_tokens", len((system_prompt or "") + prompt) // 4)
+    output_tokens = usage.get("output_tokens", len(text) // 4)
+    token_info = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "image_count": len(images) if images else 0,
+    }
+    return text, _normalize_token_info(token_info, prompt=prompt, system_message=system_message, content=text, images=images)
 
 
 # --- Mercury Session Caching (connection reuse) ---
@@ -288,3 +700,44 @@ def _get_mercury_session(api_key: str) -> requests.Session:
         })
         _mercury_sessions[api_key] = s
     return _mercury_sessions[api_key]
+
+
+_openai_sessions: Dict[str, requests.Session] = {}
+_anthropic_sessions: Dict[str, requests.Session] = {}
+
+
+def _get_openai_base_url() -> str:
+    return os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+
+
+def _get_anthropic_base_url() -> str:
+    return os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1").rstrip("/")
+
+
+def _get_openai_session(api_key: str) -> requests.Session:
+    cache_key = f"{_get_openai_base_url()}::{api_key}"
+    if cache_key not in _openai_sessions:
+        session = requests.Session()
+        session.headers.update(
+            {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+        )
+        _openai_sessions[cache_key] = session
+    return _openai_sessions[cache_key]
+
+
+def _get_anthropic_session(api_key: str) -> requests.Session:
+    cache_key = f"{_get_anthropic_base_url()}::{api_key}"
+    if cache_key not in _anthropic_sessions:
+        session = requests.Session()
+        session.headers.update(
+            {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            }
+        )
+        _anthropic_sessions[cache_key] = session
+    return _anthropic_sessions[cache_key]

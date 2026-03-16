@@ -12,38 +12,32 @@ class LLMDoc:
 
     TOOL_NAME = "llm"
 
-    ACTIONS = ["DRAFT", "ANALYZE", "EXTRACT"]
+    ACTIONS = ["CALL"]
 
     ACTION_SUMMARIES = {
-        "DRAFT":   "Generate text content — emails, reports, messages. Returns ready-to-use text.",
-        "ANALYZE": "Analyze, summarize, or process text/data. Returns str.",
-        "EXTRACT": "Extract structured JSON from text or images. Returns dict (already parsed).",
+        "CALL": "Universal method to analyze text/images, generate content or extract structures.",
     }
 
     PYTHON_API = {
-        "ANALYZE": """\
-# llm.analyze() → str
-summary = await llm.analyze("Sum: " + str(data), model="heavy", desc="Analyzing")
-# model: "heavy" (complex), "light" (formatting). Use string concat for JSON, NO f-strings.
-""",
+        "CALL": """\
+# llm.call() → str (Universal method for ANY task)
+# Text task:
+summary = await llm.call("Summarize this: " + str(data), desc="Analyzing")
 
-        "EXTRACT": """\
-# llm.extract() → dict (parsed)
-prompt = "Extract. Return JSON: " + '{"name": "str"}' + ". Text: " + text
-data = await llm.extract(prompt, model="light", desc="Extracting")
-""",
+# File analysis (ALWAYS pass inside file_data=[...], prompt must be first positional arg)
+vision = await llm.call("Describe this image in detail", file_data=[file_content])
 
-        "DRAFT": """\
-# llm.analyze() also drafts
-draft = await llm.analyze("Write email: " + ctx, model="light", desc="Drafting")
+# Structured Extraction:
+json_str = await llm.call("Extract. Return strictly JSON: " + '{"name": "str"}')
+
+
 """,
     }
 
     EXAMPLES = {
-        "EXTRACT": """\
-# Extract structured data from an email body
-prompt = "Extract sender's name and deadline. Return JSON: " + '{"name": "str", "deadline": "YYYY-MM-DD"}' + ". Email: " + email["body"]
-data = await llm.extract(prompt, model="light", desc="Extracting deadline")
-print(data.get("deadline"))
+        "CALL": """\
+# Extract structured data from a file
+prompt = "Extract sender's name and deadline. Return ONLY JSON: " + '{"name": "str", "deadline": "YYYY-MM-DD"}'
+data = await llm.call(prompt, file_data=[file_content], desc="Extracting deadline")
 """,
     }

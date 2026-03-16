@@ -49,7 +49,7 @@ class Connection:
                 "refresh_token": "...",
                 "email": "user@company.com"
             },
-            actions_allowed=["read", "send"]  # Can't delete
+            allowed=["read", "send"]  # Can't delete
         )
         
         # Use in agent
@@ -65,7 +65,7 @@ class Connection:
         connection_name: str,
         auth_type: AuthType,
         credentials: Dict[str, Any],
-        actions_allowed: Optional[List[str]] = None,
+        allowed: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         connection_id: Optional[str] = None,
         confirm: Union[bool, List[str], str] = False
@@ -78,7 +78,7 @@ class Connection:
             connection_name: User-defined name for this connection (e.g., "work_email", "finance_drive")
             auth_type: Authentication type (OAuth2, API Key, etc.)
             credentials: Authentication credentials
-            actions_allowed: List of allowed actions (e.g., ["read", "send"]). None = all allowed
+            allowed: List of allowed actions (e.g., ["read", "send"]). None = all allowed
             metadata: Additional connection metadata (service URL, region, etc.)
             connection_id: Optional custom ID, auto-generated if not provided
             confirm: Mode for user confirmation ('write', 'all', 'delete', entirely boolean)
@@ -93,7 +93,7 @@ class Connection:
         self._credentials = credentials
         
         # Permissions
-        self.actions_allowed = set(actions_allowed) if actions_allowed else None  # None = all allowed
+        self.allowed = set(allowed) if allowed else None  # None = all allowed
         self.confirm = confirm
         
         # Metadata
@@ -117,10 +117,14 @@ class Connection:
         self.linked_agents.discard(agent_id)
     
     def is_action_allowed(self, action: str) -> bool:
+        if self.allowed == "all":
+            return True
+        if isinstance(self.allowed, str):
+            return action.lower() == self.allowed.lower()
         """Check if an action is allowed for this connection"""
-        if self.actions_allowed is None:
+        if self.allowed is None:
             return True  # All actions allowed
-        return action.lower() in {a.lower() for a in self.actions_allowed}
+        return action.lower() in {a.lower() for a in self.allowed}
     
     def get_credentials(self) -> Dict[str, Any]:
         """
@@ -160,7 +164,7 @@ class Connection:
             "connection_name": self.connection_name,
             "auth_type": self.auth_type.value,
             "status": self.status.value,
-            "actions_allowed": list(self.actions_allowed) if self.actions_allowed else "all",
+            "allowed": list(self.allowed) if self.allowed else "all",
             "linked_agents": list(self.linked_agents),
             "created_at": self.created_at.isoformat(),
             "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,

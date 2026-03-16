@@ -1,5 +1,6 @@
 import unittest
 
+from cortex._engine.agent import Agent
 from cortex._engine.tools.tool_libraries import _requires_approval, _resolve_effective_confirm_policy
 
 
@@ -41,6 +42,25 @@ class TestConfirmPolicy(unittest.TestCase):
         )
         self.assertTrue(hard_override)
         self.assertEqual(policy, True)
+
+    def test_agent_default_confirm_enables_approval_without_callback(self):
+        agent = Agent(tools=["websearch"], llm="gemini-3.1-flash-lite-preview")
+
+        self.assertEqual(agent.confirm_policy, ["write", "delete"])
+        self.assertTrue(agent.enable_human_approval)
+        self.assertIsNotNone(agent.orchestrator.approval_manager)
+
+    def test_summarizer_llm_defaults_and_override(self):
+        default_agent = Agent(tools=["websearch"], llm="gpt-5.4")
+        self.assertEqual(default_agent.light_llm, "gpt-5.4")
+        self.assertEqual(default_agent.summarizer_llm, "gpt-5.4")
+
+        custom_agent = Agent(
+            tools=["websearch"],
+            llm="gpt-5.4",
+            summarizer_llm="openai/gpt-4.1-mini",
+        )
+        self.assertEqual(custom_agent.summarizer_llm, "openai/gpt-4.1-mini")
 
 
 if __name__ == "__main__":

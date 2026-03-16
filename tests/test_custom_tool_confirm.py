@@ -13,12 +13,11 @@ class TestCustomToolConfirm(unittest.TestCase):
             Tool(name="sample", func=sample)
 
     def test_decorator_sets_confirm_and_kind(self):
-        @tool(confirm=True, kind="delete")
+        @tool(confirm=True)
         def remove_item(item_id: str) -> str:
             return item_id
 
         self.assertTrue(remove_item.confirm)
-        self.assertEqual(remove_item.kind, "delete")
 
     def test_decorator_defaults_do_not_require_confirm(self):
         @tool
@@ -26,7 +25,6 @@ class TestCustomToolConfirm(unittest.TestCase):
             return item_id
 
         self.assertFalse(read_item.confirm)
-        self.assertIsNone(read_item.kind)
 
     def test_return_errors_alias_maps_to_tool_error_result(self):
         @tool(return_errors=True)

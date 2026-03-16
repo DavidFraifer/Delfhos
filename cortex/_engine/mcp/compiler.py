@@ -276,9 +276,12 @@ class MCPCompiler:
         return first_sentence
 
     def _build_api_doc(self, func_name: str, description: str, signature: str, schema: Dict) -> str:
-        """Build the compressed API doc for code generation."""
-        lines = [f"# await {self.tool_name}.{signature}",
-                 f"# {description}"]
+        """Build comprehensive API doc for code generation (with examples)."""
+        # For media files, generate special example
+        is_media_func = 'media' in func_name.lower()
+        
+        lines = [f"# await {self.tool_name}.{signature}"]
+        lines.append(f"# {description}")
 
         # Add property descriptions as inline param hints
         props = schema.get("properties", {})
@@ -289,6 +292,18 @@ class MCPCompiler:
                 if desc:
                     hints.append(f"#   {name}: {desc}")
             lines.extend(hints)
+        
+        # Add concrete example for file operations
+        if 'read' in func_name.lower():
+            lines.append("#")
+            if is_media_func:
+                lines.append(f"# EXAMPLE - Reading media file for LLM analysis:")
+                lines.append(f"img_data = await {self.tool_name}.{func_name}(path=\"image.png\")")
+                lines.append(f"analysis = await llm.call(\"Describe this image\", file_data=[img_data])")
+            else:
+                lines.append(f"# EXAMPLE - Reading text file:")
+                lines.append(f"content = await {self.tool_name}.{func_name}(path=\"file.txt\")")
+                lines.append(f"result = await llm.call(\"Analyze: \" + content)")
 
         return "\n".join(lines)
 

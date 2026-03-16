@@ -157,6 +157,36 @@ The `actions` parameter controls **what the agent can do** and **what OAuth scop
 | Docs | `read` | `documents.readonly` |
 | Docs | `create`, `update`, `delete` | `documents` + `drive` |
 
+### Discover allowed actions (before running)
+
+Native tools expose their supported actions directly:
+
+```python
+from delfhos import Gmail, SQL, Drive
+
+print(Gmail.allowed_actions())
+print(SQL.allowed_actions())
+print(Drive.allowed_actions())
+```
+
+MCP tools are dynamic, so discover actions first and precompile cache:
+
+```python
+from delfhos import MCP
+
+# Discovers server tools and stores compiled cache for faster next run
+available = MCP.discover_actions("server-github", compile_cache=True)
+print("Available MCP actions:", available)
+
+# Restrict to a safe subset
+github = MCP("server-github", actions=["list_repositories", "get_file_contents"])
+```
+
+At runtime, Delfhos now enforces action restrictions in multiple layers:
+1. Prompt/tool selection layer (only allowed actions are surfaced to the model)
+2. Pre-execution Python validation (blocked calls fail before execution)
+3. Runtime guard in tool dispatch (blocked calls raise a standardized permission error)
+
 ---
 
 ## SQL Authentication
@@ -237,13 +267,16 @@ agent = Agent(
 agent = Agent(
     connections=[...],
     system_prompt="You are a finance assistant.", # optional role description
-    confirm="write",                          # deployment-time confirm policy
+    llm="gemini-3.1-flash-lite-preview",      # default model for all stages
+    light_llm="gemini-3.1-flash-lite-preview",# optional fast override
+    heavy_llm="gemini-3.1-flash-lite-preview",# optional stronger override
+    summarizer_llm="gemini-3.1-flash-lite-preview", # optional chat summarization override
+    confirm=["write", "delete"],              # default behavior when omitted
     on_confirm=my_confirm_callback,             # auto-enables approval callbacks
-    validation_mode=True,                      # dry-run, no real writes
-    light_llm="gemini-3.1-flash-lite-preview", # fast model for filtering
-    heavy_llm="gemini-3.1-flash-lite-preview", # powerful model for code gen
 )
 ```
+
+If `on_confirm` is not provided, Delfhos uses an interactive terminal y/n prompt for approval requests.
 
 ### Run modes
 
@@ -274,14 +307,15 @@ with Agent(tools=[...], memory=Memory("~/.delfhos/agent_memory.db")) as agent:
 ### Human approval
 
 ```python
-with Agent(tools=[...], enable_human_approval=True) as agent:
+with Agent(tools=[...]) as agent:
     agent.run("Delete all files older than 90 days.")
 
     pending = agent.get_pending_approvals()
     agent.approve(pending[0]["request_id"])   # or agent.reject(...)
 ```
 
-If you provide `on_confirm=...`, approval is enabled automatically. Use `enable_human_approval=True` when you want manual approve/reject flow without a callback.
+By default, Delfhos applies `confirm=["write", "delete"]`. If no `on_confirm` callback is provided, approvals fall back to interactive console y/n prompts.
+If you provide `on_confirm=...`, approvals are handled by your callback.
 Recommended callback return is `bool` (or `(bool, "reason")` for an explicit message).
 
 `confirm` policy is unified across tool types:

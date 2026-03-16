@@ -3,10 +3,9 @@ from delfhos.errors import ToolDefinitionError
 from ...internal.llm import llm_completion_async
 from ...utils.console import console
 from ...utils import report_error
-from ...utils.pricing import llm_pricing
 
 # Always use Gemini for web search, defaulting to lite for maximum speed
-WEBSEARCH_MODEL = "gemini-3.1-flash-lite-preview"
+WEBSEARCH_LLM = "gemini-3.1-flash-lite-preview"
 
 
 async def _llm_web_search(query: str, task_id: str, model: str, agent_id: str = None) -> tuple[str, dict]:
@@ -60,28 +59,25 @@ async def web_search(query: str, task_id=1, _fast_search=True, model: str = None
     console.info("Web Search", f"Searching for: '{query}'", task_id=task_id, agent_id=agent_id)
     
     console.tool("Web Search", "Initiating LLM web search", task_id=task_id, agent_id=agent_id)
-    search_model = model or WEBSEARCH_MODEL
-    summary, token_info = await _llm_web_search(query=query, task_id=task_id, model=search_model, agent_id=agent_id)
+    search_llm = model or WEBSEARCH_LLM
+    summary, token_info = await _llm_web_search(query=query, task_id=task_id, model=search_llm, agent_id=agent_id)
     
     total_duration = time.perf_counter() - start_time
     console.info("Web Search", f"Total web_search execution time: {total_duration:.2f}s", task_id=task_id, agent_id=agent_id)
 
-    # Calculate total cost using the pricing system (always use Gemini model for pricing)
     input_tokens = token_info.get("input_tokens", 0)
     output_tokens = token_info.get("output_tokens", 0)
-    total_cost, _ = llm_pricing.calculate_cost(WEBSEARCH_MODEL, input_tokens, output_tokens, image_count=0)
-    
+
     merged_tokens = {
         "tokens_used": input_tokens + output_tokens,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "llm_calls": 1,
-        "total_cost": total_cost
     }
 
     console.info(
         "Web Search",
-        f"Search completed. Tokens: {merged_tokens['tokens_used']} | Calls: {merged_tokens['llm_calls']} | Cost: ${merged_tokens['total_cost']:.5f}",
+        f"Search completed. Tokens: {merged_tokens['tokens_used']} | Calls: {merged_tokens['llm_calls']}",
         task_id=task_id,
         agent_id=agent_id,
     )

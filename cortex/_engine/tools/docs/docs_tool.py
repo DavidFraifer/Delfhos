@@ -550,5 +550,5 @@ async def gdocs_tool(
         except Exception as e:
             raise GoogleDocsError(f"Failed to delete document: {e}")
 
-    raise ToolExecutionError(tool_name="docs", detail=f"Unsupported docs action '{action}'.")
+    raise ToolExecutionError(tool_name="docs", detail=f"Unsupported docs action '{action}'\n\n📋 Available Google Docs actions:\n    • CREATE - Create a new Google Doc\n    • READ - Read document content\n    • UPDATE - Update document text and formatting\n    • DELETE - Delete a document\n\nUse one of these actions in your next request.")
 

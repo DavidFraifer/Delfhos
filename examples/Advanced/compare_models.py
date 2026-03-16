@@ -35,9 +35,9 @@ async def run_task(model_name, task_prompt):
     oauth_path = os.getenv("OAUTH_GMAIL_PATH")
     
     search = WebSearch()
-    gmail = Gmail(oauth_credentials=oauth_path, actions=["read", "send"])
-    docs = Docs(oauth_credentials=oauth_path, actions=["read", "write", "create"])
-    sheets = Sheets(oauth_credentials=oauth_path, actions=["read", "write", "create"])
+    gmail = Gmail(oauth_credentials=oauth_path, allowed=["read", "send"])
+    docs = Docs(oauth_credentials=oauth_path, allowed=["read", "write", "create"])
+    sheets = Sheets(oauth_credentials=oauth_path, allowed=["read", "write", "create"])
     sql = SQL(url=os.getenv("DATABASE_URL"))
     
     agent = Cortex(

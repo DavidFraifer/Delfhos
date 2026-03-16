@@ -141,7 +141,6 @@ class Trace:
     ended_at: Optional[datetime] = None
     outcome: str = "success"  # success | failed | partial
     trace_mode: str = "full"  # full | minimal
-    cost_usd: float = 0.0
 
     # Layers
     memory_retrieval: Optional[MemoryRetrievalTrace] = None
@@ -199,7 +198,6 @@ class Trace:
             
         lines.append(f"║ Outcome  {self.outcome}".ljust(60)+"║")
         lines.append(f"║ Duration {self.duration_ms:,}ms".ljust(60)+"║")
-        lines.append(f"║ Cost     ${self.cost_usd:.6f}".ljust(60)+"║")
         lines.append(f"╠{'═' * 59}╣")
         
         if self.memory_retrieval:

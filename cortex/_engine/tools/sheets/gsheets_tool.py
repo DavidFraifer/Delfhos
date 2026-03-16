@@ -1232,5 +1232,5 @@ async def gsheets_tool(
             "spreadsheet_id": spreadsheet_id,
         }
 
-    raise ToolExecutionError(tool_name="gsheets", detail=f"Unsupported sheets action '{action}'.")
+    raise ToolExecutionError(tool_name="gsheets", detail=f"Unsupported sheets action '{action}'".join(["\n\n📋 Available Google Sheets actions:\n    • CREATE - Create a new sheet/spreadsheet\n    • READ - Read sheet data\n    • WRITE - Write data to cells\n    • UPDATE - Update existing data\n    • DELETE - Delete sheets or ranges\n\nUse one of these actions in your next request."]))
 

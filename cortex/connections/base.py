@@ -25,6 +25,7 @@ class BaseConnection(_BaseConnection):
 
     # Subclasses must set this
     TOOL_NAME: str = ""
+    ALLOWED_ACTIONS: Optional[List[str]] = None
 
     # Set to True for connections that support Google auth methods
     _GOOGLE_AUTH: bool = False
@@ -32,11 +33,10 @@ class BaseConnection(_BaseConnection):
     def __init__(
         self,
         credentials: Dict[str, Any],
-        actions: Optional[List[str]] = None,
+        allowed: Optional[Union[str, List[str]]] = None,
         name: Optional[str] = None,
         auth_type: AuthType = AuthType.OAUTH2,
         metadata: Optional[Dict[str, Any]] = None,
-        confirm: Union[str, bool] = False,
     ):
         """
         Args:
@@ -47,7 +47,6 @@ class BaseConnection(_BaseConnection):
                           Defaults to the tool name.
             auth_type:    Authentication mechanism (default: OAUTH2).
             metadata:     Optional extra info (e.g. region, description).
-            confirm:      Confirmation policy: "write", "delete", "all", or False.
         """
         if not self.TOOL_NAME:
             from delfhos.errors import ConnectionConfigurationError
@@ -61,10 +60,55 @@ class BaseConnection(_BaseConnection):
             connection_name=name or self.TOOL_NAME,
             auth_type=auth_type,
             credentials=credentials,
-            actions_allowed=actions,
+            allowed=allowed,
             metadata=metadata or {},
-            confirm=confirm,
         )
+
+    @classmethod
+    def allowed_actions(cls) -> List[str]:
+        """Return the documented action names this connection supports."""
+        if not cls.ALLOWED_ACTIONS:
+            return []
+        return list(cls.ALLOWED_ACTIONS)
+
+    @staticmethod
+    def _normalize_action_name(action: str) -> str:
+        return str(action).strip().lower().replace("-", "_")
+
+    def inspect(self, verbose: str = "regular") -> str | dict:
+        """
+        Return connection information.
+        
+        Args:
+            verbose: "minimal" (just action names), "regular" (with details),
+                    or "full" (include all metadata)
+        """
+        allowed = self.effective_allowed_actions()
+        
+        if verbose == "minimal":
+            return f"Actions: {allowed}"
+        
+        elif verbose == "regular":
+            return f"Connection: {self.connection_name} | Allowed: {allowed}"
+        
+        else:  # full
+            return {
+                "connection": self.connection_name,
+                "allowed": allowed,
+                "auth_type": self.auth_type.value,
+                "metadata": self.metadata
+            }
+
+    def effective_allowed_actions(self) -> Union[List[str], str]:
+        """
+        Return the effective action policy for this connection.
+
+        - "all" means unrestricted
+        - list[str] means explicitly restricted actions
+        """
+        if self.allowed is None:
+            return "all"
+        return sorted(self._normalize_action_name(a) for a in self.allowed)
 
 
 class GoogleBaseConnection(BaseConnection):
@@ -91,10 +135,9 @@ class GoogleBaseConnection(BaseConnection):
         service_account: Optional[str] = None,
         oauth_credentials: Optional[str] = None,
         delegated_user: Optional[str] = None,
-        actions: Optional[List[str]] = None,
+        allowed: Optional[Union[str, List[str]]] = None,
         name: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
-        confirm: Union[str, bool] = False,
     ):
         """
         Args:
@@ -104,7 +147,6 @@ class GoogleBaseConnection(BaseConnection):
             actions:           Allowed actions, e.g. ["read", "send"]. None = all.
             name:              Human-readable label for this connection.
             metadata:          Extra info dict.
-            confirm:           Confirmation policy: "write", "delete", "all", or False.
         """
         from cortex.google_auth import resolve_google_credentials, scopes_to_actions
 
@@ -113,7 +155,7 @@ class GoogleBaseConnection(BaseConnection):
             service_account=service_account,
             oauth_credentials=oauth_credentials,
             delegated_user=delegated_user,
-            actions=actions,
+            allowed=allowed,
         )
 
         # Determine auth type based on what was provided
@@ -139,8 +181,8 @@ class GoogleBaseConnection(BaseConnection):
             name=name or self.TOOL_NAME,
             auth_type=auth_type,
             metadata=metadata,
-            confirm=confirm,
         )
 
 
 __all__ = ["BaseConnection", "GoogleBaseConnection", "AuthType", "ConnectionStatus"]
+

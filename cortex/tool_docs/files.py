@@ -3,7 +3,8 @@ Files Tool Documentation
 =========================
 
 The Files tool is built-in — no Connection required.
-Used to read uploaded files (CSV, Excel, PDF, images) and save intermediate outputs.
+Used ONLY to read sandbox/uploaded files (CSV, Excel, PDF, images) AND NOT local user/desktop files.
+For reading local system files, use user-provided tools like 'filesystem' instead.
 """
 
 
@@ -15,7 +16,7 @@ class FilesDoc:
     ACTIONS = ["READ", "SAVE", "LIST"]
 
     ACTION_SUMMARIES = {
-        "READ": "Read an uploaded file. CSV → List[Dict], Excel → List[Dict], image → bytes for LLM.",
+        "READ": "Read purely sandbox/uploaded files. DO NOT use for local desktop files. CSV → List[Dict], Excel → List[Dict].",
         "SAVE": "Save an output file locally (HIDDEN from user — use docs/sheets/print to share results).",
         "LIST": "List all uploaded files available for this task.",
     }

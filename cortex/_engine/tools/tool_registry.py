@@ -336,16 +336,16 @@ LLM_CAPABILITY = ToolCapability(
     tool_name="llm",
     actions=[
         ToolActionSpec(
-            action="DRAFT",
+            action="CALL",
             description=(
-                "Generate text content (emails, messages, posts, etc.) - Returns ready-to-use final text. "
-                "For structured data extraction, explicitly request JSON format in prompt (e.g., 'Return JSON: {{\"field1\": \"value1\", \"field2\": \"value2\"}}'). "
-                "When requesting JSON, you can use multi-var assignment to extract fields automatically: var field1,field2=llm(action:\"DRAFT\",params:{{prompt:\"...\",model:\"heavy\"}}). "
-                "EFFICIENCY: Combine extraction and formatting in ONE call. Example: generate complete sheets ops array directly from raw data in one call, not extract data first then format separately."
+                "Universal multi-purpose method to analyze text and multimodal data, generate content (emails, code, etc.) and extract JSON data. "
+                "Automatically selects vision model when file_data is provided, standard model otherwise. "
+                "For structured data extraction, explicitly request JSON format in prompt. "
+                "For efficiency, combine extraction and formatting in ONE call when possible."
             ),
             parameters={
-                "prompt": "detailed instruction for content generation (include context, tone, format requirements like JSON, and any source material). For efficiency, combine data extraction and formatting in the same prompt when possible.",
-                "model": "light/heavy (default: light for emails/messages, heavy for complex content/analysis)"
+                "prompt": "detailed instruction string",
+                "file_data": "Optional: array of file objects (e.g. from filesystem.read_media_file() or filesystem.read_text_file())",
             }
         )
     ]
@@ -490,7 +490,23 @@ def map_frontend_action_to_registry_action(tool_name: str, frontend_action: str)
     }
     
     tool_mappings = mappings.get(tool_name, {})
-    return tool_mappings.get(frontend_action_lower)
+    mapped = tool_mappings.get(frontend_action_lower)
+    if mapped:
+        return mapped
+
+    # Fallback for MCP and any dynamic tool names:
+    # - accept already-registry-like names (e.g. CREATE_ISSUE)
+    # - normalize user forms (e.g. create-issue, create issue)
+    registry_candidate = frontend_action.strip().upper().replace("-", "_").replace(" ", "_")
+    tool_summaries = TOOL_ACTION_SUMMARIES.get(tool_name, {})
+    if registry_candidate in tool_summaries:
+        return registry_candidate
+
+    # Last resort: case-insensitive match against known actions for the tool
+    for action_name in tool_summaries.keys():
+        if action_name.lower() == frontend_action_lower.replace("-", "_").replace(" ", "_"):
+            return action_name
+    return None
 
 
 
@@ -546,14 +562,12 @@ TOOL_ACTION_SUMMARIES = {
         "SEARCH": "Search the web for information",
     },
     "llm": {
-        "ANALYZE": "Analyze/summarize data or text",
-        "GENERATE": "Generate content (emails, reports)",
-        "EXTRACT": "Extract structured data (JSON) from text/images",
+        "CALL": "Universal method for text analysis, image analysis, content generation, and structured data extraction",
     },
     "files": {
-        "READ": "Read uploaded files (CSV, Excel, PDF, images)",
+        "READ": "Read uploaded task files ONLY. For local/user system filesystem, use the available MCP filesystem tool instead.",
         "SAVE": "Save internal/temporary output files (HIDDEN from user, use docs/sheets to share)",
-        "LIST": "List all uploaded files for this task",
+        "LIST": "List uploaded task files (NOT user desktop/system files)",
     },
     "approval": {
         "ASK": "Request user approval for sensitive actions",
@@ -648,24 +662,16 @@ await calendar.delete(event_id, desc="...")""",
 summary = await websearch.search("Python best practices", max_results=5, desc="...")
 # Returns: str - A multi-paragraph summary with facts, names, dates, and links from the web.""",
 
-    "llm:ANALYZE": """# llm.analyze() - Analyze/summarize text
-summary = await llm.analyze("Summarize this: " + str(data), model="heavy", max_tokens=2000, desc="...")
-# Returns: str. model="heavy" for analysis, "light" (fast), "vision" (best for images).""",
-
-    "llm:GENERATE": """# llm.generate() - Generate content (emails, reports, etc)
-content = await llm.generate("Write a report about...", model="heavy", max_tokens=2000, desc="...")
-# Returns: str. Use llm.generate() when creating new long-form content. Use max_tokens to adapt to length needed.""",
-
-
-
-    "llm:EXTRACT": """# llm.extract() - Extract structured JSON from text/images
-prompt = "Extract name, email. Return JSON: " + '{"name": "text", "email": "text"}' + ". Text: " + text
-data = await llm.extract(prompt, model="light", max_tokens=2000, desc="...")  # model="vision" for best image extraction
-# Returns: dict (already parsed) - NO json.loads(), NO ```json``` fences needed""",
-
-    "files:READ": """# files.read() - Read uploaded files
-data = await files.read("data.csv", desc="...")  # CSV -> List[Dict]
-img = await files.read("chart.png", for_llm=True, desc="...")  # Image for LLM vision""",
+    "llm:CALL": """# llm.call() - Universal AI tool for ANY task
+res = await llm.call("Summarize: " + str(data), max_tokens=2000, desc="...")
+# File analysis (ALWAYS pass inside file_data=[file_var], prompt must be first positional arg!)
+vision = await llm.call("Describe", file_data=[file_var])
+# JSON Extract (Auto-parses json):
+data = await llm.call("Extract amount. Return purely JSON: " + '{"amount": 100}')""",
+    "files:READ": """# files.read() - Read UPLOADED task files ONLY (not user filesystem)
+# ⚠️ IMPORTANT: If MCP filesystem tool is available, use that for local/user files instead
+data = await files.read("data.csv", desc="...")  # CSV -> List[Dict] (uploaded files only)
+img = await files.read("chart.png", for_llm=True, desc="...")  # Image for LLM vision (uploaded files only)""",
 
     "files:SAVE": """# files.save() - Save output files (CRITICAL: HIDDEN from user. Use docs/sheets/print to share)
 await files.save("output.csv", [{"name": "A", "val": 1}], desc="...")  # List[Dict] -> CSV
@@ -697,13 +703,9 @@ for email in emails:
     "sheets:WRITE": """csv_data = await sql.query("SELECT * FROM table", as_csv=True, desc="Getting")
 sheet_id = await sheets.create("Report", data=csv_data, desc="Creating & Loading")""",
 
-    "llm:EXTRACT": """prompt = "Extract date, amount. Return JSON: " + '{"date": "YYYY-MM-DD", "amount": "123.45"}' + ". Text: " + text
-data = await llm.extract(prompt, model="light", desc="Extracting")
-if isinstance(data, dict): print(data.get("date"), data.get("amount"))""",
-
     "parallel": """# PARALLELIZATION - Use asyncio.gather() for independent operations
 import asyncio
-tasks = [llm.analyze("Analyze: " + email['body'], model="heavy") for email in emails]
+tasks = [llm.call("Analyze: " + email['body']) for email in emails]
 results = await asyncio.gather(*tasks)""",
 }
 
@@ -743,12 +745,14 @@ def build_prefilter_prompt(task: str, available_tools: Dict[str, Set[str]], conn
             # Get allowed actions for this connection
             actions = available_tools.get(tool_name, set())
             if actions:
-                actions_str = ",".join(sorted(actions))
+                # For MCP tools, show lowercase method names with parentheses (READ_FILE → read_file()) for clarity
+                method_names = sorted([f"{a.lower()}()" for a in actions])
+                methods_str = ", ".join(method_names)
                 desc_compact = (conn_desc or "").strip()
                 if len(desc_compact) > 80:
                     desc_compact = desc_compact[:80].rstrip() + "..."
                 desc_part = f" | {desc_compact}" if desc_compact else ""
-                lines.append(f"- [{conn_name}] ({tool_name}) actions: {actions_str}{desc_part}")
+                lines.append(f"- {conn_name} (tool={tool_name}) call: {methods_str}{desc_part}")
     else:
         # Fallback: no connections, just list abstract tools
         lines.append("Tools:")
@@ -790,17 +794,20 @@ def build_prefilter_prompt(task: str, available_tools: Dict[str, Set[str]], conn
             if len(desc_compact) > 80:
                 desc_compact = desc_compact[:80].rstrip() + "..."
             desc_part = f" | {desc_compact}" if desc_compact else ""
-            lines.append(f"- [{tool_name}] ({t_name}) actions: {actions_str}{desc_part}")
+            lines.append(f"- {tool_name} (tool={t_name}) actions: {actions_str}{desc_part}")
     
     lines.append("")
     lines.append("Rules:")
     lines.append("- If internal knowledge is enough and no tools are needed, return: ANSWER: <text>")
-    lines.append("- If tools are needed, return only comma-separated <ConnectionOrTool>:ACTION")
-    lines.append("- For tools, never return ANSWER")
+    lines.append("- If tools are needed, return only comma-separated <Tool>:<METHOD or ACTION>")
+    lines.append("- For MCP tools: use the exact method name shown (e.g., filesystem:read_media_file NOT filesystem:read)")
+    lines.append("- For connection-based tools: use connection_name:ACTION (e.g., 'Gmail Account:READ' or tool_name:ACTION)")
+    lines.append("- Never return ANSWER if tools are used")
     lines.append("- Prefer minimal tool set")
     lines.append("Output format examples:")
-    lines.append("- ANSWER: Python is a high-level language")
-    lines.append("- Work Gmail:READ,llm:ANALYZE")
+    lines.append("- ANSWER: Python is a high-level language (no tools needed)")
+    lines.append("- filesystem:read_media_file,llm:call (MCP method + built-in tool)")
+    lines.append("- Work Gmail:READ,llm:CALL (named connection + built-in tool)")
     
     return "\n".join(lines)
 
@@ -845,7 +852,7 @@ def parse_prefilter_response(response: str, connections: List[Any] = None) -> tu
     Parse the prefilter response into selected actions and connection mapping.
     
     Args:
-        response: Raw LLM response (e.g., "Work Gmail:READ,Sales DB:QUERY,llm:ANALYZE")
+        response: Raw LLM response (e.g., "Work Gmail:READ,Sales DB:QUERY,llm:CALL")
         connections: List of Connection objects for name resolution
     
     Returns:
@@ -894,7 +901,7 @@ def build_filtered_api_docs(selected_actions: List[str], custom_descriptions: Di
     Build API documentation for only the selected tool:action pairs.
     
     Args:
-        selected_actions: List of "tool:action" strings (e.g., ["gmail:READ", "llm:ANALYZE"])
+        selected_actions: List of "tool:action" strings (e.g., ["gmail:READ", "llm:CALL"])
         custom_descriptions: Optional descriptions for custom tools injected at runtime
     
     Returns:
@@ -967,12 +974,12 @@ def get_available_actions_for_connections(connections: List[Any], custom_tools: 
             result[tool_name] = set()
         
         # If no restrictions, add all actions for this tool
-        if not conn.actions_allowed:
+        if not conn.allowed:
             if tool_name in TOOL_ACTION_SUMMARIES:
                 result[tool_name].update(TOOL_ACTION_SUMMARIES[tool_name].keys())
         else:
             # Map frontend actions to registry actions
-            for frontend_action in conn.actions_allowed:
+            for frontend_action in conn.allowed:
                 mapped = map_frontend_action_to_registry_action(tool_name, frontend_action)
                 if mapped:
                     result[tool_name].add(mapped)

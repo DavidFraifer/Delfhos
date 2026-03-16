@@ -1,4 +1,4 @@
-from typing import List, Union, Optional, Dict, Any, Literal
+from typing import List, Union, Optional, Dict, Any, Literal, Callable
 from .core.orchestrator import Orchestrator
 from .types import TokenUsage
 from delfhos.memory import Chat, Memory
@@ -30,7 +30,7 @@ def _has_confirm_policy(confirm_policy: Any) -> bool:
     return False
 
 
-def _tools_have_confirm_policies(tools: Optional[List[Union[str, callable, Connection]]]) -> bool:
+def _tools_have_confirm_policies(tools: Optional[List[Union[str, Callable, Connection]]]) -> bool:
     if not tools:
         return False
     for configured_tool in tools:
@@ -48,27 +48,87 @@ _CLIENT_MAP = {
 
 
 class Agent:
-    SUPPORTED_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3-flash-preview", "gemini-3.1-flash-lite-preview", "mercury-2"]
-    INACTIVITY_TIMEOUT = 600  # 10 minutes in seconds
-    
-    def __init__(self, tools: List[Union[str, callable, Connection]], light_llm: str, heavy_llm: str, 
-                 agent_id: Optional[str] = None, validation_mode: bool = False, auto_stop_timeout: Optional[int] = None, 
-                 enable_human_approval: bool = False, on_confirm: Optional[callable] = None, confirm: Optional[Union[bool, List[str], str]] = None,
-                 agent_context: Optional[str] = None, 
-                 file_search_store_name: Optional[str] = None,
-                 prefilter_model: Optional[str] = None,
-                 code_generation_model: Optional[str] = None,
-                 vision_model: Optional[str] = None,
-                 search_model: Optional[str] = None,
+    def __init__(self, tools: List[Union[str, Callable, Connection]], llm: Optional[str] = None, light_llm: Optional[str] = None, heavy_llm: Optional[str] = None,
+                 agent_id: Optional[str] = None, auto_stop_timeout: Optional[int] = None,
+                 on_confirm: Optional[Callable] = None, confirm: Optional[Union[bool, List[str], str]] = None,
+                 system_prompt: Optional[str] = None,
+                 summarizer_llm: Optional[str] = None,
+                 prefilter_llm: Optional[str] = None,
+                 code_generation_llm: Optional[str] = None,
+                 vision_llm: Optional[str] = None,
+                 search_llm: Optional[str] = None,
                  chat: Optional[Chat] = None,
                  memory: Optional[Memory] = None,
-                 trace: Union[Literal["full", "minimal"], bool] = "full"):
-        configure_api_keys()
+                 providers: Optional[Dict[str, str]] = None,
+                 verbosity: Literal["minimal", "regular", "full"] = "regular",
+                 _explicit_llms: Optional[Dict[str, bool]] = None):
+        self._api_configured = False
+        self._providers = providers
+        
+        # Validate that user has explicitly chosen LLM configuration
+        # User MUST choose either:
+        # 1. A single "llm" for everything (simple mode)
+        # 2. Both "light_llm" AND "heavy_llm" (advanced mode)
+        if llm is None and (light_llm is None or heavy_llm is None):
+            raise_error("AGT-002", context={
+                "reason": "LLM configuration required",
+                "hint": "Please provide either:\n"
+                       "  1. A single 'llm' parameter (used for all operations), OR\n"
+                       "  2. Both 'light_llm' and 'heavy_llm' parameters (light_llm for filtering, heavy_llm for code generation)"
+            })
+        
+        # User chose single llm for everything
+        if llm is not None and light_llm is None and heavy_llm is None:
+            resolved_light_llm = llm
+            resolved_heavy_llm = llm
+            use_single_llm = True
+        # User chose light_llm and heavy_llm explicitly
+        elif light_llm is not None and heavy_llm is not None:
+            resolved_light_llm = light_llm
+            resolved_heavy_llm = heavy_llm
+            # llm parameter is ignored if light_llm and heavy_llm are provided
+            use_single_llm = False
+        # Invalid mix (e.g., only light_llm without heavy_llm)
+        else:
+            raise_error("AGT-002", context={
+                "reason": "Incomplete LLM configuration",
+                "hint": "You provided light_llm or heavy_llm, but not both. Please provide:\n"
+                       "  1. A single 'llm' parameter, OR\n"
+                       "  2. BOTH 'light_llm' AND 'heavy_llm' parameters"
+            })
+        
+        resolved_confirm = ["write", "delete"] if confirm is None else confirm
+        
+        # Track which LLMs were explicitly provided by the user (not just defaulted)
+        # If _explicit_llms is provided (from Cortex wrapper), use that; otherwise infer from Parameters
+        if _explicit_llms:
+            # Use the explicit tracking from Cortex wrapper
+            self._explicit_llm_config = {
+                "llm": _explicit_llms.get("llm", llm is not None),
+                "light_llm": _explicit_llms.get("light_llm", light_llm is not None),
+                "heavy_llm": _explicit_llms.get("heavy_llm", heavy_llm is not None),
+                "summarizer_llm": _explicit_llms.get("summarizer_llm", summarizer_llm is not None),
+                "prefilter_llm": prefilter_llm is not None,
+                "code_generation_llm": code_generation_llm is not None,
+                "vision_llm": vision_llm is not None,
+                "search_llm": search_llm is not None
+            }
+        else:
+            # Infer from parameters (for direct Agent usage)
+            self._explicit_llm_config = {
+                "llm": llm is not None,
+                "light_llm": light_llm is not None,
+                "heavy_llm": heavy_llm is not None,
+                "summarizer_llm": summarizer_llm is not None,
+                "prefilter_llm": prefilter_llm is not None,
+                "code_generation_llm": code_generation_llm is not None,
+                "vision_llm": vision_llm is not None,
+                "search_llm": search_llm is not None
+            }
 
         approval_enabled = bool(
-            enable_human_approval
-            or on_confirm is not None
-            or _has_confirm_policy(confirm)
+            on_confirm is not None
+            or _has_confirm_policy(resolved_confirm)
             or _tools_have_confirm_policies(tools)
         )
         
@@ -76,65 +136,68 @@ class Agent:
         self.agent_id = agent_id or str(uuid.uuid4())
         self.enable_human_approval = approval_enabled
         self.on_confirm = on_confirm
-        self.confirm_policy = confirm
-        self.trace_mode = trace
+        self.confirm_policy = resolved_confirm
+        self.verbosity = verbosity
+        self.trace_mode = "full" if verbosity != "minimal" else "minimal"
         self.last_trace = None
         
-        # Validation of provided models
+        # Basic model validation (accept provider-compatible model IDs, not a fixed list)
         models_to_validate = [
-            (light_llm, "light_llm"), 
-            (heavy_llm, "heavy_llm"),
-            (prefilter_model, "prefilter_model"),
-            (code_generation_model, "code_generation_model"),
-            (vision_model, "vision_model"),
-            (search_model, "search_model")
+            (resolved_light_llm, "light_llm"),
+            (resolved_heavy_llm, "heavy_llm"),
+            (summarizer_llm, "summarizer_llm"),
+            (prefilter_llm, "prefilter_llm"),
+            (code_generation_llm, "code_generation_llm"),
+            (vision_llm, "vision_llm"),
+            (search_llm, "search_llm")
         ]
         
         for model, name in models_to_validate:
-            if model and model not in self.SUPPORTED_MODELS:
-                raise_error("AGT-002", 
-                           context={"model": model, "model_type": name, "supported": self.SUPPORTED_MODELS})
+            if model is None:
+                continue
+            if not isinstance(model, str) or not model.strip():
+                raise_error("AGT-002", context={"model": model, "model_type": name, "reason": "Model must be a non-empty string"})
         
         self.tools = tools
-        self.light_llm = light_llm
-        self.heavy_llm = heavy_llm
+        self.llm = llm  # Store original choice (could be None if using light_llm/heavy_llm)
+        self.light_llm = resolved_light_llm
+        self.heavy_llm = resolved_heavy_llm
         
-        # Specific model configurations
-        self.prefilter_model = prefilter_model or light_llm
-        self.code_generation_model = code_generation_model or heavy_llm
-        self.vision_model = vision_model or heavy_llm
-        self.search_model = search_model or light_llm
+        # Specific model configurations - use appropriate defaults based on what user chose
+        self.summarizer_llm = summarizer_llm or self.light_llm
+        self.prefilter_llm = prefilter_llm or self.light_llm
+        self.code_generation_llm = code_generation_llm or self.heavy_llm
+        self.vision_llm = vision_llm or self.heavy_llm
+        self.search_llm = search_llm or self.light_llm
         
-        self.validation_mode = validation_mode  
         self.logger = CORTEXLogger() 
         self.usage = TokenUsage()
         
         self.orchestrator = Orchestrator(
             logger=self.logger, 
-            light_llm=light_llm, 
-            heavy_llm=heavy_llm, 
+            light_llm=self.light_llm,
+            heavy_llm=self.heavy_llm,
             agent_id=self.agent_id, 
-            validation_mode=validation_mode, 
-            enable_human_approval=approval_enabled, 
             on_confirm=on_confirm,
-            confirm=confirm,
-            agent_context=agent_context,
-            prefilter_model=self.prefilter_model,
-            code_generation_model=self.code_generation_model,
-            vision_model=self.vision_model,
-            search_model=self.search_model,
+            confirm=resolved_confirm,
+            system_prompt=system_prompt,
+            prefilter_llm=self.prefilter_llm,
+            code_generation_llm=self.code_generation_llm,
+            vision_llm=self.vision_llm,
+            search_llm=self.search_llm,
             token_usage=self.usage,
             memory=memory,
             trace_mode=self.trace_mode,
-            trace_callback=self._update_trace
+            trace_callback=self._update_trace,
+            llm_config=self.get_llm_config_string(),
+            verbose=(self.verbosity == "full")
         )
-        self.orchestrator.file_search_store_name = file_search_store_name
         self.running = False
         self.last_called = None  # Track when the agent was last used
         self.created_at = _utcnow()
         
-        # Auto-stop functionality
-        self.auto_stop_timeout = auto_stop_timeout or self.INACTIVITY_TIMEOUT
+        # Auto-stop functionality (disabled by default - agent stays open until user stops it)
+        self.auto_stop_timeout = auto_stop_timeout
         self.last_activity = self.created_at
         self.inactivity_timer = None
         self.timer_lock = threading.Lock()
@@ -231,6 +294,51 @@ class Agent:
         """Add a tool to the agent"""
         self.orchestrator.add_tool(name, func)
     
+    def get_llm_config_string(self) -> str:
+        """Generate LLM configuration string for display in execution summary.
+        
+        Returns clean LLM configuration based on what user explicitly provided:
+        - If only llm was provided: "llm: X"
+        - If light_llm and heavy_llm provided: "light_llm: X, heavy_llm: X"
+        - If individual specialized LLMs provided: show all explicitly provided ones
+        """
+        explicit = self._explicit_llm_config
+        
+        # Count which LLMs were explicitly provided
+        explicitly_provided = [k for k, v in explicit.items() if v]
+        
+        # Case 1: User chose single llm for everything
+        if explicit["llm"] and not explicit["light_llm"] and not explicit["heavy_llm"]:
+            return f"llm: {self.llm}"
+        
+        # Case 2: User chose light_llm and heavy_llm, no specialized overrides
+        if explicit["light_llm"] and explicit["heavy_llm"]:
+            specialized = [k for k in ["code_generation_llm", "vision_llm", "summarizer_llm", "prefilter_llm", "search_llm"]
+                          if explicit.get(k)]
+            
+            if not specialized:
+                # No specialized overrides, show just light and heavy
+                return f"light_llm: {self.light_llm}, heavy_llm: {self.heavy_llm}"
+            
+            # User has specialized overrides - show all explicitly provided
+            llm_parts = [f"light_llm: {self.light_llm}", f"heavy_llm: {self.heavy_llm}"]
+            
+            if explicit["code_generation_llm"] and self.code_generation_llm != self.heavy_llm:
+                llm_parts.append(f"code_generation_llm: {self.code_generation_llm}")
+            if explicit["vision_llm"] and self.vision_llm != self.heavy_llm:
+                llm_parts.append(f"vision_llm: {self.vision_llm}")
+            if explicit["summarizer_llm"] and self.summarizer_llm != self.light_llm:
+                llm_parts.append(f"summarizer_llm: {self.summarizer_llm}")
+            if explicit["prefilter_llm"] and self.prefilter_llm != self.light_llm:
+                llm_parts.append(f"prefilter_llm: {self.prefilter_llm}")
+            if explicit["search_llm"] and self.search_llm != self.light_llm:
+                llm_parts.append(f"search_llm: {self.search_llm}")
+            
+            return ", ".join(llm_parts)
+        
+        # Fallback (shouldn't reach here due to validation)
+        return f"light_llm: {self.light_llm}, heavy_llm: {self.heavy_llm}"
+    
     def _reset_inactivity_timer(self):
         """Reset the inactivity timer when activity occurs"""
         with self.timer_lock:
@@ -242,8 +350,8 @@ class Agent:
                     self.inactivity_timer.cancel()
                 self.inactivity_timer = None
             
-            # Start new timer only if agent is running
-            if self.running:
+            # Start new timer only if agent is running and auto_stop_timeout is set
+            if self.running and self.auto_stop_timeout is not None:
                 self.inactivity_timer = threading.Timer(self.auto_stop_timeout, self._auto_stop_due_to_inactivity)
                 self.inactivity_timer.daemon = True
                 self.inactivity_timer.start()
@@ -252,7 +360,7 @@ class Agent:
         """Automatically stop the agent due to inactivity"""
         with self.timer_lock:
             # Double-check that agent is still running and we still want to auto-stop
-            if self.running:
+            if self.running and self.auto_stop_timeout is not None:
                 console.warning("Auto-stop", f"Agent automatically stopped due to {self.auto_stop_timeout/60:.1f} minutes of inactivity", agent_id=self.agent_id)
                 self.stop()
             # Clear the timer reference since this method means the timer has fired
@@ -266,12 +374,16 @@ class Agent:
                     self.inactivity_timer.cancel()
                 self.inactivity_timer = None
         
-    def start(self):
+    def start(self, suppress_startup_message: bool = False):
         if not self.running:
             self.orchestrator.start()
             self.running = True
-            available_tools = list(self.orchestrator.tools.tools.keys())
-            console.system("Agent started", f"Available tools: {', '.join(available_tools)} | Auto-stop: {self.auto_stop_timeout/60:.1f}min", agent_id=self.agent_id)
+            
+            # Only log "Agent started" if not auto-starting from run()
+            # (run() prints task box first, so we skip this to avoid duplication)
+            if not suppress_startup_message:
+                available_tools = list(self.orchestrator.tools.tools.keys())
+                console.system("Agent started", f"Available tools: {', '.join(available_tools)}", agent_id=self.agent_id)
             
             # Start inactivity timer
             self._reset_inactivity_timer()
@@ -374,7 +486,7 @@ class Agent:
             start_comp = time.time()
             result, token_info = await llm_completion_async(
                 prompt=prompt,
-                model=self.light_llm,
+                model=self.summarizer_llm,
                 max_tokens=300,
                 temperature=0.3
             )
@@ -383,14 +495,14 @@ class Agent:
             if token_info and "total_tokens" in token_info:
                 self.usage.summarizer.add(token_info)
                 if self.logger and task_id:
-                    self.logger.add_tokens(task_id, token_info, model=self.light_llm, function_name="mid_session_compress")
+                    self.logger.add_tokens(task_id, token_info, model=self.summarizer_llm, function_name="mid_session_compress")
             
             if self.last_trace:
                 from .trace import ChatCompressionTrace
                 from datetime import datetime
                 self.last_trace.chat_compression = ChatCompressionTrace(
                     triggered_at=datetime.fromtimestamp(start_comp),
-                    model_used=self.light_llm,
+                    model_used=self.summarizer_llm,
                     messages_before=compressed_count,
                     messages_after=1,
                     summary_generated=result.strip(),
@@ -494,6 +606,23 @@ Never return null, "none", or plain text."""
         """
         Run a task with the agent (Async version)
         """
+        # Display task box FIRST before anything else
+        if isinstance(message, str):
+            console.print_task_box(message)
+        elif isinstance(message, list):
+            # For list of messages, concatenate them for display
+            display_msg = "\n".join([m.get('content', str(m)) for m in message])
+            console.print_task_box(display_msg)
+        
+        # Configure API keys once if not already done (after task box so task appears first)
+        if not self._api_configured:
+            configure_api_keys(providers=self._providers)
+            self._api_configured = True
+        
+        # Auto-start agent if not already running (suppress startup message since task box already printed)
+        if not self.running:
+            self.start(suppress_startup_message=True)
+        
         task_id = self._prepare_run_task()
         
         if self.chat:
@@ -528,6 +657,23 @@ Never return null, "none", or plain text."""
         """
         Run a task with the agent (Sync version)
         """
+        # Display task box FIRST before anything else
+        if isinstance(message, str):
+            console.print_task_box(message)
+        elif isinstance(message, list):
+            # For list of messages, concatenate them for display
+            display_msg = "\n".join([m.get('content', str(m)) for m in message])
+            console.print_task_box(display_msg)
+        
+        # Configure API keys once if not already done (after task box so task appears first)
+        if not self._api_configured:
+            configure_api_keys(providers=self._providers)
+            self._api_configured = True
+        
+        # Auto-start agent if not already running (suppress startup message since task box already printed)
+        if not self.running:
+            self.start(suppress_startup_message=True)
+        
         task_id = self._prepare_run_task()
         
         if self.chat:
@@ -548,7 +694,7 @@ Never return null, "none", or plain text."""
                 def run_in_thread():
                     asyncio.run(self._compress_chat_if_needed(task_id))
                 threading.Thread(target=run_in_thread, daemon=True).start()
-                
+        
         task_content = ""
         if self.chat:
             if self.chat.summary:
@@ -577,18 +723,19 @@ Never return null, "none", or plain text."""
             "last_activity": self.last_activity.isoformat(),
             "creation_time": self.created_at.isoformat(),
             "auto_stop": {
-                "enabled": True,
-                "timeout_minutes": self.auto_stop_timeout / 60,
+                "enabled": self.auto_stop_timeout is not None,
+                "timeout_minutes": self.auto_stop_timeout / 60 if self.auto_stop_timeout else None,
                 "time_until_stop": max(
                     0,
                     (self.last_activity + timedelta(seconds=self.auto_stop_timeout) - _utcnow()).total_seconds() / 60
-                ) if self.running else 0
+                ) if self.running and self.auto_stop_timeout else 0
             },
             "models": {
+                "llm": self.llm,
                 "light_llm": self.light_llm,
-                "heavy_llm": self.heavy_llm
+                "heavy_llm": self.heavy_llm,
+                "summarizer_llm": self.summarizer_llm
             },
-            "validation_mode": self.validation_mode,
             "logging_enabled": self.logger is not None
         }
         

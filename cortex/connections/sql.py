@@ -46,6 +46,7 @@ class SQLConnection(BaseConnection):
     """
 
     TOOL_NAME = "sql"
+    ALLOWED_ACTIONS = ["schema", "query", "write"]
 
     def __init__(
         self,
@@ -57,10 +58,9 @@ class SQLConnection(BaseConnection):
         user: Optional[str] = None,
         password: Optional[str] = None,
         db_type: str = "postgresql",
-        actions: Optional[List[str]] = None,
+        allowed: Optional[Union[str, List[str]]] = None,
         name: str = "sql",
         metadata: Optional[Dict[str, Any]] = None,
-        confirm: Union[str, bool] = False,
     ):
         if url:
             credentials = {"url": url}
@@ -90,9 +90,8 @@ class SQLConnection(BaseConnection):
 
         super().__init__(
             credentials=credentials,
-            actions=actions,
+            allowed=allowed,
             name=name,
             auth_type=AuthType.BASIC_AUTH,
             metadata=metadata,
-            confirm=confirm,
         )

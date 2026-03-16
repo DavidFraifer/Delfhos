@@ -3,11 +3,6 @@ import json
 import sqlite3
 from typing import List, Dict, Optional, Any
 import threading
-
-
-import os
-import json
-import sqlite3
 from typing import List, Dict, Optional, Any
 import threading
 
@@ -94,13 +89,35 @@ class Memory:
                 detail="It is required for persistent memory embeddings."
             )
 
+        # Log model loading for user visibility using official console
+        import time
+        model_load_start = time.time()
+        
+        # Import console for official logging
+        try:
+            from cortex._engine.utils.console import console
+        except ImportError:
+            # Fallback if cortex is not available
+            console = None
+        
         if self.embedding_model_name == "nomic-embed-text":
+            msg = "Loading embedding model (nomic-embed-text)..."
+            if console:
+                console.info("Memory", msg)
             self._model = SentenceTransformer(
                 "nomic-ai/nomic-embed-text-v1.5",
                 trust_remote_code=True,
             )
         else:
+            msg = "Loading embedding model (all-MiniLM-L6-v2)..."
+            if console:
+                console.info("Memory", msg)
             self._model = SentenceTransformer("all-MiniLM-L6-v2")
+        
+        model_load_time = time.time() - model_load_start
+        ready_msg = f"Embedding model ready ({model_load_time:.1f}s)"
+        if console:
+            console.info("Memory", ready_msg)
 
         self._embed_dim = self._model.get_sentence_embedding_dimension()
         return self._model

@@ -284,5 +284,5 @@ async def gdrive_tool(
             "permissionId": permission_id,
         }
 
-    raise ToolExecutionError(tool_name="drive", detail=f"Unsupported drive action '{action}'.")
+    raise ToolExecutionError(tool_name="drive", detail=f"Unsupported drive action '{action}'\n\n📋 Available Google Drive actions:\n    • SEARCH - Find files by name/type/query\n    • GET - Get file metadata by ID\n    • CREATE - Create folders (NOT for Docs/Sheets - use specific tools)\n    • UPDATE - Update file metadata or permissions\n    • DELETE - Delete files\n    • DOWNLOAD - Download file content\n    • UNSHARE - Remove permissions from file\n\nUse one of these actions in your next request.")
 

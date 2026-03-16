@@ -19,7 +19,7 @@ class TestPrefilterCompaction(unittest.TestCase):
     def test_prompt_keeps_output_contract(self):
         prompt = build_prefilter_prompt("Read inbox", {"gmail": {"READ"}}, connections=[])
         self.assertIn("ANSWER:", prompt)
-        self.assertIn("<ConnectionOrTool>:ACTION", prompt)
+        self.assertIn("<Tool>:<METHOD or ACTION>", prompt)
 
     def test_connection_description_is_compacted(self):
         long_desc = "x" * 200

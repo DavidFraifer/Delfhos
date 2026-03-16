@@ -3,6 +3,22 @@ from pathlib import Path
 from typing import Dict, Optional
 from delfhos.errors import EnvironmentKeyError
 
+
+SERVICE_KEY_MAPPINGS = {
+    # Keep `gemini` as an alias to preserve backwards compatibility.
+    'google': ['GOOGLE_API_KEY', 'GEMINI_API_KEY', 'GEMINI_KEY'],
+    'gemini': ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GEMINI_KEY'],
+    'openai': ['OPENAI_API_KEY'],
+    'anthropic': ['ANTHROPIC_API_KEY'],
+}
+
+SERVICE_ALIASES = {
+    'google': 'google',
+    'gemini': 'google',
+    'openai': 'openai',
+    'anthropic': 'anthropic',
+}
+
 class EnvLoader:
     def __init__(self):
         self._env_vars: Dict[str, str] = {}
@@ -60,19 +76,18 @@ class EnvLoader:
         return self._env_vars.get(key) or os.environ.get(key) or default
     
     def get_api_key(self, service: str) -> Optional[str]:
-        key_mappings = {
-            'gemini': ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GEMINI_KEY'],
-        }
-        
-        for key in key_mappings.get(service.lower(), [f"{service.upper()}_API_KEY"]):
+        normalized = SERVICE_ALIASES.get(service.lower(), service.lower())
+        for key in SERVICE_KEY_MAPPINGS.get(normalized, [f"{normalized.upper()}_API_KEY"]):
             if value := self.get(key):
                 return value
         
         return None
     
     def require_api_key(self, service: str) -> str:
-        if not (api_key := self.get_api_key(service)):
-            raise EnvironmentKeyError(key=f"{service.upper()}_API_KEY")
+        normalized = SERVICE_ALIASES.get(service.lower(), service.lower())
+        if not (api_key := self.get_api_key(normalized)):
+            first_expected = SERVICE_KEY_MAPPINGS.get(normalized, [f"{normalized.upper()}_API_KEY"])[0]
+            raise EnvironmentKeyError(key=first_expected)
         return api_key
 
 _env_loader = None

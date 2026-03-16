@@ -11,7 +11,7 @@ Example:
     # Or with OAuth:
     sheets = SheetsConnection(
         oauth_credentials="path/to/client_secrets.json",
-        actions=["read"],
+        allowed=["read"],
     )
 """
 
@@ -33,6 +33,7 @@ class SheetsConnection(GoogleBaseConnection):
     """
 
     TOOL_NAME = "sheets"
+    ALLOWED_ACTIONS = ["read", "write", "create", "format", "chart", "batch"]
 
     def __init__(
         self,
@@ -40,17 +41,15 @@ class SheetsConnection(GoogleBaseConnection):
         service_account: Optional[str] = None,
         oauth_credentials: Optional[str] = None,
         delegated_user: Optional[str] = None,
-        actions: Optional[List[str]] = None,
+        allowed: Optional[Union[str, List[str]]] = None,
         name: str = "sheets",
         metadata: Optional[Dict[str, Any]] = None,
-        confirm: Union[str, bool] = False,
     ):
         super().__init__(
             service_account=service_account,
             oauth_credentials=oauth_credentials,
             delegated_user=delegated_user,
-            actions=actions,
+            allowed=allowed,
             name=name,
             metadata=metadata,
-            confirm=confirm,
         )

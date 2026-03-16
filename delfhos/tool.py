@@ -68,10 +68,6 @@ _TYPE_NAME_MAP = {
     "NoneType": "null",
 }
 
-def _normalize_tool_kind(kind: Optional[str]) -> Optional[str]:
-    if kind is None:
-        return None
-    return str(kind).strip().lower()
 
 
 def _is_typed_dict(annotation) -> bool:
@@ -311,7 +307,6 @@ class Tool:
     return_type: Optional[str] = None
     handle_error: Union[bool, str, Callable, None] = True
     confirm: bool = False
-    kind: Optional[str] = None
 
     def __init__(
         self,
@@ -321,7 +316,6 @@ class Tool:
         func: Optional[Callable] = None,
         handle_error: Union[bool, str, Callable, None] = True,
         confirm: bool = False,
-        kind: Optional[str] = None,
         _from_decorator: bool = False,
         _internal_use: bool = False,
     ):
@@ -338,7 +332,6 @@ class Tool:
                 - str: that string is returned as the tool's result.
                 - callable(ToolException) -> str: custom handler.
             confirm: If True, tool execution will always trigger a human approval request.
-            kind: Arbitrary kind / category of this tool call (e.g. "read", "write", "send").
         """
         is_base_tool = type(self) is Tool
         if is_base_tool and not (_from_decorator or _internal_use):
@@ -358,7 +351,6 @@ class Tool:
         self._func = func
         self.handle_error = handle_error
         self.confirm = bool(confirm)
-        self.kind = _normalize_tool_kind(kind)
 
         # Auto-extract parameters and return type from the callable's signature
         auto_params, auto_return = None, None
@@ -435,6 +427,23 @@ class Tool:
 
         except ToolException as exc:
             return self._handle_tool_error(exc)
+
+
+    def inspect(self) -> dict:
+        """
+        Returns a dictionary containing metadata about the tool.
+        useful for inspecting available tools and their arguments.
+        """
+        return {
+            "name": self.name,
+            "description": self.description,
+            "parameters": [
+                {"name": name, "type": p.type, "description": p.description, "required": p.required}
+                for name, p in self.parameters.items()
+            ],
+            "is_async": self.is_async,
+            "has_kwargs": self.has_kwargs
+        }
 
     def run(self, *args, **kwargs) -> Any:
         """
@@ -525,7 +534,6 @@ def tool(
     handle_error: Union[bool, str, Callable, None] = True,
     return_errors: Optional[bool] = None,
     confirm: bool = False,
-    kind: Optional[str] = None,
 ) -> Union[Tool, Callable[[Callable], Tool]]:
     """Decorator that turns a plain function into a Delfhos Tool.
 
@@ -555,7 +563,6 @@ def tool(
             func=fn,
             handle_error=effective_handle_error,
             confirm=confirm,
-            kind=kind,
             _from_decorator=True,
         )
 

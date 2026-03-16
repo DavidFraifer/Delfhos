@@ -4,7 +4,6 @@ Tests for cortex.google_auth — scope mapping and credential resolution.
 Run:  python -m pytest tests/test_google_auth.py -v
 """
 
-import pytest
 import sys
 import os
 

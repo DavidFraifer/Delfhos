@@ -328,31 +328,6 @@ async def main():
         _record_stats("CrewAI", t["id"], crew_times, crew_tokens, crew_calls)
         _record_stats("SmolAgents", t["id"], smol_times, smol_tokens, smol_calls)
             
-        # The original `task_results` structure is replaced by `OVERALL_STATS`
-        # This part of the original code is removed as it's no longer used for individual task results
-        # task_results = {"task_id": task_info['id'], "name": task_info['name'], "level": task_info['level'], "delfhos": [], "langchain": []}
-        # for i in range(REPETITIONS):
-        #     # Delfhos
-        #     print(f"\n  🔵 Delfhos...", end="", flush=True)
-        #     try:
-        #         d_res = await run_delfhos(task_info['task'])
-        #         task_results["delfhos"].append(d_res)
-        #         print(f" ✅ {d_res['total_elapsed']:.2f}s | {d_res['tokens']['total']} tok | ${d_res['tokens']['cost']:.4f}")
-        #     except Exception as e:
-        #         print(f" ❌ {e}")
-        #         task_results["delfhos"].append({"status": f"error", "total_elapsed": 0, "compute_time": 0, "tokens": {"total": 0, "cost": 0.0}})
-            
-        #     # LangChain
-        #     print(f"  🟠 LangChain...", end="", flush=True)
-        #     try:
-        #         l_res = run_langchain(task_info['task'])
-        #         task_results["langchain"].append(l_res)
-        #         status = "✅" if "success" in l_res["status"] else "❌"
-        #         print(f" {status} {l_res['total_elapsed']:.2f}s | {l_res['tokens']['total']} tok | ${l_res['tokens']['cost']:.4f}")
-        #     except Exception as e:
-        #         print(f" ❌ {e}")
-        #         task_results["langchain"].append({"status": "error", "total_elapsed": 0, "compute_time": 0, "tokens": {"total": 0, "cost": 0.0}})
-            
         await asyncio.sleep(1) # Small delay between tasks
 
     # The `results` object is now populated by `OVERALL_STATS`

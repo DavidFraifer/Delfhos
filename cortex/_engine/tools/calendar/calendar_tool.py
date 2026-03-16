@@ -466,7 +466,19 @@ async def calendar_tool(
             console.tool(f"[CALENDAR RESPOND] {summary}", task_id=task_id, agent_id=agent_id)
             return {"message": summary, "event": event, "eventId": event_id}
 
-        raise ToolExecutionError(tool_name="calendar", detail=f"Unsupported calendar action '{action}'.")
+        # Unknown action - format beautiful error with available actions
+        error_detail = (
+            f"Unsupported calendar action '{action}'\n\n"
+            f"📋 Available actions:\n"
+            f"    • LIST - Search for events\n"
+            f"    • GET - Fetch a specific event by ID\n"
+            f"    • CREATE - Create a new event\n"
+            f"    • UPDATE - Update event fields\n"
+            f"    • DELETE - Delete an event\n"
+            f"    • RESPOND - Update RSVP status\n\n"
+            f"Use one of these actions in your next request."
+        )
+        raise ToolExecutionError(tool_name="calendar", detail=error_detail)
 
     except GoogleCalendarError as exc:
         console.error("[CALENDAR]", str(exc), task_id=task_id, agent_id=agent_id)
