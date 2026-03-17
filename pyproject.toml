@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "delfhos"
-version = "0.4.0"
+version = "0.4.2"
 description = "Delfhos — AI agent SDK with typed connections and tool orchestration"
 keywords = ["ai", "agents", "sdk", "automation", "mcp", "gemini"]
 authors = [
@@ -34,6 +34,8 @@ dependencies = [
     "tenacity>=8.0.0",
     "numpy>=1.24.0",
     "sentence-transformers>=2.2.0",
+    "transformers>=4.30.0",
+    "huggingface-hub>=0.16.0",
     "psycopg2-binary>=2.9,<3.0",
     "mysql-connector-python>=8.0,<9.0",
     "openpyxl>=3.1.0",

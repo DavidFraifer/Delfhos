@@ -35,32 +35,44 @@ def _has_confirm_policy(confirm_policy: Any) -> bool:
     return False
 
 
-from delfhos.errors import AgentConfirmationError
-
-
 class Cortex:
     """
-    Cortex AI agent — orchestrates tools, code generation, and execution.
+    AI agent that executes tasks by generating and running Python code against your tools.
+
+    Cortex orchestrates a multi-step workflow:
+      1. Prefilter: Choose relevant tools for the task.
+      2. Generate: Create optimized Python code using an LLM.
+      3. Execute: Run code in a sandbox against real services.
+      4. Iterate: Get feedback and refine until the goal succeeds.
+
+    Quick example:
+        agent = Cortex(tools=[Gmail(), Drive()], llm="gemini-3.1-flash-lite-preview")
+        agent.start().run("Archive unread emails and summarize to alice@co.com")
+
+    Advanced example:
+        agent = Cortex(
+            tools=[WebSearch(), SQL(url="postgresql://..."), Sheets(...)],
+            light_llm="gemini-3.1-flash-lite-preview",
+            heavy_llm="gemini-3.1-pro",
+            chat=Chat(keep=5, summarize=True),
+            system_prompt="You are a data analyst. Be thorough.",
+            confirm=["write", "delete"],
+            on_confirm=lambda brief: input(f"Approve {brief}? ").lower() == "y"
+        )
 
     Args:
-        tools:        List of tools: @tool-decorated functions,
-                      service tools (Gmail, SQL, Sheets...), and MCP servers.
-        
-        llm:          Primary LLM model. Choose ONE of:
-                      - llm: Single model for all operations (simple mode)
-                      - light_llm + heavy_llm: Model pair (light for filtering, heavy for code)
-                      
-        light_llm:    Optional fast LLM model for filtering and simple tasks.
-                      Required if using model pair mode (must use with heavy_llm).
-        heavy_llm:    Optional stronger LLM model for code generation.
-                      Required if using model pair mode (must use with light_llm).
-        
-        summarizer_llm: Optional model for chat compression summarization.
-        system_prompt: Optional agent role description/instruction.
-        confirm:      Deployment-level confirmation policy. Can be a list of tool kinds 
-                      (e.g., ["send", "write"]) or True for all.
-        on_confirm:   Optional callback for approval decisions. Providing this automatically
-                      enables human approval.
+        tools: Service tools (Gmail, Drive, SQL, MCP, etc) or @tool functions.
+        llm: Single LLM for all ops (simple). Use either llm OR (light_llm + heavy_llm).
+        light_llm: Fast LLM for prefiltering (advanced; requires heavy_llm).
+        heavy_llm: Stronger LLM for code generation (advanced; requires light_llm).
+        summarizer_llm: Optional model for conversation compression.
+        chat: Chat(keep=10, summarize=False) for session memory.
+        memory: Persistent memory across sessions (e.g., SQL database).
+        system_prompt: Context/role injected into every LLM call.
+        confirm: Approval policy: True (all), ["write", "delete"], or "none".
+        on_confirm: Approval callback fn(brief) -> bool. If set, enables human-in-the-loop.
+        verbose: If True, print detailed execution traces.
+        providers: API key overrides {\"google\": \"...\", \"openai\": \"...\", etc}.
     """
 
     def __init__(
@@ -76,19 +88,51 @@ class Cortex:
         confirm: Optional[Union[bool, List[str], str]] = None,
         on_confirm: Optional[Callable] = None,
         providers: Optional[Dict[str, str]] = None,
-        verbosity: str = "regular",
+        verbose: bool = False,
     ):
+        """Initialize an Agent (Cortex) with tools and language models.
+        
+        Args:
+            tools: List of Service tools (Gmail, Drive, SQL, MCP, etc), @tool functions, or Connections.
+            llm: Single LLM for all operations (e.g., "gemini-3.1-flash-lite-preview").
+                 Shorthand for: light_llm=llm, heavy_llm=llm.
+            light_llm: (Advanced) Fast LLM for prefiltering/lightweight tasks (requires heavy_llm).
+            heavy_llm: (Advanced) Powerful LLM for code generation (requires light_llm).
+            chat: Chat(keep=10, summarize=True) — session memory & auto-summarization.
+            memory: Persistent memory for facts/context (e.g., persisted embeddings).
+            system_prompt: Custom instructions injected into every LLM call.
+            confirm: Approval policy before executing actions:
+                     - True: require approval for everything
+                     - False/"none": no approvals
+                     - ["write", "delete"]: only approve these actions (default)
+            on_confirm: Approval callback fn(brief) -> bool for custom approval UI.
+            verbose: If True, print detailed execution traces and debugging info.
+            providers: Override API keys {\"google\": \"...\", \"openai\": \"...\", etc}.
+        
+        Example::
+        
+            # Simple (single LLM)
+            agent = Agent(
+                tools=[Gmail(), Drive()],
+                llm="gemini-3.1-flash-lite-preview"
+            )
+            agent.run("Forward today's reports to alice@co.com")
+            
+            # Advanced (multiple LLMs + memory)
+            agent = Agent(
+                tools=[WebSearch(), SQL(url="..."), Sheets(...)],
+                light_llm="gemini-3.1-flash-lite-preview",
+                heavy_llm="gemini-3.1-pro",
+                chat=Chat(),  # auto-summarizes
+                confirm=["write", "delete"],  # require approval
+                verbose=True
+            )
+        """
         resolved_tools = tools or []
         resolved_confirm = ["write", "delete"] if confirm is None else confirm
 
         if memory is not None and chat is None:
             chat = Chat(keep=8, summarize=True)
-
-        if isinstance(resolved_confirm, list) or (isinstance(resolved_confirm, str) and resolved_confirm.strip().lower() not in ("all", "none", "false", "")):
-            for t in resolved_tools:
-                if type(t).__name__ == "Tool" or (callable(t) and hasattr(t, "tool_name") and hasattr(t, "execute")):
-                    if not getattr(t, "kind", None):
-                        raise AgentConfirmationError(confirm=resolved_confirm)
 
         self._agent = Agent(
             tools=resolved_tools,
@@ -102,7 +146,7 @@ class Cortex:
             chat=chat,
             memory=memory,
             providers=providers,
-            verbose=verbosity,
+            verbose=verbose,
             _explicit_llms={
                 "light_llm": light_llm is not None,
                 "heavy_llm": heavy_llm is not None,
@@ -144,14 +188,13 @@ class Cortex:
         # Note: run() will auto-start the agent and print task box first
         self._agent.run(task)
 
-    def run(self, task: str, timeout: float = 60.0, poll_interval: float = 0.5) -> bool:
+    def run(self, task: str, timeout: float = 60.0) -> bool:
         """
         Submit a task and block until it completes (or timeout is reached).
 
         Args:
-            task:          Natural language task description.
-            timeout:       Maximum seconds to wait (default: 60).
-            poll_interval: How often to poll for completion (seconds).
+            task:    Natural language task description.
+            timeout: Maximum seconds to wait (default: 60).
 
         Returns:
             True if completed, False if timed out.
@@ -165,6 +208,7 @@ class Cortex:
         # Prevent returning early before the scheduler picks up the task.
         deadline = time.time() + timeout
         task_started = False
+        poll_interval = 0.1  # Internal polling frequency
         while time.time() < deadline:
             current = self._active_task_count()
             if not task_started and current > before:
@@ -173,14 +217,13 @@ class Cortex:
                 return True
             time.sleep(poll_interval)
         return False
-    async def arun(self, task: str, timeout: float = 60.0, poll_interval: float = 0.5) -> bool:
+    async def arun(self, task: str, timeout: float = 60.0) -> bool:
         """
         Submit a task asynchronously and wait for its completion.
 
         Args:
-            task:          Natural language task description.
-            timeout:       Maximum seconds to wait (default: 60).
-            poll_interval: How often to poll for completion (seconds).
+            task:    Natural language task description.
+            timeout: Maximum seconds to wait (default: 60).
 
         Returns:
             True if completed, False if timed out.
@@ -197,6 +240,7 @@ class Cortex:
         # Prevent returning early before the scheduler picks up the task.
         deadline = time.time() + timeout
         task_started = False
+        poll_interval = 0.1  # Internal polling frequency
         while time.time() < deadline:
             current = self._active_task_count()
             if not task_started and current > before:

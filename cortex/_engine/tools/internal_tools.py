@@ -12,11 +12,11 @@ from ..connection import Connection
 from .gmail.gmail_tool_unified import gmail_tool_unified
 
 
-def _safe_log_tokens(logger: Any, task_id: str, agent_id: str, token_info: dict):
+def _safe_log_tokens(logger: Any, task_id: str, agent_id: str, token_info: dict, model: str = None):
     """Best-effort token logging helper for non-critical tool paths."""
     if logger and token_info and (task_id or agent_id):
         try:
-            logger.add_tokens(task_id or agent_id, token_info, "gemini-2.5-flash", "web_search")
+            logger.add_tokens(task_id or agent_id, token_info, model or "gemini-3.1-flash-lite-preview", "web_search")
         except Exception:
             pass
 
@@ -95,14 +95,13 @@ async def websearch_tool(user_input: str = "", task_id: str = None, light_llm: s
         result, token_info = await web_search(
             query=search_query,
             task_id=task_id,
-            fast_search=True,
-            light_llm=light_llm,
+            model=light_llm,
             agent_id=agent_id,
             validation_mode=validation_mode
         )
         
         # Log tokens for web search
-        _safe_log_tokens(logger, task_id, agent_id, token_info)
+        _safe_log_tokens(logger, task_id, agent_id, token_info, model=light_llm)
 
         # Store result in task memory if available
 

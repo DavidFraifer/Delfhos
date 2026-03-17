@@ -11,7 +11,7 @@ Example:
     # Or with OAuth:
     sheets = SheetsConnection(
         oauth_credentials="path/to/client_secrets.json",
-        allowed=["read"],
+        allow=["read"],
     )
 """
 
@@ -21,15 +21,23 @@ from .base import GoogleBaseConnection
 
 class SheetsConnection(GoogleBaseConnection):
     """
-    Google Sheets connection.
-
-    Auth methods (use one):
-        service_account:   Path to SA JSON key.
-        oauth_credentials: Path to client_secrets.json.
-
+    Google Sheets integration for reading and writing spreadsheets.
+    
+    Example:
+        sheets = Sheets(oauth_credentials="client_secrets.json")
+        agent = Agent(tools=[sheets, SQL(...)], llm="gemini-3.1-flash-lite-preview")
+        agent.run("Pull yesterday's sales from the DB and update the Q3 Summary sheet")
+    
+    Authentication (choose one):
+        service_account: Google Service Account JSON (for servers).
+        oauth_credentials: OAuth client_secrets.json (for personal accounts).
+    
     Args:
-        actions: ["read", "write", "create"] — omit to allow all.
-        name:    Label (default: "sheets").
+        delegated_user: Email to impersonate (service account + delegation only).
+        allow: Restrict actions, e.g., ["read"] blocks writing (default: allow all).
+                Supported: "read", "write", "create", "format", "chart", "batch".
+        name: Custom label (default: "sheets").
+        metadata: Extra info dict for tracking/logging.
     """
 
     TOOL_NAME = "sheets"
@@ -41,7 +49,7 @@ class SheetsConnection(GoogleBaseConnection):
         service_account: Optional[str] = None,
         oauth_credentials: Optional[str] = None,
         delegated_user: Optional[str] = None,
-        allowed: Optional[Union[str, List[str]]] = None,
+        allow: Optional[Union[str, List[str]]] = None,
         name: str = "sheets",
         metadata: Optional[Dict[str, Any]] = None,
     ):
@@ -49,7 +57,7 @@ class SheetsConnection(GoogleBaseConnection):
             service_account=service_account,
             oauth_credentials=oauth_credentials,
             delegated_user=delegated_user,
-            allowed=allowed,
+            allow=allow,
             name=name,
             metadata=metadata,
         )

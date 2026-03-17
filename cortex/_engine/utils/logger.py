@@ -3,6 +3,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional
+from ..config.pricing import calculate_cost_usd, get_user_pricing_path, has_pricing_for_model
+from .console import console
 
 class CORTEXLogger:
 
@@ -12,6 +14,7 @@ class CORTEXLogger:
         if self.log_file and self.log_file.parent and str(self.log_file.parent) != ".":
             self.log_file.parent.mkdir(parents=True, exist_ok=True)
         self.active_tasks: Dict[str, Dict[str, Any]] = {}
+        self._warned_unpriced_models = set()
         
     def start_task(self, task_id: str, message: str, agent_id: str = "unknown"):
         if task_id in self.active_tasks:
@@ -31,6 +34,8 @@ class CORTEXLogger:
             "input_tokens": 0,
             "output_tokens": 0,
             "llm_calls": 0,
+            "total_cost_usd": 0.0,
+            "pricing_path": get_user_pricing_path(),
             "llm_breakdown": [],
             "status": "running",
         }
@@ -41,12 +46,24 @@ class CORTEXLogger:
             output_tokens = token_info.get("output_tokens", 0)
             total_tokens = token_info.get("total_tokens", 0)
             image_count = token_info.get("image_count", 0)
+            model_key = (model or "").strip().lower()
+            pricing_available = bool(model_key) and has_pricing_for_model(model)
+            if model_key and not pricing_available and model_key not in self._warned_unpriced_models:
+                console.warning(
+                    "Pricing missing",
+                    f"No USD pricing configured for model '{model}'. Cost will not be calculated for this model. Add it to {get_user_pricing_path()}.",
+                    task_id=task_id,
+                )
+                self._warned_unpriced_models.add(model_key)
+
+            call_cost_usd = calculate_cost_usd(model, input_tokens, output_tokens) if pricing_available else 0.0
             
             # Update token and image counts
             self.active_tasks[task_id]["tokens_used"] += total_tokens
             self.active_tasks[task_id]["input_tokens"] += input_tokens
             self.active_tasks[task_id]["output_tokens"] += output_tokens
             self.active_tasks[task_id]["llm_calls"] += 1
+            self.active_tasks[task_id]["total_cost_usd"] += call_cost_usd
             if image_count:
                 self.active_tasks[task_id].setdefault("image_calls", 0)
                 self.active_tasks[task_id].setdefault("images_used", 0)
@@ -61,6 +78,7 @@ class CORTEXLogger:
                     "output_tokens": output_tokens,
                     "image_count": image_count,
                     "duration": duration,
+                    "cost_usd": call_cost_usd,
                     "function_name": function_name or "unknown",
                     "timestamp": datetime.now().isoformat()
                 }
@@ -105,6 +123,8 @@ class CORTEXLogger:
                 "input_tokens": task_data.get("input_tokens", 0),
                 "output_tokens": task_data.get("output_tokens", 0),
                 "llm_calls": task_data.get("llm_calls", 0),
+                "total_cost_usd": round(task_data.get("total_cost_usd", 0.0), 8),
+                "pricing_path": task_data.get("pricing_path"),
                 "llm_breakdown": task_data.get("llm_breakdown", []),
                 "status": task_data["status"],
             }
@@ -129,9 +149,9 @@ class CORTEXLogger:
             if not lines:
                 return self._empty_stats()
             
-            stats = {"total_tasks": 0, "total_duration": 0, "total_tokens": 0, "total_input_tokens": 0, 
+                stats = {"total_tasks": 0, "total_duration": 0, "total_tokens": 0, "total_input_tokens": 0,
                     "total_output_tokens": 0, "total_llm_calls": 0, "total_iterations": 0, 
-                    "completed_tasks": 0}
+                    "completed_tasks": 0, "total_cost_usd": 0.0}
             
             for line in lines:  
                 try:
@@ -143,6 +163,7 @@ class CORTEXLogger:
                     stats["total_output_tokens"] += entry.get("output_tokens", 0)
                     stats["total_llm_calls"] += entry.get("llm_calls", 0)
                     stats["total_iterations"] += entry.get("iterations", 0)
+                    stats["total_cost_usd"] += float(entry.get("total_cost_usd", 0.0) or 0.0)
                     
                     if entry.get("status") == "completed":
                         stats["completed_tasks"] += 1
@@ -158,8 +179,10 @@ class CORTEXLogger:
             stats.update({
                 "avg_duration": round(stats["total_duration"] / stats["total_tasks"], 2),
                 "avg_tokens": round(stats["total_tokens"] / stats["total_tasks"], 1),
+                "avg_cost_usd": round(stats["total_cost_usd"] / stats["total_tasks"], 6),
                 "avg_iterations": round(stats["total_iterations"] / stats["total_tasks"], 1),
                 "total_duration": round(stats["total_duration"], 2),
+                "total_cost_usd": round(stats["total_cost_usd"], 6),
                 "log_file": str(self.log_file)
             })
             

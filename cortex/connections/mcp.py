@@ -6,6 +6,7 @@ Supports shorthand resolution:
   MCP("server-github") -> "npx -y @modelcontextprotocol/server-github"
 """
 
+import json
 from typing import Any, Dict, List, Optional, Union
 from urllib.parse import urlparse
 
@@ -13,15 +14,90 @@ from cortex._engine.connection import AuthType
 from .base import BaseConnection
 
 
+class _PrettyInspectDict(dict):
+    """Dict that pretty-prints as indented JSON when printed."""
+
+    def __str__(self) -> str:
+        methods = self.get("methods")
+        if not isinstance(methods, list):
+            return json.dumps(self, indent=2, ensure_ascii=False)
+
+        server = str(self.get("server", "mcp"))
+        total = self.get("total", len(methods))
+        auth_type = str(self.get("auth_type", "none"))
+        allowed = self.get("allowed", None)
+
+        lines = [f"\n📋 MCP Server: {server}", "=" * 70]
+
+        if allowed is not None:
+            if isinstance(allowed, list):
+                allow_text = ", ".join(allowed) if allowed else "(none)"
+            else:
+                allow_text = str(allowed)
+            lines.append(f"🔐 Allowed: {allow_text}")
+            lines.append("")
+
+        # Detailed mode: methods is list[dict{name, description}]
+        if methods and isinstance(methods[0], dict):
+            for i, method in enumerate(methods):
+                name = str(method.get("name", ""))
+                description = str(method.get("description", ""))
+                # Bold cyan method name for distinction
+                styled_name = f"\033[1m\033[96m{i+1:2}. {name}\033[0m"
+                lines.append(f"  {styled_name}")
+                if description:
+                    # Wrap description text at terminal width for readability
+                    wrapped = self._wrap_text(description, indent=6, width=64)
+                    lines.append(wrapped)
+                lines.append("")
+        else:
+            # Compact mode: methods is list[str]
+            for name in methods:
+                lines.append(f"  • {name}")
+
+        lines.extend(["", "=" * 70, f"Total: {total} actions | Auth: {auth_type}", ""])
+        return "\n".join(lines)
+
+    @staticmethod
+    def _wrap_text(text: str, indent: int = 6, width: int = 64) -> str:
+        """Wrap long text at width with indentation."""
+        import textwrap
+        indent_str = " " * indent
+        wrapped = textwrap.fill(
+            text,
+            width=width,
+            initial_indent=indent_str,
+            subsequent_indent=indent_str,
+        )
+        return wrapped
+
+    def __repr__(self) -> str:
+        return self.__str__()
+
+
 class MCP(BaseConnection):
     """
-    Connects to ANY Model Context Protocol (MCP) server, turning it into a native Delfhos tool.
+    Connect to any Model Context Protocol (MCP) server and use it as a native Delfhos tool.
     
-    Accepts 4 formats for the server string:
-      1. Short name:    MCP("server-github") -> resolves to official @modelcontextprotocol package
-      2. Scoped npm:    MCP("@anthropic/server-x") -> resolves to npx command
-      3. Full command:  MCP("npx -y custom-server") -> runs as-is
-      4. Remote URL:    MCP("https://mcp.remote.com/sse") -> connects via SSE
+    Example (GitHub integration):
+        github_tool = MCP("server-github", env={"GITHUB_TOKEN": "..."})
+        agent = Agent(tools=[github_tool], llm="gemini-3.1-flash-lite-preview")
+        agent.run("Create a new issue in my org/repo with title 'Bug: ...'")
+    
+    Server formats supported:
+      1. Short name:      MCP("server-github") — resolves to official @modelcontextprotocol pkg
+      2. Scoped npm:      MCP("@org/server-foo") — runs via npx
+      3. Full command:    MCP("npx -y custom-server --arg=value") — executes as-is
+      4. Remote SSE URL:  MCP("https://mcp.example.com/sse") — connects via HTTP
+    
+    Args:
+        server: Server identifier (short name, npm package, full command, or URL).
+        args: Extra CLI arguments appended to the server command.
+        env: Environment variables (e.g., {"GITHUB_TOKEN": "...", "DB_URL": "..."}).
+        headers: HTTP headers for SSE connections (e.g., {"Authorization": "Bearer ..."})
+        name: Custom label for this connection (default: auto-derived from server name).
+        allow: Restrict which server actions are exposed to the agent (e.g., ["search", "read"]).
+        cache: If True, reuse ~/delfhos/mcp_cache/ to skip introspection on next run.
     """
     
     # TOOL_NAME is overridden dynamically per instance
@@ -40,7 +116,7 @@ class MCP(BaseConnection):
         env: Optional[Dict[str, str]] = None,
         headers: Optional[Dict[str, str]] = None,
         name: Optional[str] = None,
-        allowed: Optional[Union[str, List[str]]] = None,
+        allow: Optional[Union[str, List[str]]] = None,
         cache: bool = True,
     ):
         """
@@ -51,7 +127,7 @@ class MCP(BaseConnection):
             headers: HTTP headers for SSE connections.
             name: Custom name for this connection in Delfhos (defaults to auto-derived).
             actions: (Not typically used for MCP) List of allowed action names.
-            cache: If True, uses ~/.delfhos/mcp_cache/ to skip introspection on next run.
+            cache: If True, uses ~/delfhos/mcp_cache/ to skip introspection on next run.
         """
         self.raw_server = server
         self.command_or_url = self._resolve_server(server)
@@ -69,7 +145,7 @@ class MCP(BaseConnection):
 
         super().__init__(
             credentials={"env": self.env, "headers": self.headers},
-            allowed=allowed,
+            allow=allow,
             name=self.mcp_tool_name,
             auth_type=AuthType.NONE,  # Handled via env/headers transparently
         )
@@ -88,7 +164,7 @@ class MCP(BaseConnection):
         """
         Discover MCP actions before creating/running an Agent.
 
-        The manifest is automatically cached (~/.delfhos/mcp_cache/) for faster runs.
+        The manifest is automatically cached (~/delfhos/mcp_cache/) for faster runs.
         """
         probe = cls(
             server,
@@ -234,8 +310,8 @@ class MCP(BaseConnection):
             
         executor = MCPExecutor(client, self.mcp_tool_name, manifest["tools"])
         allowed_actions = None
-        if self.allowed is not None:
-            normalized = {self._normalize_action(a) for a in self.allowed}
+        if self.allow is not None:
+            normalized = {self._normalize_action(a) for a in self.allow}
             discovered = {self._normalize_action(t.get("mcp_name", "")) for t in manifest.get("tools", []) if t.get("mcp_name")}
             disallowed_requested = sorted(a for a in normalized if a not in discovered)
             if disallowed_requested:
@@ -248,22 +324,30 @@ class MCP(BaseConnection):
                     ),
                 )
             allowed_actions = normalized
-        namespace = build_mcp_tools(executor, self.mcp_tool_name, allowed=allowed_actions)
+        namespace = build_mcp_tools(executor, self.mcp_tool_name, allow=allowed_actions)
         internal_tools[self.mcp_tool_name] = namespace
         
         # Keep client reference so we can shut it down later
         self._mcp_client = client
 
-    def inspect(self, verbose: str = "regular") -> str | dict:
+    def inspect(self, verbose: bool = False) -> dict:
         """
-        Return available MCP actions.
+        List available actions on this MCP server.
         
         Args:
-            verbose: "minimal" (just action names), "regular" (with descriptions),
-                    or "full" (include allowed/available info)
+            verbose: If False (default), returns a dict with every available method name.
+                     If True, returns a detailed dict including allowed methods,
+                     every method, and descriptions.
         
         Returns:
-            str if verbose is "minimal" or "regular", dict for "full"
+            dict in both modes.
+        
+        Example::
+        
+            mcp = MCP("server-filesystem", args=["."])
+            print(mcp.inspect())  # Pretty JSON dict with method names
+            
+            print(mcp.inspect(verbose=True))  # Dict with allowed + methods + descriptions
         """
         from cortex._engine.mcp.compiler import MCPCompiler
         from cortex._engine.mcp.client import MCPClient
@@ -291,28 +375,35 @@ class MCP(BaseConnection):
             mcp_name = tool.get("mcp_name", "")
             available_actions.append(mcp_name)
         
-        if verbose == "minimal":
-            return ", ".join(available_actions)
-        
-        elif verbose == "regular":
-            lines = [f"\n📋 MCP Server: {self.mcp_tool_name}", "=" * 70]
-            for tool in manifest.get("tools", []):
-                mcp_name = tool.get("mcp_name", "")
-                description = tool.get("description", "")
-                lines.append(f"  • {mcp_name}")
-                lines.append(f"    └─ {description[:60]}{'...' if len(description) > 60 else ''}")
-            
-            lines.extend(["", "=" * 70, f"Total: {len(available_actions)} actions", ""])
-            return "\n".join(lines)
-        
-        else:  # full
-            return {
+        if not verbose:
+            return _PrettyInspectDict(
+                {
+                    "server": self.mcp_tool_name,
+                    "methods": available_actions,
+                    "total": len(available_actions),
+                    "auth_type": self.auth_type.value if hasattr(self, 'auth_type') else None,
+                }
+            )
+
+        allow_actions = self.effective_allowed_actions()
+        methods = []
+        for tool in manifest.get("tools", []):
+            methods.append(
+                {
+                    "name": tool.get("mcp_name", ""),
+                    "description": tool.get("description", ""),
+                }
+            )
+
+        return _PrettyInspectDict(
+            {
                 "server": self.mcp_tool_name,
-                "available": available_actions,
-                "allowed": self.effective_allowed_actions(),
+                "allowed": allow_actions,
+                "methods": methods,
                 "total": len(available_actions),
-                "auth_type": self.auth_type.value if hasattr(self, 'auth_type') else None
+                "auth_type": self.auth_type.value if hasattr(self, 'auth_type') else None,
             }
+        )
 
     def close(self):
         """Shut down the MCP server when closing the connection."""

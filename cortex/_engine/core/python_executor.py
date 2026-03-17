@@ -370,8 +370,9 @@ class PythonExecutor:
                 self.light_llm,
                 self.heavy_llm,
                 tool_tracker=tool_tracker,
-                vision_model=self.vision_model,
-                search_model=self.search_model
+                vision_llm=self.vision_model,
+                search_llm=self.search_model,
+                memory=self.orchestrator.memory if self.orchestrator else None,
             )
             
             # Build safe execution namespace

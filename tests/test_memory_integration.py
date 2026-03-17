@@ -118,7 +118,11 @@ def test_chat_append_and_compression_carry_forward():
     print("\n=== Chat: compression carries forward prior summary ===")
     from delfhos.memory import Chat
 
-    chat = Chat(keep=2, summarize=True)
+    chat_db = os.path.join(tempfile.gettempdir(), "delfhos_chat_carry_forward.db")
+    if os.path.exists(chat_db):
+        os.remove(chat_db)
+
+    chat = Chat(keep=2, summarize=True, path=chat_db, namespace="chat_carry_forward")
     chat.summary = "Previously: user asked about invoice #42."
 
     # Simulate 5 rounds → 10 messages total
@@ -137,13 +141,20 @@ def test_chat_append_and_compression_carry_forward():
     print(f"  remaining messages: {len(chat.messages)}")
     print("  OK")
 
+    if os.path.exists(chat_db):
+        os.remove(chat_db)
+
 
 def test_chat_apply_compression_keeps_recent():
     """apply_compression(keep=3) keeps exactly the last 3 messages."""
     print("\n=== Chat: apply_compression keeps recent messages ===")
     from delfhos.memory import Chat
 
-    chat = Chat(keep=3, summarize=True)
+    chat_db = os.path.join(tempfile.gettempdir(), "delfhos_chat_keep_recent.db")
+    if os.path.exists(chat_db):
+        os.remove(chat_db)
+
+    chat = Chat(keep=3, summarize=True, path=chat_db, namespace="chat_keep_recent")
     for i in range(6):
         chat.append("user", f"msg {i}")
 
@@ -155,6 +166,9 @@ def test_chat_apply_compression_keeps_recent():
     print("  Messages kept correctly")
     print("  OK")
 
+    if os.path.exists(chat_db):
+        os.remove(chat_db)
+
 
 # ---------------------------------------------------------------------------
 # Orchestrator callback test
@@ -165,7 +179,11 @@ def test_orchestrator_on_task_complete_appends_to_chat():
     print("\n=== Orchestrator: on_task_complete → Chat ===")
     from delfhos.memory import Chat
 
-    chat = Chat(keep=10, summarize=False)
+    chat_db = os.path.join(tempfile.gettempdir(), "delfhos_chat_orchestrator_append.db")
+    if os.path.exists(chat_db):
+        os.remove(chat_db)
+
+    chat = Chat(keep=10, summarize=False, path=chat_db, namespace="chat_orchestrator_append")
 
     # Simulate what Agent.__init__ registers
     def _append_assistant_response(task_id: str, message: str):
@@ -181,6 +199,9 @@ def test_orchestrator_on_task_complete_appends_to_chat():
     assert chat.messages[0]["content"] == "The answer is 42."
     print("  Callback captured response: OK")
     print("  Silent skip of 'Task completed successfully': OK")
+
+    if os.path.exists(chat_db):
+        os.remove(chat_db)
 
 
 if __name__ == "__main__":

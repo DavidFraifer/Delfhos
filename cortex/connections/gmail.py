@@ -9,13 +9,13 @@ Example (Service Account — recommended for servers):
     gmail = GmailConnection(
         service_account="path/to/service-account.json",
         delegated_user="admin@company.com",
-        allowed=["read"],
+        allow=["read"],
     )
 
 Example (OAuth — for personal accounts):
     gmail = GmailConnection(
         oauth_credentials="path/to/client_secrets.json",
-        allowed=["read", "send"],
+        allow=["read", "send"],
     )
 """
 
@@ -25,18 +25,26 @@ from .base import GoogleBaseConnection
 
 class GmailConnection(GoogleBaseConnection):
     """
-    Gmail connection.
-
-    Auth methods (use one):
-        service_account:   Path to SA JSON key (for servers / Workspace).
-        oauth_credentials: Path to client_secrets.json (for personal accounts).
-
+    Gmail integration for reading emails and sending messages via agent.
+    
+    Example (service account):
+        gmail = Gmail(service_account="sa.json", delegated_user="user@workspace.com")
+        agent = Agent(tools=[gmail], llm="gemini-3.1-flash-lite-preview")
+        agent.run("Reply to all unread emails with a summary of today's meetings")
+    
+    Example (personal OAuth):
+        gmail = Gmail(oauth_credentials="client_secrets.json")
+        agent.run("Forward important emails to alice@co.com")
+    
+    Authentication (choose one):
+        service_account: Path to Google Service Account JSON (for Workspace/servers).
+        oauth_credentials: Path to OAuth client_secrets.json (for personal accounts).
+    
     Args:
-        delegated_user: Email to impersonate (service account only).
-        actions:        ["read", "send"] — restricts what the agent can do.
-                        Omit to allow all actions.
-        name:           Label for this connection (default: "gmail").
-        metadata:       Extra info, e.g. {"description": "Work inbox"}.
+        delegated_user: Email to impersonate (service account only; requires delegation).
+        allow: Restrict actions, e.g., ["read"] prevents sending (default: allow all).
+        name: Custom label (default: "gmail").
+        metadata: Extra info dict for tracking/logging.
     """
 
     TOOL_NAME = "gmail"
@@ -48,7 +56,7 @@ class GmailConnection(GoogleBaseConnection):
         service_account: Optional[str] = None,
         oauth_credentials: Optional[str] = None,
         delegated_user: Optional[str] = None,
-        allowed: Optional[Union[str, List[str]]] = None,
+        allow: Optional[Union[str, List[str]]] = None,
         name: str = "gmail",
         metadata: Optional[Dict[str, Any]] = None,
     ):
@@ -56,7 +64,7 @@ class GmailConnection(GoogleBaseConnection):
             service_account=service_account,
             oauth_credentials=oauth_credentials,
             delegated_user=delegated_user,
-            allowed=allowed,
+            allow=allow,
             name=name,
             metadata=metadata,
         )

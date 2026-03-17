@@ -54,7 +54,7 @@ class MockEmail(BaseConnection):
     def __init__(self, name: str = "gmail"):
         super().__init__(
             credentials={"mock": True},
-            allowed=["READ", "SEND"], # Allow core actions
+            allow=["READ", "SEND"], # Allow core actions
             name=name,
             auth_type=AuthType.NONE
         )

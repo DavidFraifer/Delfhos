@@ -1,10 +1,12 @@
 import os
 import json
 import sqlite3
+import logging
+import re
 from typing import List, Dict, Optional, Any
 import threading
-from typing import List, Dict, Optional, Any
-import threading
+import io
+from contextlib import redirect_stdout, redirect_stderr
 
 class Memory:
     """
@@ -22,31 +24,53 @@ class Memory:
         # Better quality local model
         memory = Memory(embedding_model="nomic-embed-text")
 
-    Supported local models::
+        # Any Sentence Transformers-compatible model id
+        memory = Memory(embedding_model="BAAI/bge-small-en-v1.5")
 
-        all-MiniLM-L6-v2    — 90MB, fast, good quality (default)
-        nomic-embed-text     — 270MB, better quality
+    Any Sentence Transformers-compatible embedding model can be used.
+    The following aliases are built-in::
+
+        all-MiniLM-L6-v2      -> sentence-transformers/all-MiniLM-L6-v2 (default)
+        nomic-embed-text      -> nomic-ai/nomic-embed-text-v1.5
     """
 
-    _SUPPORTED_MODELS = {"all-MiniLM-L6-v2", "nomic-embed-text"}
+    _DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+    _MODEL_ALIASES = {
+        "all-MiniLM-L6-v2": "all-MiniLM-L6-v2",
+        "nomic-embed-text": "nomic-ai/nomic-embed-text-v1.5",
+    }
 
     def __init__(
         self,
         guidelines: Optional[str] = None,
-        path: str = "~/.delfhos/memory.db",
+        path: Optional[str] = None,
         namespace: str = "default",
         embedding_model: str = "all-MiniLM-L6-v2",
     ):
         self.guidelines = guidelines
-        self.path = os.path.expanduser(path)
         self.namespace = namespace
-        self.embedding_model_name = embedding_model
+        self.path = os.path.expanduser(path) if path else self._default_path_for_namespace(namespace)
+        model_name = (embedding_model or self._DEFAULT_EMBEDDING_MODEL).strip()
+        self.embedding_model_name = model_name or self._DEFAULT_EMBEDDING_MODEL
 
         # Lazy-loaded embedding model (heavy import, only pay once)
         self._model = None
         self._embed_dim: Optional[int] = None
 
         self._init_db()
+
+    @staticmethod
+    def _sanitize_namespace(namespace: str) -> str:
+        raw = (namespace or "default").strip()
+        if not raw:
+            raw = "default"
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", raw)
+        return safe or "default"
+
+    @classmethod
+    def _default_path_for_namespace(cls, namespace: str) -> str:
+        filename = f"{cls._sanitize_namespace(namespace)}.db"
+        return os.path.expanduser(os.path.join("~", "delfhos", "memory", filename))
         
     def _init_db(self):
         """Initialize SQLite database and schema (text + embedding tables)."""
@@ -76,6 +100,15 @@ class Memory:
     # Embedding helpers
     # ------------------------------------------------------------------
 
+    def _resolve_embedding_model_name(self) -> str:
+        """Resolve user-provided model name, preserving compatibility aliases."""
+        return self._MODEL_ALIASES.get(self.embedding_model_name, self.embedding_model_name)
+
+    def _requires_nomic_prefix(self) -> bool:
+        """Nomic models expect search_document/search_query instruction prefixes."""
+        target = self._resolve_embedding_model_name().lower()
+        return "nomic-embed-text" in target
+
     def _get_model(self):
         """Lazy-load the sentence-transformer model once."""
         if self._model is not None:
@@ -89,6 +122,24 @@ class Memory:
                 detail="It is required for persistent memory embeddings."
             )
 
+        # Reduce noisy third-party download/model-load logs globally.
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+        logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+        logging.getLogger("transformers").setLevel(logging.ERROR)
+
+        try:
+            from huggingface_hub.utils import logging as hf_logging
+            hf_logging.set_verbosity_error()
+        except Exception:
+            pass
+
+        try:
+            from transformers import logging as tf_logging
+            tf_logging.set_verbosity_error()
+        except Exception:
+            pass
+
         # Log model loading for user visibility using official console
         import time
         model_load_start = time.time()
@@ -100,19 +151,17 @@ class Memory:
             # Fallback if cortex is not available
             console = None
         
-        if self.embedding_model_name == "nomic-embed-text":
-            msg = "Loading embedding model (nomic-embed-text)..."
-            if console:
-                console.info("Memory", msg)
-            self._model = SentenceTransformer(
-                "nomic-ai/nomic-embed-text-v1.5",
-                trust_remote_code=True,
-            )
-        else:
-            msg = "Loading embedding model (all-MiniLM-L6-v2)..."
-            if console:
-                console.info("Memory", msg)
-            self._model = SentenceTransformer("all-MiniLM-L6-v2")
+        target_model = self._resolve_embedding_model_name()
+        msg = f"Loading embedding model ({target_model})..."
+        if console:
+            console.info("Memory", msg)
+
+        kwargs = {"trust_remote_code": True} if self._requires_nomic_prefix() else {}
+
+        # Silence residual noisy third-party model loading output that bypasses
+        # logger settings (stderr/stdout writes).
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self._model = SentenceTransformer(target_model, **kwargs)
         
         model_load_time = time.time() - model_load_start
         ready_msg = f"Embedding model ready ({model_load_time:.1f}s)"
@@ -126,7 +175,7 @@ class Memory:
         """Return numpy array of shape (len(texts), dim)."""
         import numpy as np
         model = self._get_model()
-        if self.embedding_model_name == "nomic-embed-text":
+        if self._requires_nomic_prefix():
             # nomic requires a task prefix
             texts = [f"search_document: {t}" for t in texts]
         return model.encode(texts, normalize_embeddings=True)
@@ -134,7 +183,7 @@ class Memory:
     def _embed_query(self, query: str):
         """Embed a single query string. Returns 1-D numpy array."""
         model = self._get_model()
-        if self.embedding_model_name == "nomic-embed-text":
+        if self._requires_nomic_prefix():
             query = f"search_query: {query}"
         return model.encode([query], normalize_embeddings=True)[0]
 
@@ -153,7 +202,14 @@ class Memory:
     # ------------------------------------------------------------------
 
     def context(self) -> str:
-        """Fetch all stored long-term memory for this namespace (full dump)."""
+        """Retrieve all stored memories for this namespace, in chronological order.
+        
+        Returns the complete long-term memory dump — useful for logging or inspection.
+        Much slower than `retrieve()` which uses semantic search.
+        
+        Returns:
+            Newline-joined string of all facts, or empty string if empty.
+        """
         with sqlite3.connect(self.path) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -168,10 +224,24 @@ class Memory:
         return "\n".join(row[0] for row in rows)
 
     def retrieve(self, query: str, top_k: int = 5, threshold: float = 0.3) -> str:
-        """Retrieve the most relevant memories for *query* using cosine similarity.
-
-        Returns a newline-joined string of the top-k facts above *threshold*,
-        or an empty string if nothing matches.
+        """Fetch the most relevant memories using semantic similarity.
+        
+        Uses local embeddings (no API calls) to find the closest match to your query.
+        Great for: "Find facts about Acme Corp", "What does the user prefer?", etc.
+        
+        Args:
+            query: A natural-language question or topic (e.g., "user billing email").
+            top_k: Max number of results to return (default 5).
+            threshold: Min similarity score (0.0–1.0) to include. Lower = broader matches.
+        
+        Returns:
+            Newline-joined string of relevant facts above threshold, or "" if no matches.
+        
+        Example::
+        
+            memory = Memory(namespace="user_profile")
+            memory.save("User is David. Likes Python. Works at Acme Corp.")
+            memory.retrieve("What's the user's company?")  # → "Works at Acme Corp."
         """
         import numpy as np
 
@@ -203,7 +273,21 @@ class Memory:
         return "\n".join(fact for _, fact in top) if top else ""
 
     def save(self, content: str):
-        """Save extracted knowledge to long-term memory with embeddings."""
+        """Store facts in long-term semantic memory.
+        
+        Splits content by newline into individual facts, embeds each one,
+        and stores in SQLite. Later calls to `retrieve()` will efficiently
+        find matching facts by meaning, not just keywords.
+        
+        Args:
+            content: One fact per line (or a multi-sentence block). Empty lines ignored.
+        
+        Example::
+        
+            memory = Memory(namespace="customer_acme")
+            memory.save("Account holder: Alice\nBilling email: alice@acme.com\nTier: Enterprise")
+            # Now retrieve("contact email") will find: "Billing email: alice@acme.com"
+        """
         if not content or not content.strip():
             return
 
@@ -227,9 +311,12 @@ class Memory:
                 )
 
     def backfill_embeddings(self):
-        """Generate embeddings for any memories that don't have them yet.
-
-        Useful after upgrading from a pre-embedding Memory database.
+        """Generate embeddings for memories missing them (e.g., after DB migration).
+        
+        If you imported old memory data or upgraded the Memory class without
+        embeddings, run this once to enable semantic search on those facts.
+        
+        Runs in-process (may take a few seconds for large databases).
         """
         with sqlite3.connect(self.path) as conn:
             cursor = conn.cursor()

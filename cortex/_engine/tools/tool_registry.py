@@ -974,12 +974,12 @@ def get_available_actions_for_connections(connections: List[Any], custom_tools: 
             result[tool_name] = set()
         
         # If no restrictions, add all actions for this tool
-        if not conn.allowed:
+        if not conn.allow:
             if tool_name in TOOL_ACTION_SUMMARIES:
                 result[tool_name].update(TOOL_ACTION_SUMMARIES[tool_name].keys())
         else:
             # Map frontend actions to registry actions
-            for frontend_action in conn.allowed:
+            for frontend_action in conn.allow:
                 mapped = map_frontend_action_to_registry_action(tool_name, frontend_action)
                 if mapped:
                     result[tool_name].add(mapped)

@@ -1,28 +1,57 @@
 """
-delfhos — AI agent SDK.
+delfhos — Simple, fast, cost-effective AI agents.
 
-The Agent class is the entry point. Give it tools and describe what you
-want in plain English — Delfhos takes care of the rest.
+Write autonomous agents in 5 lines of code. Delfhos handles tool integration,
+code generation, execution, and error recovery.
 
-Usage::
+Quick start::
 
-    from delfhos import Agent, tool
-    from delfhos.tools import Gmail, SQL
+    from delfhos import Agent, Gmail, Drive
+
+    agent = Agent(
+        tools=[Gmail(oauth_credentials="secrets.json"), Drive(oauth_credentials="secrets.json")],
+        llm="gemini-3.1-flash-lite-preview"
+    )
+    agent.run("Forward today's reports to alice@co.com and archive old ones")
+
+Custom tools::
+
+    from delfhos import tool
 
     @tool
-    def my_func(x: str) -> str:
-        return x.upper()
+    def analyze_sentiment(text: str) -> str:
+        \"\"\"Analyze sentiment of text.\"\"\"
+        return "positive" if "good" in text.lower() else "negative"
 
-    gmail = Gmail(oauth_credentials="client_secrets.json")
-    db    = SQL(url="postgresql://user:pass@host/mydb")
+    agent = Agent(tools=[analyze_sentiment, Gmail()], llm="gemini-3.1-flash-lite-preview")
 
-    agent = Agent(tools=[my_func, gmail, db])
-    agent.run("How many users signed up this week? Email a summary to the team.")
-    agent.stop()
+Restrict tool access::
+
+    gmail = Gmail(oauth_credentials="...", allow=["read"])  # Read-only
+    agent = Agent(tools=[gmail], confirm=["write", "delete"])  # Require approval
+
+Advanced (multiple LLMs, session memory)::
+
+    from delfhos import Chat
+
+    agent = Agent(
+        tools=[...],
+        light_llm="gemini-3.1-flash-lite-preview\",
+        heavy_llm="gemini-3.1-pro\",
+        chat=Chat(keep=5, summarize=True),
+        verbose=True
+    )
+
+Key features:
+  • Fast: Multi-step optimization with light/heavy LLM split.
+  • Safe: Built-in approval workflow, action restrictions, sandboxed execution.
+  • Transparent: See exactly what code the agent generated and why.
+  • Flexible: @tool decorator, service integrations (Gmail, Drive, SQL, etc), MCP servers.
 """
 
 # Suppress noisy TF warnings (may be triggered by transitive deps)
 import os
+from typing import TYPE_CHECKING
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 
@@ -35,6 +64,17 @@ from delfhos.tools import (
 )
 
 from delfhos.memory import Chat, Memory
+
+if TYPE_CHECKING:
+    # Static typing/IDE support: lets hover resolve Agent docs/signature.
+    from cortex.cortex import Cortex as Agent
+
+# Runtime best-effort static export for stable IDE hover/docs.
+try:
+    from cortex.cortex import Cortex as Agent
+except Exception:
+    # Keep lazy fallback below for environments where import order matters.
+    pass
 
 __all__ = [
     # Core
@@ -64,3 +104,7 @@ def __getattr__(name):
         globals()["Agent"] = Cortex
         return Cortex
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(set(globals().keys()) | {"Agent"})

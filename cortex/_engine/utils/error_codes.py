@@ -4,9 +4,28 @@ Provides consistent error handling across the entire system.
 """
 
 from enum import Enum
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Union
 from delfhos.errors import ToolDefinitionError
 from .console import console
+
+
+DOCS_URL = "https://delfhos.com/docs"
+ISSUES_URL = "https://github.com/DavidFraifer/Delfhos/issues"
+
+
+def _internal_error_hint() -> str:
+    return (
+        f"This is an internal error. If it persists, check {DOCS_URL} "
+        f"or open an issue: {ISSUES_URL}"
+    )
+
+
+def _docs_hint(prefix: str) -> str:
+    return f"{prefix} See {DOCS_URL}"
+
+
+def _issues_hint(prefix: str) -> str:
+    return f"{prefix} Report it here: {ISSUES_URL}"
 
 
 class ErrorSeverity(Enum):
@@ -46,13 +65,24 @@ class CORTEXError:
         return f"[{self.code}] {self.message}"
     
     def format_full(self) -> str:
-        """Get full formatted error message"""
+        """Get full formatted error message (verbose)"""
         lines = [f"[{self.code}] {self.message}"]
         if self.description:
             lines.append(f"Description: {self.description}")
         if self.solution:
             lines.append(f"Solution: {self.solution}")
         return "\n".join(lines)
+    
+    def format_message(self) -> str:
+        """Format error for console output (matches SDK error format)"""
+        return (
+            f"\n\n"
+            f"❌ [{self.code}] Delfhos Error\n"
+            f"{'-' * 40}\n"
+            f"Message: {self.message}\n"
+            f"{'-' * 40}\n"
+            f"💡 Hint: {self.solution}\n"
+        )
 
 
 # ==================== ERROR CODE DEFINITIONS ====================
@@ -65,7 +95,7 @@ class ErrorCodes:
         "SYS-001", ErrorCategory.SYSTEM, ErrorSeverity.CRITICAL,
         "System initialization failed",
         "Core system components failed to initialize properly",
-        "Check system requirements and dependencies"
+        _internal_error_hint()
     )
     
     # AGENT ERRORS (AGT-XXX)
@@ -80,7 +110,7 @@ class ErrorCodes:
         "AGT-002", ErrorCategory.AGENT, ErrorSeverity.ERROR,
         "Invalid LLM model",
         "Specified LLM model is not supported",
-        "Use supported models: gemini-2.5-flash, gemini-2.5-flash-lite, gemini-3-flash-preview, gemini-3.1-flash-lite-preview"
+        "Use supported model families only: gemini-*, gpt-* and claude-*"
     )
     
     AGT_003 = CORTEXError(
@@ -94,54 +124,54 @@ class ErrorCodes:
         "AGT-004", ErrorCategory.AGENT, ErrorSeverity.WARNING,
         "Task stop failed",
         "Unable to stop specific task",
-        "Check task ID or verify logging is enabled"
+        _issues_hint("Verify the task ID exists. If the issue persists,")
     )
     
     AGT_005 = CORTEXError(
         "AGT-005", ErrorCategory.AGENT, ErrorSeverity.WARNING,
         "Agent already stopped",
         "Attempted to stop agent that is not running",
-        "Verify agent state before stopping"
+        _issues_hint("Check agent state with agent.info() before stopping. If unexpected,")
     )
     
-    # TOOL ERRORS (TL-XXX)
-    TL_001 = CORTEXError(
-        "TL-001", ErrorCategory.TOOL, ErrorSeverity.ERROR,
+    # TOOL ERRORS (TOL-XXX)
+    TOL_001 = CORTEXError(
+        "TOL-001", ErrorCategory.TOOL, ErrorSeverity.ERROR,
         "Tool not found",
         "Requested tool is not available in the agent",
         "Check tool name spelling or add the tool to the agent"
     )
     
-    TL_002 = CORTEXError(
-        "TL-002", ErrorCategory.TOOL, ErrorSeverity.ERROR,
+    TOL_002 = CORTEXError(
+        "TOL-002", ErrorCategory.TOOL, ErrorSeverity.ERROR,
         "Tool execution failed",
         "Tool encountered an error during execution",
         "Check tool parameters and network connectivity"
     )
     
-    TL_003 = CORTEXError(
-        "TL-003", ErrorCategory.TOOL, ErrorSeverity.ERROR,
+    TOL_003 = CORTEXError(
+        "TOL-003", ErrorCategory.TOOL, ErrorSeverity.ERROR,
         "Invalid tool configuration",
         "Tool configuration is missing or invalid",
         "Verify tool setup and required parameters"
     )
     
-    TL_004 = CORTEXError(
-        "TL-004", ErrorCategory.TOOL, ErrorSeverity.WARNING,
+    TOL_004 = CORTEXError(
+        "TOL-004", ErrorCategory.TOOL, ErrorSeverity.WARNING,
         "Tool performance degraded",
         "Tool is responding slowly or intermittently",
-        "Check network connection or try again later"
+        _docs_hint("Check your network connection and retry. If persistent,")
     )
     
-    TL_006 = CORTEXError(
-        "TL-006", ErrorCategory.TOOL, ErrorSeverity.ERROR,
+    TOL_006 = CORTEXError(
+        "TOL-006", ErrorCategory.TOOL, ErrorSeverity.ERROR,
         "Connection inactive",
         "Attempted to use an inactive connection",
         "Check connection status or reactivate the connection"
     )
     
-    TL_007 = CORTEXError(
-        "TL-007", ErrorCategory.TOOL, ErrorSeverity.ERROR,
+    TOL_007 = CORTEXError(
+        "TOL-007", ErrorCategory.TOOL, ErrorSeverity.ERROR,
         "Action not allowed",
         "Requested action is not permitted for this connection",
         "Check connection permissions or request access"
@@ -152,7 +182,7 @@ class ErrorCodes:
         "DSL-001", ErrorCategory.DSL, ErrorSeverity.ERROR,
         "DSL syntax error",
         "Domain Specific Language syntax is invalid",
-        "Check DSL structure and command syntax"
+        _docs_hint("Check DSL structure and command syntax.")
     )
     
     # LLM ERRORS (LLM-XXX)
@@ -160,7 +190,7 @@ class ErrorCodes:
         "LLM-001", ErrorCategory.LLM, ErrorSeverity.ERROR,
         "Unsupported LLM model",
         "Specified LLM model is not supported",
-        "Use supported models: gemini-2.5-flash, gemini-2.5-flash-lite, gemini-3-flash-preview, gemini-3.1-flash-lite-preview"
+        "Use supported model families only: gemini-*, gpt-* and claude-*"
     )
     
     # CONFIG ERRORS (CFG-XXX)
@@ -168,7 +198,7 @@ class ErrorCodes:
         "CFG-001", ErrorCategory.CONFIG, ErrorSeverity.WARNING,
         "Configuration initialization failed",
         "Failed to initialize configuration component",
-        "Check dependencies and configuration settings"
+        _internal_error_hint()
     )
     
     # VALIDATION ERRORS (VAL-XXX)
@@ -176,24 +206,24 @@ class ErrorCodes:
         "VAL-001", ErrorCategory.VALIDATION, ErrorSeverity.ERROR,
         "Input validation failed",
         "Input parameters failed validation checks",
-        "Check input format and required parameters"
+        _docs_hint("Check input format and required parameters.")
     )
     
     VAL_002 = CORTEXError(
         "VAL-002", ErrorCategory.VALIDATION, ErrorSeverity.WARNING,
         "Validation timeout",
         "Validation process exceeded time limit",
-        "Simplify validation logic or increase timeout"
+        _issues_hint("This appears to be an internal validation timeout. If it happens frequently,")
     )
     
     # TOOL-SPECIFIC ERRORS
     
-    # WEBSEARCH TOOL ERRORS (WEBSEARCH-XXX)
-    WEBSEARCH_005 = CORTEXError(
-        "WEBSEARCH-005", ErrorCategory.LLM, ErrorSeverity.ERROR,
+    # WEB SEARCH TOOL ERRORS (WEB-XXX)
+    WEB_005 = CORTEXError(
+        "WEB-005", ErrorCategory.LLM, ErrorSeverity.ERROR,
         "LLM web search failed",
         "The LLM-integrated web search encountered an error during execution",
-        "Check LLM API connectivity and model availability, or try again later"
+        _docs_hint("Check LLM API connectivity and model availability. If the issue persists,")
     )
 
 
@@ -203,16 +233,20 @@ class ErrorHandler:
     @staticmethod
     def report_error(error: CORTEXError, task_id: Optional[str] = None, 
                     agent_id: Optional[str] = None, context: Optional[Dict[str, Any]] = None):
-        """Report an error using the console system"""
+        """Report an error using the console system with beautiful formatting"""
         
+        # Format error message in same style as SDK errors
+        formatted = error.format_message()
+        
+        # Send to console based on severity
         if error.severity == ErrorSeverity.CRITICAL:
-            console.error(f"CRITICAL {error.code}", error.message, task_id=task_id, agent_id=agent_id)
+            console.error(f"CRITICAL {error.code}", formatted, task_id=task_id, agent_id=agent_id)
         elif error.severity == ErrorSeverity.ERROR:
-            console.error(f"{error.code}", error.message, task_id=task_id, agent_id=agent_id)
+            console.error(f"{error.code}", formatted, task_id=task_id, agent_id=agent_id)
         elif error.severity == ErrorSeverity.WARNING:
-            console.warning(f"{error.code}", error.message, task_id=task_id, agent_id=agent_id)
+            console.warning(f"{error.code}", formatted, task_id=task_id, agent_id=agent_id)
         else:  # INFO
-            console.info(f"{error.code}", error.message, task_id=task_id, agent_id=agent_id)
+            console.info(f"{error.code}", formatted, task_id=task_id, agent_id=agent_id)
         
         # Log additional context if provided
         if context:
@@ -250,7 +284,19 @@ class ErrorHandler:
 
 # ==================== CONVENIENCE FUNCTIONS ====================
 
-def report_error(code: str, task_id: Optional[str] = None, agent_id: Optional[str] = None, 
+def _format_context(context: Optional[Union[str, Dict[str, Any]]]) -> str:
+    if context is None:
+        return ""
+    if isinstance(context, str):
+        return context
+    if isinstance(context, dict):
+        if not context:
+            return ""
+        return ", ".join(f"{k}={context[k]!r}" for k in sorted(context.keys()))
+    return str(context)
+
+
+def report_error(code: str, task_id: Optional[str] = None, agent_id: Optional[str] = None,
                 context: Optional[Dict[str, Any]] = None):
     """Quick error reporting by code"""
     error = ErrorHandler.get_error_by_code(code)
@@ -260,13 +306,17 @@ def report_error(code: str, task_id: Optional[str] = None, agent_id: Optional[st
         console.error("Unknown Error", f"Error code {code} not found", task_id=task_id, agent_id=agent_id)
 
 
-def raise_error(code: str, context: Optional[str] = None):
+def raise_error(code: str, context: Optional[Union[str, Dict[str, Any]]] = None):
     """Raise exception by error code"""
     error = ErrorHandler.get_error_by_code(code)
     if error:
-        raise ErrorHandler.create_exception(error, context)
+        raise ErrorHandler.create_exception(error, _format_context(context))
     else:
-        raise ToolDefinitionError(detail=f"Unknown error code: {code}")
+        context_str = _format_context(context)
+        detail = f"Unknown error code: {code}"
+        if context_str:
+            detail += f" | Context: {context_str}"
+        raise ToolDefinitionError(detail=detail)
 
 
 # ==================== ERROR CODE REGISTRY ====================

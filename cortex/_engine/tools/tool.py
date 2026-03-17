@@ -20,7 +20,7 @@ class ToolContainer:
     def add_tool(self, name: str, func: Callable):
         """Add a tool to the container"""
         if not name or not callable(func):
-            raise_error("TL-002", context={"name": name, "func_type": type(func).__name__})
+            raise_error("TOL-002", context={"name": name, "func_type": type(func).__name__})
         self.tools[name.strip()] = func
     
     def add_connection(self, connection: Connection, agent_id: str = None):
@@ -72,17 +72,18 @@ class ToolContainer:
         if connection:
             # Validate connection is active
             if not connection.is_active():
-                raise_error("TL-006", context={
+                raise_error("TOL-006", context={
                     "connection_name": connection.connection_name,
                     "status": connection.status.value
                 })
 
             # Validate action permission if specified
             if action and not connection.is_action_allowed(action):
-                raise_error("TL-007", context={
+                effective_allowed = connection.effective_allowed_actions() if hasattr(connection, "effective_allowed_actions") else (list(connection.allow) if getattr(connection, "allow", None) else "all")
+                raise_error("TOL-007", context={
                     "connection_name": connection.connection_name,
                     "action": action,
-                    "allowed_actions": list(connection.actions_allowed) if connection.actions_allowed else "all"
+                    "allowed_actions": effective_allowed
                 })
 
             # Mark connection as used
@@ -90,7 +91,7 @@ class ToolContainer:
         
         # Get the tool function
         if tool_name not in self.tools:
-            raise_error("TL-003", context={
+            raise_error("TOL-003", context={
                 "tool_name": tool_name,
                 "available_tools": list(self.tools.keys()),
                 "available_connections": list(self.connections.keys())
@@ -141,4 +142,4 @@ class ToolContainer:
             # If it's already one of our wrapped exceptions, re-raise it
             if hasattr(e, "error_code"):
                 raise
-            raise_error("TL-004", context={"tool_name": tool_name, "connection_name": name if connection else None, "error": str(e), "error_type": type(e).__name__})
+            raise_error("TOL-004", context={"tool_name": tool_name, "connection_name": name if connection else None, "error": str(e), "error_type": type(e).__name__})

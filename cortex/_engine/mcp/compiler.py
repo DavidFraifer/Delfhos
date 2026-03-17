@@ -6,7 +6,7 @@ Transforms MCP tool schemas into native Delfhos format:
   - COMPRESSED_API_DOCS for code generation prompts
   - Python function signatures from JSON Schema inputSchema
 
-Cache system: compiled manifests are saved to ~/.delfhos/mcp_cache/{hash}/
+Cache system: compiled manifests are saved to ~/delfhos/mcp_cache/{hash}/
 so the MCP server only needs to be introspected once.
 """
 
@@ -29,7 +29,7 @@ _TYPE_MAP = {
     "object": "object",
 }
 
-CACHE_DIR = Path.home() / ".delfhos" / "mcp_cache"
+CACHE_DIR = Path.home() / "delfhos" / "mcp_cache"
 
 
 class MCPCompiler:

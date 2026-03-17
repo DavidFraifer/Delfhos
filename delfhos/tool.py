@@ -296,9 +296,31 @@ def build_api_signature(tool_name: str, description: str, parameters: Optional[D
 
 class Tool:
     """
-    Internal wrapper used by the @tool decorator.
+    Wraps a callable into an agent-executable tool with schema, error handling, and confirmation.
 
-    Public custom-tool authoring should use only @tool.
+    **Don't construct directly** — use the @tool decorator instead::
+
+        @tool
+        def my_function(x: str, y: int = 10) -> str:
+            '''Do something with x and optional y.'''
+            return f"{x} * {y}"
+
+        agent = Agent(tools=[my_function], llm="gemini-3.1-flash-lite-preview")
+
+    The decorator automatically captures the function's:
+      • Name (or override with name="custom_name")
+      • Docstring (or override with description="...")
+      • Parameter types and defaults
+      • Return type
+
+    Advanced options in @tool::
+
+        @tool(
+            name="calculate",
+            handle_error="Click the Search button instead of typing manually.",
+            confirm=True  # always ask for approval
+        )
+        def my_function(x: str) -> str: ...
     """
 
     tool_name: str = ""
@@ -535,25 +557,42 @@ def tool(
     return_errors: Optional[bool] = None,
     confirm: bool = False,
 ) -> Union[Tool, Callable[[Callable], Tool]]:
-    """Decorator that turns a plain function into a Delfhos Tool.
+    """Convert a function into an agent-executable tool with automatic schema extraction.
 
-    Can be used with or without arguments::
+    The decorator captures your function's name, docstring, parameters, and return type
+    automatically. Zero boilerplate.
+
+    **Basic usage** (no args)::
 
         @tool
-        def get_weather(location: str) -> str:
-            \"\"\"Get current weather for a city.\"\"\"
-            return weather_api.fetch(location)
+        def get_weather(location: str, units: str = "C") -> str:
+            \"\"\"Fetch the current weather for a city.\"\"\" 
+            return weather_api.fetch(location=location, units=units)
 
-        @tool(name="weather", handle_error=True)
+        agent = Agent(tools=[get_weather], llm="gemini-3.1-flash-lite-preview")
+        agent.run("What's the weather in Paris?")
+
+    **Advanced usage** (with options)::
+
+        @tool(
+            name="fetch_weather",  # override auto-detected name
+            handle_error="Could not reach the weather API. Please try again in a moment.",
+            confirm=True  # always ask before running
+        )
         async def get_weather(location: str) -> str:
             ...
 
-        @tool(name="weather")
-        async def get_weather(location: str) -> str:
-            ...
+    Args:
+        name: Custom tool name (default: function name).
+        description: Override auto-extracted docstring.
+        handle_error: How to handle ToolException errors:
+            - True (default): return exception message to agent.
+            - str: return that custom string instead.
+            - callable: fn(exception) -> str for custom error handling.
+        confirm: If True, require approval before execution.
 
-    The function's name, docstring, type hints, and defaults are all
-    captured automatically — zero boilerplate.
+    Returns:
+        A Tool instance that integrates seamlessly with Agent.
     """
     def _wrap(fn: Callable) -> Tool:
         effective_handle_error = handle_error if return_errors is None else bool(return_errors)

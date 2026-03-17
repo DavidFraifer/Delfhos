@@ -4,6 +4,8 @@ from ..utils import report_error, raise_error
 from datetime import datetime, timezone
 import asyncio
 import base64
+import binascii
+import mimetypes
 import os
 import requests
 from typing import List, Dict, Any, Optional, Union, Tuple
@@ -24,6 +26,29 @@ PROVIDER_ALIASES = {
     "inception": "inception",
 }
 
+_PROVIDER_ENV_VARS = {
+    "google": "GOOGLE_API_KEY (or GEMINI_API_KEY)",
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "inception": "INCEPTION_AI",
+}
+
+_PROVIDER_BASE_URL_ENVS = {
+    "google": "N/A",
+    "openai": "OPENAI_BASE_URL",
+    "anthropic": "ANTHROPIC_BASE_URL",
+    "inception": "N/A",
+}
+
+
+def _raise_llm_api_error(provider: str, detail: str) -> None:
+    raise LLMExecutionError(
+        detail=detail,
+        provider=provider,
+        env_var=_PROVIDER_ENV_VARS.get(provider, "<PROVIDER>_API_KEY"),
+        base_url_env=_PROVIDER_BASE_URL_ENVS.get(provider, "N/A"),
+    )
+
 
 def resolve_model(model: str) -> Tuple[str, str]:
     """Resolve provider and provider-native model id from a user model string.
@@ -42,8 +67,28 @@ def resolve_model(model: str) -> Tuple[str, str]:
         if sep in model_text:
             maybe_provider, maybe_model = model_text.split(sep, 1)
             provider = PROVIDER_ALIASES.get(maybe_provider.strip().lower())
-            if provider and maybe_model.strip():
-                return provider, maybe_model.strip()
+            candidate = maybe_model.strip()
+            candidate_lower = candidate.lower()
+            if not provider or not candidate:
+                continue
+
+            if provider == "google" and candidate_lower.startswith("gemini"):
+                return provider, candidate
+            if provider == "anthropic" and candidate_lower.startswith("claude"):
+                return provider, candidate
+            if provider == "openai" and (
+                candidate_lower.startswith(("gpt", "o1", "o3", "o4", "chatgpt")) or "gpt-" in candidate_lower
+            ):
+                return provider, candidate
+
+            raise_error(
+                "LLM-001",
+                context={
+                    "model": model,
+                    "error": "Only Gemini, GPT, and Claude model families are supported",
+                    "hint": "Use gemini-*, gpt-* (or o1/o3/o4), or claude-*",
+                },
+            )
 
     if lowered.startswith("gemini"):
         return "google", model_text
@@ -51,15 +96,13 @@ def resolve_model(model: str) -> Tuple[str, str]:
         return "anthropic", model_text
     if lowered.startswith(("gpt", "o1", "o3", "o4", "chatgpt")) or "gpt-" in lowered:
         return "openai", model_text
-    if lowered.startswith("mercury"):
-        return "inception", model_text
 
     raise_error(
         "LLM-001",
         context={
             "model": model,
-            "error": "Could not infer provider from model name",
-            "hint": "Use google/<model>, openai/<model>, or anthropic/<model>",
+            "error": "Only Gemini, GPT, and Claude model families are supported",
+            "hint": "Use gemini-*, gpt-* (or o1/o3/o4), or claude-*",
         },
     )
 
@@ -72,6 +115,18 @@ def _get_api_key(provider: str) -> str:
         if not key:
             raise_error("LLM-001", context={"provider": provider, "error": "INCEPTION_AI env var not set"})
         return key
+
+    if provider == "openai":
+        # For OpenAI-compatible local endpoints, allow missing OPENAI_API_KEY and
+        # send a harmless placeholder bearer token.
+        base_url = _get_openai_base_url()
+        is_default_openai = base_url.rstrip("/") == "https://api.openai.com/v1"
+        try:
+            return get_cached_api_key(provider)
+        except Exception:
+            if not is_default_openai:
+                return os.getenv("OPENAI_API_KEY", "local-dev-key")
+            raise
 
     return get_cached_api_key(provider)
 
@@ -176,6 +231,27 @@ def get_gemini_client(api_key: str) -> genai.Client:
 
 def _prepare_gemini_image_parts(images: List[Union[str, Dict[str, Any]]]) -> List[types.Part]:
     """Helper to decode and prepare image parts for Gemini payload."""
+    def _decode_base64_bytes(raw: str) -> Optional[bytes]:
+        cleaned = (raw or "").strip()
+        if not cleaned:
+            return None
+
+        # Accept accidental whitespace/newlines in tool outputs.
+        cleaned = "".join(cleaned.split())
+
+        try:
+            return base64.b64decode(cleaned, validate=True)
+        except (binascii.Error, ValueError):
+            # Some providers/tools omit padding; restore it and retry.
+            padded = cleaned + ("=" * (-len(cleaned) % 4))
+            try:
+                return base64.b64decode(padded)
+            except (binascii.Error, ValueError):
+                try:
+                    return base64.urlsafe_b64decode(padded)
+                except (binascii.Error, ValueError):
+                    return None
+
     image_parts = []
     for img in images:
         if isinstance(img, dict):
@@ -184,8 +260,9 @@ def _prepare_gemini_image_parts(images: List[Union[str, Dict[str, Any]]]) -> Lis
             mime_type = img.get("mime_type", "image/jpeg")
             if img_data:
                 try:
-                    # Decode base64 to bytes
-                    img_bytes = base64.b64decode(img_data)
+                    img_bytes = _decode_base64_bytes(img_data)
+                    if img_bytes is None:
+                        raise ValueError("Invalid base64 image payload")
                     # Create Part from bytes
                     image_parts.append(types.Part.from_bytes(
                         data=img_bytes,
@@ -194,18 +271,25 @@ def _prepare_gemini_image_parts(images: List[Union[str, Dict[str, Any]]]) -> Lis
                 except Exception as e:
                     print(f"Warning: Failed to decode image for Gemini: {e}")
         elif isinstance(img, str):
-            # Assume it's base64 encoded string
+            # Accept data-URI, local file path, or base64 string.
             try:
                 # Remove data URI prefix if present
                 if img.startswith("data:"):
                     # Extract mime type and base64 data
                     header, encoded = img.split(",", 1)
                     mime_type = header.split(":")[1].split(";")[0]
-                    img_bytes = base64.b64decode(encoded)
+                    img_bytes = _decode_base64_bytes(encoded)
+                elif os.path.exists(img):
+                    with open(img, "rb") as f:
+                        img_bytes = f.read()
+                    mime_type = mimetypes.guess_type(img)[0] or "image/png"
                 else:
-                    # Assume PNG if no prefix
-                    img_bytes = base64.b64decode(img)
+                    # Fallback: assume direct base64 data.
+                    img_bytes = _decode_base64_bytes(img)
                     mime_type = "image/png"
+
+                if img_bytes is None:
+                    raise ValueError("Invalid image string (not file path or decodable base64)")
                 
                 image_parts.append(types.Part.from_bytes(
                     data=img_bytes,
@@ -401,13 +485,13 @@ def _mercury_sync(model: str, prompt: str, system_message: str, temperature: flo
     if response is None or response.status_code >= 400:
         err_response = last_error or response
         if err_response is None:
-            raise LLMExecutionError(detail="Mercury API error: request failed before receiving a response")
-        raise LLMExecutionError(detail=f"Mercury API error {err_response.status_code}: {err_response.text[:300]}")
+            _raise_llm_api_error("inception", "Mercury API error: request failed before receiving a response")
+        _raise_llm_api_error("inception", f"Mercury API error {err_response.status_code}: {err_response.text[:300]}")
     
     data = response.json()
     choices = data.get("choices", [])
     if not choices:
-        raise LLMExecutionError(detail="Mercury API returned no choices")
+        _raise_llm_api_error("inception", "Mercury API returned no choices")
     message = choices[0].get("message", {})
     content = _openai_extract_content(message.get("content", ""))
     usage = data.get("usage", {})
@@ -566,13 +650,13 @@ def _openai_sync(
     if response is None or response.status_code >= 400:
         err_response = last_error or response
         if err_response is None:
-            raise LLMExecutionError(detail="OpenAI API error: request failed before receiving a response")
-        raise LLMExecutionError(detail=f"OpenAI API error {err_response.status_code}: {err_response.text[:300]}")
+            _raise_llm_api_error("openai", "OpenAI API error: request failed before receiving a response")
+        _raise_llm_api_error("openai", f"OpenAI API error {err_response.status_code}: {err_response.text[:300]}")
 
     data = response.json()
     choices = data.get("choices", [])
     if not choices:
-        raise LLMExecutionError(detail="OpenAI API returned no choices")
+        _raise_llm_api_error("openai", "OpenAI API returned no choices")
 
     message = choices[0].get("message", {})
     content = _openai_extract_content(message.get("content", ""))
@@ -668,8 +752,8 @@ def _anthropic_sync(
     if response is None or response.status_code >= 400:
         err_response = last_error or response
         if err_response is None:
-            raise LLMExecutionError(detail="Anthropic API error: request failed before receiving a response")
-        raise LLMExecutionError(detail=f"Anthropic API error {err_response.status_code}: {err_response.text[:300]}")
+            _raise_llm_api_error("anthropic", "Anthropic API error: request failed before receiving a response")
+        _raise_llm_api_error("anthropic", f"Anthropic API error {err_response.status_code}: {err_response.text[:300]}")
 
     data = response.json()
     content_parts = data.get("content", [])

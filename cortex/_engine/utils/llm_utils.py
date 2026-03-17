@@ -24,9 +24,19 @@ def normalize_llm_result(llm_result):
         response = llm_result if llm_result is not None else ""
     
     token_info = token_info or {}
+
+    input_tokens = token_info.get('input_tokens', token_info.get('input', 0))
+    output_tokens = token_info.get('output_tokens', token_info.get('output', 0))
+    total_tokens = token_info.get('total_tokens', token_info.get('tokens', None))
+
+    # Keep accounting robust when providers/tool wrappers omit total_tokens.
+    if total_tokens is None:
+        total_tokens = input_tokens + output_tokens
+
     return response, {
-        'input_tokens': token_info.get('input_tokens', token_info.get('input', 0)),
-        'output_tokens': token_info.get('output_tokens', token_info.get('output', 0)),
-        'total_tokens': token_info.get('total_tokens', token_info.get('tokens', 0)),
+        'input_tokens': input_tokens,
+        'output_tokens': output_tokens,
+        'total_tokens': total_tokens,
+        'image_count': token_info.get('image_count', 0),
         'llm_calls': token_info.get('llm_calls', token_info.get('calls', 1))
     }

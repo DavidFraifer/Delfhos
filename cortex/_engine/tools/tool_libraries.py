@@ -278,7 +278,7 @@ class ToolLibraryBase:
     """Base class for all tool libraries"""
     
     def __init__(self, tool_manager, task_id: str, agent_id: str, light_llm: str, heavy_llm: str, tool_tracker=None,
-                 vision_llm: Optional[str] = None, search_llm: Optional[str] = None):
+                 vision_llm: Optional[str] = None, search_llm: Optional[str] = None, memory: Optional[Any] = None):
         self.tool_manager = tool_manager
         self.task_id = task_id
         self.agent_id = agent_id
@@ -287,6 +287,7 @@ class ToolLibraryBase:
         self.vision_llm = vision_llm or self.heavy_llm
         self.search_llm = search_llm or self.light_llm
         self.tool_tracker = tool_tracker
+        self.memory = memory
     
     @property
     def tool_name(self) -> str:
@@ -1727,7 +1728,7 @@ class WebSearchLibrary(ToolLibraryBase):
             if self.tool_tracker and self.tool_tracker.orchestrator and token_info:
                 try:
                     self.tool_tracker.orchestrator.logger.add_tokens(
-                        self.task_id, token_info, "gemini-2.5-flash", "web_search"
+                        self.task_id, token_info, self.search_llm, "web_search"
                     )
                 except Exception:
                     pass
@@ -1738,6 +1739,75 @@ class WebSearchLibrary(ToolLibraryBase):
             if self.tool_tracker:
                 await self.tool_tracker.track_end(tool_name, duration, success=False, error=str(e), description=description)
             raise
+
+
+class MemoryLibrary(ToolLibraryBase):
+    """
+    Memory Library - Persistent memory writes for durable facts/preferences.
+
+    `memory.save(...)` is always available in generated code:
+    - If memory backend is configured: persists facts.
+    - If not configured: no-op with a single useful warning.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._warned_no_backend = False
+
+    @property
+    def tool_name(self) -> str:
+        return "memory"
+
+    async def save(self, content: str, desc: str = None) -> bool:
+        """Save memory facts. Returns True when persisted, False when skipped/no-op."""
+        import time
+
+        text = (content or "").strip()
+        if not text:
+            return False
+
+        start = time.time()
+        description = desc or "Saving memory facts"
+
+        if self.tool_tracker:
+            await self.tool_tracker.track_start(self.tool_name, description)
+
+        if not self.memory:
+            if not self._warned_no_backend:
+                console.warning(
+                    "Memory disabled",
+                    "memory.save(...) called but no Memory backend was configured. Call skipped.",
+                    task_id=self.task_id,
+                    agent_id=self.agent_id,
+                )
+                self._warned_no_backend = True
+
+            duration = time.time() - start
+            if self.tool_tracker:
+                await self.tool_tracker.track_end(self.tool_name, duration, success=True, description="Skipped (no backend)")
+            if self.tool_tracker and self.tool_tracker.orchestrator:
+                self.tool_tracker.orchestrator.track_tool_usage(self.task_id, self.tool_name)
+            return False
+
+        try:
+            self.memory.save(text)
+            duration = time.time() - start
+            if self.tool_tracker:
+                await self.tool_tracker.track_end(self.tool_name, duration, success=True, description=description)
+            if self.tool_tracker and self.tool_tracker.orchestrator:
+                self.tool_tracker.orchestrator.track_tool_usage(self.task_id, self.tool_name)
+            return True
+        except Exception as e:
+            duration = time.time() - start
+            if self.tool_tracker:
+                await self.tool_tracker.track_end(self.tool_name, duration, success=False, error=str(e), description="Memory save failed")
+            console.warning(
+                "Memory save failed",
+                f"memory.save(...) was skipped: {e}",
+                task_id=self.task_id,
+                agent_id=self.agent_id,
+            )
+            return False
 
 
 class LLMLibrary(ToolLibraryBase):
@@ -2109,7 +2179,6 @@ def _wrap_for_tracking(tool_name: str, tool_obj: Any, tool_tracker: Any) -> Any:
             async def __call__(self, *args, **kwargs):
                 ui_metadata = {"_tool_trace_args": _bind_arguments(self._original, args, kwargs)}
                 tool_confirm_policy = getattr(self._original, "confirm", False)
-                explicit_operation = getattr(self._original, "kind", None)
                 description = getattr(self._original, "description", "")
                 await _request_unified_approval(
                     tool_tracker=tool_tracker,
@@ -2137,8 +2206,9 @@ def _wrap_for_tracking(tool_name: str, tool_obj: Any, tool_tracker: Any) -> Any:
 
     return tool_obj
 
-def create_tool_libraries(tool_manager, task_id: str, agent_id: str, light_llm: str, heavy_llm: str, 
-                         tool_tracker=None, vision_llm: Optional[str] = None, search_llm: Optional[str] = None) -> dict:
+def create_tool_libraries(tool_manager, task_id: str, agent_id: str, light_llm: str, heavy_llm: str,
+                         tool_tracker=None, vision_llm: Optional[str] = None, search_llm: Optional[str] = None,
+                         memory: Optional[Any] = None) -> dict:
     """
     Create all tool library instances for a task execution.
     
@@ -2156,7 +2226,8 @@ def create_tool_libraries(tool_manager, task_id: str, agent_id: str, light_llm: 
         "heavy_llm": heavy_llm,
         "tool_tracker": tool_tracker,
         "vision_llm": vision_llm,
-        "search_llm": search_llm
+        "search_llm": search_llm,
+        "memory": memory,
     }
     
     libraries = {}
@@ -2189,6 +2260,7 @@ def create_tool_libraries(tool_manager, task_id: str, agent_id: str, light_llm: 
         "files": FilesLibrary,
         "approval": ApprovalLibrary,
         "websearch": WebSearchLibrary,
+        "memory": MemoryLibrary,
     }
     for tool_name, lib_cls in always_available_libraries.items():
         libraries[tool_name] = lib_cls(**base_kwargs)

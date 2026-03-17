@@ -65,7 +65,12 @@ class MCPExecutor:
                         if item.get("type") == "text":
                             parts.append(item.get("text", ""))
                         elif item.get("type") == "image":
-                            parts.append(f"[Image: {item.get('mimeType', 'image')}]")
+                            mime_type = item.get("mimeType", "image/png")
+                            image_data = item.get("data")
+                            if image_data:
+                                parts.append(f"data:{mime_type};base64,{image_data}")
+                            else:
+                                parts.append(f"[Image: {mime_type}]")
                         else:
                             parts.append(json.dumps(item))
                     else:
@@ -75,7 +80,7 @@ class MCPExecutor:
         return str(result)
 
 
-def build_mcp_tools(executor: MCPExecutor, tool_name: str) -> "MCPToolNamespace":
+def build_mcp_tools(executor: MCPExecutor, tool_name: str, allow: Optional[list] = None) -> "MCPToolNamespace":
     """
     Build a namespace of real Tool instances from an MCPExecutor.
 
@@ -93,6 +98,9 @@ def build_mcp_tools(executor: MCPExecutor, tool_name: str) -> "MCPToolNamespace"
     tools: Dict[str, Tool] = {}
 
     for mcp_name, tool_def in executor._tools.items():
+        if allow is not None and allow != "all" and mcp_name not in allow:
+            continue
+            
         description = tool_def.get("description", f"Execute {mcp_name}")
         input_schema = tool_def.get("input_schema", {})
         properties = input_schema.get("properties", {})

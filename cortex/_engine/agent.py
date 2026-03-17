@@ -48,6 +48,39 @@ _CLIENT_MAP = {
 
 
 class Agent:
+    """
+    An autonomous agent that executes goals using tools, LLMs, and sandboxed Python code generation.
+    
+    The agent preprocesses tools (prefilter), generates optimized Python code, executes it
+    in a sandbox, and iterates with confirmation/feedback until the goal succeeds.
+    
+    Example (simple):
+        agent = Agent(tools=[Gmail(), Drive()], llm="gemini-3.1-flash-lite-preview")
+        agent.start().run("Send yesterday's reports to alice@co.com")
+    
+    Example (advanced with multiple LLMs):
+        agent = Agent(
+            tools=[WebSearch(), SQL(host="localhost", database="main")],
+            light_llm="gemini-3.1-flash-lite-preview",  # for prefiltering
+            heavy_llm="gemini-3.1-pro",  # for code generation
+            chat=Chat(keep=5, summarize=True),
+            system_prompt="You are a data analyst. Be precise."
+        )
+        result = agent.run("Find Q3 trends in revenue and email summary to ops@co.com")
+    
+    Args:
+        tools: List of tool names (str), async functions, or Connection instances.
+        llm: Single LLM for all operations (e.g., "gemini-3.1-flash-lite-preview").
+             Shorthand for: light_llm=llm, heavy_llm=llm.
+        light_llm: (Advanced) LLM for prefiltering/lightweight tasks (required if not using llm).
+        heavy_llm: (Advanced) LLM for code generation (required if not using llm).
+        chat: Chat(keep=10, summarize=False) — session memory & summarization.
+        memory: Optional persistent memory (e.g., SQL database).
+        system_prompt: Context injected into every LLM call.
+        confirm: Tools/actions requiring approval before execution ("write", "delete", etc).
+        verbose: If True, print detailed execution traces.
+        providers: API key overrides {"google": "...", "openai": "..."}, etc.
+    """
     def __init__(self, tools: List[Union[str, Callable, Connection]], llm: Optional[str] = None, light_llm: Optional[str] = None, heavy_llm: Optional[str] = None,
                  agent_id: Optional[str] = None, auto_stop_timeout: Optional[int] = None,
                  on_confirm: Optional[Callable] = None, confirm: Optional[Union[bool, List[str], str]] = None,
@@ -60,8 +93,45 @@ class Agent:
                  chat: Optional[Chat] = None,
                  memory: Optional[Memory] = None,
                  providers: Optional[Dict[str, str]] = None,
-                 verbosity: Literal["minimal", "regular", "full"] = "regular",
+                 verbose: bool = False,
                  _explicit_llms: Optional[Dict[str, bool]] = None):
+        """Initialize an Agent with tools and language models.
+        
+        Args:
+            tools: List of Connection objects, @tool functions, or string names.
+            llm: Single LLM model for all operations (e.g., "gemini-3.1-flash-lite-preview").
+            light_llm: Fast LLM for filtering/analysis (use with heavy_llm).
+            heavy_llm: Powerful LLM for code generation (use with light_llm).
+            agent_id: Custom agent identifier (auto-generated if omitted).
+            auto_stop_timeout: Auto-stop after N seconds of inactivity (None = never auto-stop).
+            on_confirm: Callback fn(request_id, message) for custom approval handling.
+            confirm: Approve-before-executing for actions: True (all), False (none), or list ["read", "write"].
+            system_prompt: Custom system instructions for code generation.
+            chat: Chat instance for session memory with auto-summarization.
+            memory: Memory instance for persistent semantic storage.
+            verbose: If True, print execution traces and debugging info.
+            providers: Dict of API provider overrides (internal use).
+        
+        Raises:
+            CORTEXError: If llm configuration is invalid (must provide either llm OR both light_llm+heavy_llm).
+        
+        Example::
+        
+            # Simple mode (single LLM for everything)
+            agent = Agent(
+                tools=[Gmail(), Drive()],
+                llm="gemini-3.1-flash-lite-preview"
+            )
+            
+            # Advanced mode (light + heavy LLM split)
+            agent = Agent(
+                tools=[Gmail(), Drive(), SQL(url="...")],
+                light_llm="gemini-3.1-flash-lite-preview",  # fast, cheap
+                heavy_llm="gemini-3.1-pro",  # powerful, for code generation
+                chat=Chat(keep=10),  # session memory
+                verbose=True  # see execution details
+            )
+        """
         self._api_configured = False
         self._providers = providers
         
@@ -137,8 +207,8 @@ class Agent:
         self.enable_human_approval = approval_enabled
         self.on_confirm = on_confirm
         self.confirm_policy = resolved_confirm
-        self.verbosity = verbosity
-        self.trace_mode = "full" if verbosity != "minimal" else "minimal"
+        self.verbose = verbose
+        self.trace_mode = "full" if verbose else "minimal"
         self.last_trace = None
         
         # Basic model validation (accept provider-compatible model IDs, not a fixed list)
@@ -190,7 +260,7 @@ class Agent:
             trace_mode=self.trace_mode,
             trace_callback=self._update_trace,
             llm_config=self.get_llm_config_string(),
-            verbose=(self.verbosity == "full")
+            verbose="high" if self.verbose else "low"
         )
         self.running = False
         self.last_called = None  # Track when the agent was last used
@@ -280,7 +350,7 @@ class Agent:
                 self.orchestrator.add_tool(tool, internal_tools[tool])
             elif callable(tool):
                 report_error(
-                    "TL-001",
+                    "TOL-001",
                     context={
                         "tool": str(tool),
                         "tool_type": type(tool).__name__,
@@ -288,10 +358,25 @@ class Agent:
                     },
                 )
             else:
-                report_error("TL-001", context={"tool": str(tool), "tool_type": type(tool).__name__})
+                report_error("TOL-001", context={"tool": str(tool), "tool_type": type(tool).__name__})
     
     def add_tool(self, name: str, func):
-        """Add a tool to the agent"""
+        """Register a new tool (function or Connection) with the running agent.
+        
+        Useful for dynamic tool injection after agent startup.
+        
+        Args:
+            name: Label for the tool (used in error messages and logs).
+            func: A callable function or Connection instance.
+        
+        Example::
+        
+            @tool
+            def get_time() -> str:
+                return time.strftime("%H:%M")
+            
+            agent.add_tool("time", get_time)
+        """
         self.orchestrator.add_tool(name, func)
     
     def get_llm_config_string(self) -> str:
@@ -375,6 +460,21 @@ class Agent:
                 self.inactivity_timer = None
         
     def start(self, suppress_startup_message: bool = False):
+        """Initialize the agent and prepare it to execute tasks.
+        
+        Usually called automatically by `run()`, but you can call it explicitly
+        if you need to control the agent lifecycle.
+        
+        Args:
+            suppress_startup_message: If True, don't log the "Agent started" message.
+        
+        Example::
+        
+            agent.start()
+            agent.run("Do something")
+            agent.run("Do something else")
+            agent.stop()  # Clean up resources
+        """
         if not self.running:
             self.orchestrator.start()
             self.running = True
@@ -426,20 +526,8 @@ class Agent:
                 
                 # Cancel inactivity timer
                 self._cancel_inactivity_timer()
-                # Run the unified extraction and summarization on session close
-                try:
-                    import asyncio
-                    try:
-                        loop = asyncio.get_running_loop()
-                        asyncio.ensure_future(self._session_close_boundary(), loop=loop)
-                    except RuntimeError:
-                        asyncio.run(self._session_close_boundary())
-                except Exception as e:
-                    console.error("SESSION CLOSE", f"Failed to run boundary extraction: {str(e)}", agent_id=self.agent_id)
-                
-                # Clear chat explicitly at the end regardless of memory
-                if self.chat:
-                    self.chat.clear()
+                # Memory extraction is now expected to happen during task execution
+                # via runtime `memory.save(...)` calls in generated code.
 
                 console.system("Agent stopped", "All tasks terminated", agent_id=self.agent_id)
             else:
@@ -603,8 +691,23 @@ Never return null, "none", or plain text."""
             console.error("MEMORY EXTRACTION", f"Extraction failed: {str(e)}", agent_id=self.agent_id)
 
     async def run_async(self, message: Union[str, List[Dict[str, str]]], max_history: int = 10):
-        """
-        Run a task with the agent (Async version)
+        """Run a task with the agent (async version).
+        
+        Non-blocking version of `run()` — returns immediately with a coroutine.
+        Useful for integration with async frameworks (FastAPI, etc).
+        
+        Args:
+            message: Task description (string) or conversation history (list of message dicts).
+            max_history: Max previous messages to include as context (default 10).
+        
+        Returns:
+            Task result/output from the agent.
+        
+        Example::
+        
+            async def main():
+                agent = Agent(tools=[Gmail()], llm="gemini-3.1-flash-lite-preview")
+                await agent.run_async("Read my latest emails and summarize")
         """
         # Display task box FIRST before anything else
         if isinstance(message, str):
@@ -654,8 +757,23 @@ Never return null, "none", or plain text."""
         self.orchestrator.receive_message({"payload": task_content.strip(), "task_id": task_id})
 
     def run(self, message: Union[str, List[Dict[str, str]]], max_history: int = 10):
-        """
-        Run a task with the agent (Sync version)
+        """Execute a task with the agent (blocking version).
+        
+        Automatically starts the agent if not already running. Waits for the task
+        to complete before returning.
+        
+        Args:
+            message: Task description (string) or conversation history (list of message dicts with 'role' and 'content').
+            max_history: Max previous messages to include as context (default 10).
+        
+        Returns:
+            Task result/output from the agent.
+        
+        Example::
+        
+            agent = Agent(tools=[Gmail(), Drive()], llm="gemini-3.1-flash-lite-preview")
+            result = agent.run("Forward today's reports to alice@acme.com")
+            print(result)
         """
         # Display task box FIRST before anything else
         if isinstance(message, str):
@@ -714,7 +832,12 @@ Never return null, "none", or plain text."""
         self.orchestrator.receive_message({"payload": task_content.strip(), "task_id": task_id})
         
     def info(self) -> dict:
-        """Get comprehensive information about the agent's current state"""
+        """Get comprehensive information about the agent's current state.
+        
+        Returns:
+            dict with keys: agent_id, running, last_called, models, tools, chat_memory,
+                   approval_count, and more.
+        """
         # Basic agent information
         info = {
             "agent_id": self.agent_id,
@@ -788,7 +911,11 @@ Never return null, "none", or plain text."""
         return self.agent_id
         
     def get_available_tools(self) -> List[str]:
-        """Get list of available tools"""
+        """Get names of all tools currently available to this agent.
+        
+        Returns:
+            List of tool names.
+        """
         return list(self.orchestrator.tools.tools.keys())
     
     @staticmethod
@@ -806,13 +933,21 @@ Never return null, "none", or plain text."""
     # ==================== HUMAN APPROVAL METHODS ====================
     
     def get_pending_approvals(self) -> list:
-        """Get all pending approval requests for this agent"""
+        """Get all pending human approval requests for this agent.
+        
+        Returns:
+            List of approval request objects (or empty list if no pending requests).
+        """
         if not self.enable_human_approval or not self.orchestrator.approval_manager:
             return []
         return self.orchestrator.approval_manager.get_pending_requests(agent_id=self.agent_id)
     
     def get_pending_approval_count(self) -> int:
-        """Get count of pending approval requests for this agent"""
+        """Get count of pending human approval requests for this agent.
+        
+        Returns:
+            Integer count of pending approvals.
+        """
         if not self.enable_human_approval or not self.orchestrator.approval_manager:
             return 0
         return self.orchestrator.approval_manager.get_pending_count(agent_id=self.agent_id)

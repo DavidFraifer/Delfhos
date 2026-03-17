@@ -26,23 +26,32 @@ from delfhos.errors import ConnectionConfigurationError
 
 class SQLConnection(BaseConnection):
     """
-    SQL database connection.
-
-    Auth methods (use one):
-        url:        Full connection string, e.g. "postgresql://user:pass@host/db"
-        host+user:  Individual parameters (host, port, database, user, password)
-
+    SQL database integration for querying and updating databases.
+    
+    Example (connection string):
+        db = SQL(url="postgresql://user:pw@localhost/mydb")
+        agent = Agent(tools=[db, Sheets()], llm="gemini-3.1-flash-lite-preview")
+        agent.run("Query revenue by region and update the Reporting sheet")
+    
+    Example (parameters):
+        db = SQL(host="localhost", database="analytics", user="reader", password="...")
+    
+    Authentication (use either url OR host+params):
+        url: Full connection string, e.g. "postgresql://user:pass@host/db".
+        host+port+database+user+password: Individual connection parameters.
+    
     Args:
-        url:       Database connection string.
-        host:      Database hostname or IP.
-        port:      Database port (default: 5432 for PostgreSQL, 3306 for MySQL).
-        database:  Database name.
-        user:      Database username.
-        password:  Database password.
-        db_type:   "postgresql" or "mysql" (default: "postgresql"). Only needed with params.
-        actions:   ["schema", "query"] — which operations are allowed.
-        name:      Label for this connection (default: "sql").
-        metadata:  Extra info, e.g. {"description": "Read-only analytics DB"}.
+        url: Database connection string (takes priority if both url and host are provided).
+        host: Database hostname/IP.
+        port: Database port (default: 5432 for PostgreSQL, 3306 for MySQL).
+        database: Database name.
+        user: Database username.
+        password: Database password.
+        db_type: "postgresql", "mysql", or "mariadb" (default: "postgresql").
+        allow: Restrict actions, e.g., ["query"] blocks writes (default: allow all).
+               Supported: "schema" (introspection), "query" (SELECT), "write" (INSERT/UPDATE/DELETE).
+        name: Custom label (default: "sql").
+        metadata: Extra info dict for tracking/logging.
     """
 
     TOOL_NAME = "sql"
@@ -58,7 +67,7 @@ class SQLConnection(BaseConnection):
         user: Optional[str] = None,
         password: Optional[str] = None,
         db_type: str = "postgresql",
-        allowed: Optional[Union[str, List[str]]] = None,
+        allow: Optional[Union[str, List[str]]] = None,
         name: str = "sql",
         metadata: Optional[Dict[str, Any]] = None,
     ):
@@ -90,7 +99,7 @@ class SQLConnection(BaseConnection):
 
         super().__init__(
             credentials=credentials,
-            allowed=allowed,
+            allow=allow,
             name=name,
             auth_type=AuthType.BASIC_AUTH,
             metadata=metadata,

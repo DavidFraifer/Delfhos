@@ -65,7 +65,7 @@ class Connection:
         connection_name: str,
         auth_type: AuthType,
         credentials: Dict[str, Any],
-        allowed: Optional[List[str]] = None,
+        allow: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         connection_id: Optional[str] = None,
         confirm: Union[bool, List[str], str] = False
@@ -93,7 +93,7 @@ class Connection:
         self._credentials = credentials
         
         # Permissions
-        self.allowed = set(allowed) if allowed else None  # None = all allowed
+        self.allow = set(allow) if allow else None  # None = all allowed
         self.confirm = confirm
         
         # Metadata
@@ -117,14 +117,14 @@ class Connection:
         self.linked_agents.discard(agent_id)
     
     def is_action_allowed(self, action: str) -> bool:
-        if self.allowed == "all":
+        if self.allow == "all":
             return True
-        if isinstance(self.allowed, str):
-            return action.lower() == self.allowed.lower()
+        if isinstance(self.allow, str):
+            return action.lower() == self.allow.lower()
         """Check if an action is allowed for this connection"""
-        if self.allowed is None:
+        if self.allow is None:
             return True  # All actions allowed
-        return action.lower() in {a.lower() for a in self.allowed}
+        return action.lower() in {a.lower() for a in self.allow}
     
     def get_credentials(self) -> Dict[str, Any]:
         """
@@ -164,7 +164,7 @@ class Connection:
             "connection_name": self.connection_name,
             "auth_type": self.auth_type.value,
             "status": self.status.value,
-            "allowed": list(self.allowed) if self.allowed else "all",
+            "allowed": list(self.allow) if self.allow else "all",
             "linked_agents": list(self.linked_agents),
             "created_at": self.created_at.isoformat(),
             "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,

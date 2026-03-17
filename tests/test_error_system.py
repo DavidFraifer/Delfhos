@@ -15,7 +15,7 @@ def test_error_message_includes_code_message_hint():
     exc = ToolExecutionError(tool_name="web_search", detail="network timeout")
     text = str(exc)
 
-    assert "ERR_TOOL_001" in text
+    assert "ERR-TOOL-001" in text
     assert "Delfhos Error" in text
     assert "Message:" in text
     assert "Hint:" in text
@@ -52,5 +52,5 @@ def test_error_codes_are_exposed_in_output():
 
     for err in errors:
         rendered = str(err)
-        assert "ERR_" in rendered
+        assert "ERR-" in rendered
         assert "Hint:" in rendered

@@ -33,7 +33,7 @@ class BaseConnection(_BaseConnection):
     def __init__(
         self,
         credentials: Dict[str, Any],
-        allowed: Optional[Union[str, List[str]]] = None,
+        allow: Optional[Union[str, List[str]]] = None,
         name: Optional[str] = None,
         auth_type: AuthType = AuthType.OAUTH2,
         metadata: Optional[Dict[str, Any]] = None,
@@ -41,7 +41,7 @@ class BaseConnection(_BaseConnection):
         """
         Args:
             credentials:  Service-specific auth credentials dict.
-            actions:      List of allowed actions, e.g. ["read", "send"].
+            allow:        List of allowed actions, e.g. ["read", "send"].
                           None means all actions are permitted.
             name:         Human-readable label for this connection, e.g. "work_gmail".
                           Defaults to the tool name.
@@ -60,7 +60,7 @@ class BaseConnection(_BaseConnection):
             connection_name=name or self.TOOL_NAME,
             auth_type=auth_type,
             credentials=credentials,
-            allowed=allowed,
+            allow=allow,
             metadata=metadata or {},
         )
 
@@ -75,23 +75,20 @@ class BaseConnection(_BaseConnection):
     def _normalize_action_name(action: str) -> str:
         return str(action).strip().lower().replace("-", "_")
 
-    def inspect(self, verbose: str = "regular") -> str | dict:
+    def inspect(self, verbose: bool = False) -> str | dict:
         """
         Return connection information.
         
         Args:
-            verbose: "minimal" (just action names), "regular" (with details),
-                    or "full" (include all metadata)
+            verbose: If False (default), returns a formatted string list of actions.
+                     If True, returns a complete dict with access metadata.
         """
         allowed = self.effective_allowed_actions()
         
-        if verbose == "minimal":
+        if not verbose:
             return f"Actions: {allowed}"
         
-        elif verbose == "regular":
-            return f"Connection: {self.connection_name} | Allowed: {allowed}"
-        
-        else:  # full
+        else:
             return {
                 "connection": self.connection_name,
                 "allowed": allowed,
@@ -106,9 +103,9 @@ class BaseConnection(_BaseConnection):
         - "all" means unrestricted
         - list[str] means explicitly restricted actions
         """
-        if self.allowed is None:
+        if self.allow is None:
             return "all"
-        return sorted(self._normalize_action_name(a) for a in self.allowed)
+        return sorted(self._normalize_action_name(a) for a in self.allow)
 
 
 class GoogleBaseConnection(BaseConnection):
@@ -135,7 +132,7 @@ class GoogleBaseConnection(BaseConnection):
         service_account: Optional[str] = None,
         oauth_credentials: Optional[str] = None,
         delegated_user: Optional[str] = None,
-        allowed: Optional[Union[str, List[str]]] = None,
+        allow: Optional[Union[str, List[str]]] = None,
         name: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ):
@@ -144,7 +141,7 @@ class GoogleBaseConnection(BaseConnection):
             service_account:   Path to Google SA key JSON file (recommended for servers).
             oauth_credentials: Path to client_secrets.json (for personal accounts).
             delegated_user:    Email to impersonate via domain-wide delegation (SA only).
-            actions:           Allowed actions, e.g. ["read", "send"]. None = all.
+            allow:             Allowed actions, e.g. ["read", "send"]. None = all.
             name:              Human-readable label for this connection.
             metadata:          Extra info dict.
         """
@@ -155,7 +152,7 @@ class GoogleBaseConnection(BaseConnection):
             service_account=service_account,
             oauth_credentials=oauth_credentials,
             delegated_user=delegated_user,
-            allowed=allowed,
+            allow=allow,
         )
 
         # Determine auth type based on what was provided
@@ -173,11 +170,11 @@ class GoogleBaseConnection(BaseConnection):
             effective_actions = scopes_to_actions(self.TOOL_NAME, granted_scopes) or None
         else:
             # Service accounts: trust the requested actions directly
-            effective_actions = actions
+            effective_actions = allow
 
         super().__init__(
             credentials=resolved,
-            actions=effective_actions,
+            allow=effective_actions,
             name=name or self.TOOL_NAME,
             auth_type=auth_type,
             metadata=metadata,

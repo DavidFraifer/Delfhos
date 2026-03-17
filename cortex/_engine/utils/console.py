@@ -11,7 +11,6 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.markdown import Markdown
 from rich.columns import Columns
-from rich.columns import Columns
 
 class LogLevel(Enum):
     INFO = "INFO"
@@ -167,6 +166,7 @@ class ProfessionalConsole:
         # Tokens
         summary_table.add_row("Tokens", f"{tokens.get('tokens_used', 0)} (in: {tokens.get('input_tokens', 0)}, out: {tokens.get('output_tokens', 0)})")
         summary_table.add_row("LLM Calls", str(tokens.get('llm_calls', 0)))
+        summary_table.add_row("Cost (USD)", f"${float(tokens.get('total_cost_usd', 0.0) or 0.0):.6f}")
 
         # LLM Configuration
         if llm_config:

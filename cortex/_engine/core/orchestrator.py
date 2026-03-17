@@ -8,7 +8,6 @@ from typing import Dict, Any, Optional, Union, List
 from ..utils.logger import CORTEXLogger
 from ..utils.console import console
 from ..utils.llm_utils import normalize_llm_result
-from ..utils import report_error
 from ..tools.tool import ToolContainer
 from ..tools.tool_registry import (
     build_prefilter_prompt,
@@ -656,8 +655,8 @@ class Orchestrator:
                     self.light_llm,
                     self.heavy_llm,
                     orchestrator=self,
-                    vision_llm=self.vision_llm,
-                    search_llm=self.search_llm
+                    vision_model=self.vision_llm,
+                    search_model=self.search_llm
                 )
                 
                 if self.current_trace:
@@ -799,6 +798,8 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
                 'input_tokens': task_data.get('input_tokens', 0),
                 'output_tokens': task_data.get('output_tokens', 0), 
                 'llm_calls': task_data.get('llm_calls', 0),
+                'total_cost_usd': round(task_data.get('total_cost_usd', 0.0), 8),
+                'pricing_path': task_data.get('pricing_path'),
             }
             
             # Print LLM call summary
@@ -809,13 +810,14 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
                     model = call.get('model', 'unknown')
                     input_tokens = call.get('input_tokens', 0)
                     output_tokens = call.get('output_tokens', 0)
+                    call_cost_usd = float(call.get('cost_usd', 0.0) or 0.0)
                     function_name = call.get('function_name', 'unknown')
                     duration = call.get('duration')
                     dur_str = f" in {duration:.2f}s" if duration is not None else ""
-                    summary_lines.append(f"  {i}. {function_name} ({model}){dur_str}: {input_tokens} in, {output_tokens} out")
+                    summary_lines.append(f"  {i}. {function_name} ({model}){dur_str}: {input_tokens} in, {output_tokens} out | ${call_cost_usd:.6f}")
                 total_duration = sum(call.get('duration') or 0.0 for call in llm_breakdown)
                 total_dur_str = f" in {total_duration:.2f}s" if total_duration > 0 else ""
-                summary_lines.append(f"Total: {token_info['llm_calls']} calls{total_dur_str}, {token_info['input_tokens']} in, {token_info['output_tokens']} out")
+                summary_lines.append(f"Total: {token_info['llm_calls']} calls{total_dur_str}, {token_info['input_tokens']} in, {token_info['output_tokens']} out, ${token_info['total_cost_usd']:.6f}")
                 console.debug("LLM Calls Summary", "\n".join(summary_lines),
                             task_id=task_id, agent_id=self.agent_id)
             
@@ -827,6 +829,7 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
                 
             # Print Tool Timings Summary
             tool_entries = self.task_tool_timings.get(task_id, [])
+            completed_tools = []
             if tool_entries:
                 timing_lines = ["Task Phases Timing Summary:"]
                 completed_tools = [e for e in tool_entries if e.get("duration") is not None]
@@ -876,6 +879,101 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
                 if timing_lines[1:]:
                     console.debug("Task Timing Summary", "\n".join(timing_lines),
                             task_id=task_id, agent_id=self.agent_id)
+            
+            # Show detailed execution timeline in verbose mode
+            if self.verbose == "high" and (tool_entries or llm_breakdown):
+                from rich.table import Table
+
+                def _to_sort_ts(raw_ts):
+                    if isinstance(raw_ts, (int, float)):
+                        return float(raw_ts)
+                    if isinstance(raw_ts, str):
+                        try:
+                            return datetime.fromisoformat(raw_ts).timestamp()
+                        except Exception:
+                            return 0.0
+                    return 0.0
+                
+                # Build combined timeline of LLM calls and tool/phase executions
+                timeline_items = []
+                llm_function_names = {
+                    c.get('function_name', 'unknown') for c in llm_breakdown if isinstance(c, dict)
+                }
+                duplicated_phase_tools = {
+                    'prefilter',
+                    'llm_code_generation',
+                    'llm_connection_filtering',
+                    'llm_rag_retrieval',
+                }
+                
+                # Add LLM calls to timeline
+                for call in llm_breakdown:
+                    timeline_items.append({
+                        'type': 'llm',
+                        'timestamp': call.get('timestamp', 0),
+                        'name': call.get('function_name', 'unknown'),
+                        'model': call.get('model', ''),
+                        'duration': call.get('duration', 0),
+                        'input_tokens': call.get('input_tokens', 0),
+                        'output_tokens': call.get('output_tokens', 0),
+                        'total_tokens': call.get('input_tokens', 0) + call.get('output_tokens', 0),
+                        'cost_usd': float(call.get('cost_usd', 0.0) or 0.0),
+                    })
+                
+                # Add tool/phase calls to timeline
+                for entry in completed_tools:
+                    tool_name = entry.get('tool', 'unknown')
+                    # Avoid duplicate rows when a phase already appears as a detailed LLM call.
+                    if tool_name in duplicated_phase_tools or tool_name in llm_function_names:
+                        continue
+                    timeline_items.append({
+                        'type': 'tool',
+                        'timestamp': entry.get('timestamp', 0),
+                        'name': tool_name,
+                        'description': entry.get('description', ''),
+                        'duration': entry.get('duration', 0),
+                        'status': entry.get('status', 'unknown'),
+                    })
+                
+                # Sort by timestamp
+                timeline_items.sort(key=lambda x: _to_sort_ts(x.get('timestamp', 0)))
+                
+                # Build rich table
+                timeline_table = Table(title="[bold cyan]Execution Timeline[/bold cyan]", 
+                                     show_header=True, header_style="bold cyan", expand=False)
+                timeline_table.add_column("#", width=3)
+                timeline_table.add_column("Type", width=8)
+                timeline_table.add_column("Name", width=30)
+                timeline_table.add_column("Duration", width=12)
+                timeline_table.add_column("Tokens/Info", width=25)
+                
+                for idx, item in enumerate(timeline_items, 1):
+                    name = item['name']
+                    duration_val = item.get('duration', 0) or 0
+                    duration_str = f"{duration_val:.2f}s" if duration_val > 0 else "-"
+                    
+                    if item['type'] == 'llm':
+                        tokens_str = f"In: {item['input_tokens']}, Out: {item['output_tokens']}, Tot: {item['total_tokens']}, ${item['cost_usd']:.6f}"
+                        model_suffix = f" ({item['model']})" if item['model'] else ""
+                        name_display = name + model_suffix
+                        type_style = "[bold magenta]LLM[/bold magenta]"
+                    else:
+                        status_emoji = "✓" if item['status'] == 'success' else "✗"
+                        desc = f" - {item['description']}" if item['description'] else ""
+                        tokens_str = f"{status_emoji} {item['status']}{desc}"
+                        name_display = name
+                        type_style = "[bold green]TOOL[/bold green]"
+                    
+                    timeline_table.add_row(
+                        str(idx),
+                        type_style,
+                        name_display,
+                        duration_str,
+                        tokens_str
+                    )
+                
+                console.console.print(timeline_table)
+                console.console.print()  # Blank line
             
             # Determine task status and final message
             if result.get("success"):
@@ -939,12 +1037,43 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
                 "duration": task_duration,
                 "compute_time": computational_time,
                 "tokens_used": token_info.get('tokens_used', 0),
+                "cost_usd": token_info.get('total_cost_usd', 0.0),
             }
             
             if self.current_trace:
                 from datetime import datetime
                 self.current_trace.ended_at = datetime.now()
                 self.current_trace.outcome = "success" if result.get("success", False) else "failed"
+                self.current_trace.total_cost_usd = float(token_info.get('total_cost_usd', 0.0) or 0.0)
+                self.current_trace.pricing_path = token_info.get('pricing_path', "") or ""
+
+                cost_by_function = {}
+                for call in llm_breakdown:
+                    fn = call.get("function_name", "unknown")
+                    cost_by_function[fn] = float(cost_by_function.get(fn, 0.0)) + float(call.get("cost_usd", 0.0) or 0.0)
+                self.current_trace.cost_by_function = {k: round(v, 8) for k, v in cost_by_function.items()}
+
+                if self.current_trace.prefilter:
+                    self.current_trace.prefilter.cost_usd = round(
+                        float(cost_by_function.get("prefilter", 0.0))
+                        + float(cost_by_function.get("llm_connection_filtering", 0.0))
+                        + float(cost_by_function.get("llm_rag_retrieval", 0.0)),
+                        8,
+                    )
+                if self.current_trace.code_generation:
+                    self.current_trace.code_generation.cost_usd = round(
+                        float(cost_by_function.get("llm_code_generation", 0.0))
+                        + float(cost_by_function.get("llm_retry", 0.0)),
+                        8,
+                    )
+                if self.current_trace.execution:
+                    reserved = {"prefilter", "llm_connection_filtering", "llm_rag_retrieval", "llm_code_generation", "llm_retry"}
+                    exec_cost = 0.0
+                    for fn, c in cost_by_function.items():
+                        if fn not in reserved:
+                            exec_cost += float(c)
+                    self.current_trace.execution.cost_usd = round(exec_cost, 8)
+
                 self.current_trace.add_event("session_end", f"outcome: {self.current_trace.outcome}")
             
             # Notify chat of the assistant response
@@ -1290,7 +1419,11 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
                             actions_by_tool[tool].append(act)
                 
                 # Identify internal framework tools
-                internal_tool_names = {"approval", "files", "llm", "lzmafilter", "sql", "gmail", "sheets", "drive", "calendar", "docs", "websearch"}
+                internal_tool_names = {"approval", "files", "llm", "lzmafilter", "sql", "gmail", "sheets", "drive", "calendar", "docs", "websearch", "memory"}
+                
+                # Add memory tool if configured
+                if self.memory:
+                    actions_by_tool["memory"] = {"save"}
                 
                 # Create table with tools grouped by type
                 actions_table = Table(title="Available Actions for Agent", show_header=True, header_style="bold cyan")
@@ -1330,6 +1463,7 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
                         
                         # Mark selected tools
                         is_selected = any(a.startswith(tool_name + ":") or a == tool_name or a == f"[{tool_name}]" for a in selected_actions)
+                        status_style = "bold green" if is_selected else "dim"
                         actions_table.add_row(
                             f"[{status_style}]{tool_name}[/{status_style}]",
                             f"[{status_style}]{actions_str}[/{status_style}]",
@@ -1339,7 +1473,7 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
                 # Add legend/explanation at the bottom
                 actions_table.caption = (
                     "[bold]Legend:[/bold] "
-                    "[bold magenta]User[/bold magenta] = Tools you provided (desktop, MCP servers) | "
+                    "[bold magenta]User[/bold magenta] = Tools you provided (Native, MCP, Custom Tools) | "
                     "[dim white]Internal[/dim white] = Sandbox-only tools (files, llm, approval)"
                 )
                 
@@ -1414,7 +1548,7 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
             python_examples = ""  # Examples are included in compressed docs
         
         # Log what we're using
-        tools_info = ", ".join(selected_actions) if 'selected_actions' in dir() and selected_actions else str(available_tools if 'available_tools' in dir() else 'prefiltered')
+        tools_info = ", ".join(selected_actions) if selected_actions else "prefiltered"
         # Extract unique tool names without :EXECUTE suffix
         selected_tools = set()
         for action in tools_info.split(", "):
@@ -1467,6 +1601,19 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
         if python_examples:
             examples_section = f"\n\nEXAMPLES:\n{python_examples}"
 
+        memory_tool_section = ""
+        if self.memory:
+            memory_guidelines = (getattr(self.memory, "guidelines", "") or "").strip()
+            if not memory_guidelines:
+                memory_guidelines = "Store stable user preferences, durable facts, and final decisions."
+            memory_tool_section = (
+                "\n\nMEMORY TOOL (enabled):\n"
+                "- You can persist durable facts with: `await memory.save(\"fact\", desc=\"why\")`.\n"
+                "- Save only high-value long-term facts, not transient details.\n"
+                f"- Follow these memory guidelines strictly: {memory_guidelines}\n"
+                "- Prefer concise atomic facts (one fact per save call)."
+            )
+
         python_prompt = f"""Task: "{message}"{sql_schema_section}{connection_context_section}{agent_context_section}{memory_context_section}
 Date: {current_date_str}
 
@@ -1478,7 +1625,7 @@ print("Need more details to find invoice:\\n- Sender name/email\\n- approximate 
 ```
 Proceed with tools ONLY when info is sufficient.
 
-{python_api_docs}
+{python_api_docs}{memory_tool_section}
 
 RULES:
 - ONLY Python code, NO comments/explanations/docstrings. Minimal code. All tools async (await).

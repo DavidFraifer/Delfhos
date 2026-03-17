@@ -31,7 +31,7 @@ IMPORTANT: Always respond in the SAME language as the user's query. If the query
         )
         return summary.strip(), token_info
     except Exception as e:
-        report_error("WEBSEARCH-005", context={"query": query, "task_id": task_id, "error": str(e)})
+        report_error("WEB-005", context={"query": query, "task_id": task_id, "error": str(e)})
         return "Web search failed. Please try again later.", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
 
@@ -67,12 +67,16 @@ async def web_search(query: str, task_id=1, _fast_search=True, model: str = None
 
     input_tokens = token_info.get("input_tokens", 0)
     output_tokens = token_info.get("output_tokens", 0)
+    total_tokens = token_info.get("total_tokens", input_tokens + output_tokens)
+    image_count = token_info.get("image_count", 0)
 
     merged_tokens = {
-        "tokens_used": input_tokens + output_tokens,
+        "tokens_used": total_tokens,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
-        "llm_calls": 1,
+        "total_tokens": total_tokens,
+        "image_count": image_count,
+        "llm_calls": token_info.get("llm_calls", 1),
     }
 
     console.info(

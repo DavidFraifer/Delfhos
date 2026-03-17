@@ -7,7 +7,7 @@ Example:
     calendar = CalendarConnection(
         service_account="path/to/service-account.json",
         delegated_user="admin@company.com",
-        allowed=["list"],  # read-only
+        allow=["list"],  # read-only
     )
 """
 
@@ -17,17 +17,23 @@ from .base import GoogleBaseConnection
 
 class CalendarConnection(GoogleBaseConnection):
     """
-    Google Calendar connection.
-
-    Auth methods (use one):
-        service_account:   Path to SA JSON key.
-        oauth_credentials: Path to client_secrets.json.
-
+    Google Calendar integration for reading and managing events.
+    
+    Example:
+        calendar = Calendar(oauth_credentials="client_secrets.json")
+        agent = Agent(tools=[calendar, Gmail()], llm="gemini-3.1-flash-lite-preview")
+        agent.run("Find a 1-hour slot next Tuesday and schedule meeting with alice@co.com")
+    
+    Authentication (choose one):
+        service_account: Google Service Account JSON (for servers).
+        oauth_credentials: OAuth client_secrets.json (for personal accounts).
+    
     Args:
-        actions: ["list", "create", "update", "delete"] — omit to allow all.
-        name:    Label (default: "calendar").
+        delegated_user: Email to impersonate (service account + delegation only).
+        allow: Restrict actions, e.g., ["list"] blocks creating events (default: allow all).
+        name: Custom label (default: "calendar").
+        metadata: Extra info dict for tracking/logging.
     """
-
     TOOL_NAME = "calendar"
     ALLOWED_ACTIONS = ["list", "create", "update", "delete"]
 
@@ -37,7 +43,7 @@ class CalendarConnection(GoogleBaseConnection):
         service_account: Optional[str] = None,
         oauth_credentials: Optional[str] = None,
         delegated_user: Optional[str] = None,
-        allowed: Optional[Union[str, List[str]]] = None,
+        allow: Optional[Union[str, List[str]]] = None,
         name: str = "calendar",
         metadata: Optional[Dict[str, Any]] = None,
     ):
@@ -45,7 +51,7 @@ class CalendarConnection(GoogleBaseConnection):
             service_account=service_account,
             oauth_credentials=oauth_credentials,
             delegated_user=delegated_user,
-            allowed=allowed,
+            allow=allow,
             name=name,
             metadata=metadata,
         )
