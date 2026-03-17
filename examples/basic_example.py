@@ -12,7 +12,7 @@ async def calculate_mortgage(principal: float, annual_rate: float, years: int) -
         return principal / payments
     return principal * (monthly_rate * (1 + monthly_rate) ** payments) / ((1 + monthly_rate) ** payments - 1)
 
-
+print(WebSearch().inspect()) # Descubre las capacidades de la herramienta WebSearch
 agent = Agent(
     tools=[WebSearch(), mcp_tool, calculate_mortgage],
     chat=Chat(keep=5, summarize=True, namespace="agent_chat"),

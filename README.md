@@ -56,7 +56,7 @@ agent = Agent(tools=[gmail, db, drive], llm="gemini-3.1-flash-lite-preview")
 
 Notes:
 - Use `allow=[...]` to restrict actions.
-- You can inspect supported actions with `ToolClass.allowed_actions()`.
+- Inspect available methods with `tool.inspect()` or detailed output with `tool.inspect(verbose=True)`.
 
 ## Custom Tools
 

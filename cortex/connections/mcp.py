@@ -11,68 +11,7 @@ from typing import Any, Dict, List, Optional, Union
 from urllib.parse import urlparse
 
 from cortex._engine.connection import AuthType
-from .base import BaseConnection
-
-
-class _PrettyInspectDict(dict):
-    """Dict that pretty-prints as indented JSON when printed."""
-
-    def __str__(self) -> str:
-        methods = self.get("methods")
-        if not isinstance(methods, list):
-            return json.dumps(self, indent=2, ensure_ascii=False)
-
-        server = str(self.get("server", "mcp"))
-        total = self.get("total", len(methods))
-        auth_type = str(self.get("auth_type", "none"))
-        allowed = self.get("allowed", None)
-
-        lines = [f"\n📋 MCP Server: {server}", "=" * 70]
-
-        if allowed is not None:
-            if isinstance(allowed, list):
-                allow_text = ", ".join(allowed) if allowed else "(none)"
-            else:
-                allow_text = str(allowed)
-            lines.append(f"🔐 Allowed: {allow_text}")
-            lines.append("")
-
-        # Detailed mode: methods is list[dict{name, description}]
-        if methods and isinstance(methods[0], dict):
-            for i, method in enumerate(methods):
-                name = str(method.get("name", ""))
-                description = str(method.get("description", ""))
-                # Bold cyan method name for distinction
-                styled_name = f"\033[1m\033[96m{i+1:2}. {name}\033[0m"
-                lines.append(f"  {styled_name}")
-                if description:
-                    # Wrap description text at terminal width for readability
-                    wrapped = self._wrap_text(description, indent=6, width=64)
-                    lines.append(wrapped)
-                lines.append("")
-        else:
-            # Compact mode: methods is list[str]
-            for name in methods:
-                lines.append(f"  • {name}")
-
-        lines.extend(["", "=" * 70, f"Total: {total} actions | Auth: {auth_type}", ""])
-        return "\n".join(lines)
-
-    @staticmethod
-    def _wrap_text(text: str, indent: int = 6, width: int = 64) -> str:
-        """Wrap long text at width with indentation."""
-        import textwrap
-        indent_str = " " * indent
-        wrapped = textwrap.fill(
-            text,
-            width=width,
-            initial_indent=indent_str,
-            subsequent_indent=indent_str,
-        )
-        return wrapped
-
-    def __repr__(self) -> str:
-        return self.__str__()
+from .base import BaseConnection, _PrettyInspectDict
 
 
 class MCP(BaseConnection):

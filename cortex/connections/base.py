@@ -11,8 +11,70 @@ The distinction between Connection and Tool:
 Multiple connections of the same tool can coexist (e.g., work + personal Gmail).
 """
 
+import json
 from typing import List, Optional, Dict, Any, Union
 from cortex._engine.connection import Connection as _BaseConnection, AuthType, ConnectionStatus
+
+
+class _PrettyInspectDict(dict):
+    """Dict that pretty-prints as indented JSON when printed."""
+
+    def __str__(self) -> str:
+        methods = self.get("methods")
+        if not isinstance(methods, list):
+            return json.dumps(self, indent=2, ensure_ascii=False)
+
+        is_mcp = "server" in self
+        label = "MCP Server" if is_mcp else "Tool"
+        target = str(self.get("server") if is_mcp else self.get("tool", "tool"))
+        total = self.get("total", len(methods))
+        auth_type = str(self.get("auth_type", "none"))
+        allowed = self.get("allowed", None)
+
+        lines = [f"\n📋 {label}: {target}", "=" * 70]
+
+        if allowed is not None:
+            if isinstance(allowed, list):
+                allow_text = ", ".join(allowed) if allowed else "(none)"
+            else:
+                allow_text = str(allowed)
+            lines.append(f"🔐 Allowed: {allow_text}")
+            lines.append("")
+
+        # Detailed mode: methods is list[dict{name, description}]
+        if methods and isinstance(methods[0], dict):
+            for i, method in enumerate(methods):
+                name = str(method.get("name", ""))
+                description = str(method.get("description", ""))
+                styled_name = f"\033[1m\033[96m{i+1:2}. {name}\033[0m"
+                lines.append(f"  {styled_name}")
+                if description:
+                    wrapped = self._wrap_text(description, indent=6, width=64)
+                    lines.append(wrapped)
+                lines.append("")
+        else:
+            # Compact mode: methods is list[str]
+            for name in methods:
+                lines.append(f"  • {name}")
+
+        lines.extend(["", "=" * 70, f"Total: {total} actions | Auth: {auth_type}", ""])
+        return "\n".join(lines)
+
+    @staticmethod
+    def _wrap_text(text: str, indent: int = 6, width: int = 64) -> str:
+        """Wrap long text at width with indentation."""
+        import textwrap
+        indent_str = " " * indent
+        wrapped = textwrap.fill(
+            text,
+            width=width,
+            initial_indent=indent_str,
+            subsequent_indent=indent_str,
+        )
+        return wrapped
+
+    def __repr__(self) -> str:
+        return self.__str__()
 
 
 class BaseConnection(_BaseConnection):
@@ -64,38 +126,55 @@ class BaseConnection(_BaseConnection):
             metadata=metadata or {},
         )
 
-    @classmethod
-    def allowed_actions(cls) -> List[str]:
-        """Return the documented action names this connection supports."""
-        if not cls.ALLOWED_ACTIONS:
-            return []
-        return list(cls.ALLOWED_ACTIONS)
-
     @staticmethod
     def _normalize_action_name(action: str) -> str:
         return str(action).strip().lower().replace("-", "_")
 
-    def inspect(self, verbose: bool = False) -> str | dict:
+    def inspect(self, verbose: bool = False) -> dict:
         """
         Return connection information.
         
         Args:
-            verbose: If False (default), returns a formatted string list of actions.
-                     If True, returns a complete dict with access metadata.
+            verbose: If False (default), returns available method names.
+                     If True, returns allowed methods and descriptions.
         """
+        available_actions = list(type(self).ALLOWED_ACTIONS or [])
         allowed = self.effective_allowed_actions()
-        
-        if not verbose:
-            return f"Actions: {allowed}"
-        
-        else:
-            return {
-                "connection": self.connection_name,
-                "allowed": allowed,
-                "auth_type": self.auth_type.value,
-                "metadata": self.metadata
-            }
 
+        if not verbose:
+            return _PrettyInspectDict(
+                {
+                    "tool": self.tool_name,
+                    "methods": available_actions,
+                    "total": len(available_actions),
+                    "auth_type": self.auth_type.value,
+                }
+            )
+
+        descriptions: Dict[str, str] = {}
+        try:
+            from cortex._engine.tools.tool_registry import TOOL_ACTION_SUMMARIES
+            descriptions = TOOL_ACTION_SUMMARIES.get(self.tool_name.lower(), {})
+        except Exception:
+            descriptions = {}
+
+        methods = [
+            {
+                "name": action,
+                "description": descriptions.get(action.upper(), ""),
+            }
+            for action in available_actions
+        ]
+        return _PrettyInspectDict(
+            {
+                "tool": self.tool_name,
+                "allowed": allowed,
+                "methods": methods,
+                "total": len(available_actions),
+                "auth_type": self.auth_type.value,
+                "metadata": self.metadata,
+            }
+        )
     def effective_allowed_actions(self) -> Union[List[str], str]:
         """
         Return the effective action policy for this connection.

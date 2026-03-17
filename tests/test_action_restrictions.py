@@ -8,14 +8,18 @@ from cortex._engine.mcp import executor as mcp_executor
 from cortex._engine.tools.tool_registry import map_frontend_action_to_registry_action, TOOL_ACTION_SUMMARIES
 
 
-def test_native_allowed_actions_are_discoverable():
-    assert Gmail.allowed_actions() == ["read", "send"]
-    assert SQL.allowed_actions() == ["schema", "query", "write"]
-    assert Sheets.allowed_actions() == ["read", "write", "create", "format", "chart", "batch"]
-    assert Drive.allowed_actions() == ["search", "get", "create", "update", "delete", "list_permissions", "share", "unshare"]
-    assert Docs.allowed_actions() == ["read", "create", "update", "format", "delete"]
-    assert Calendar.allowed_actions() == ["list", "create", "update", "delete"]
-    assert WebSearch.allowed_actions() == ["search"]
+def test_native_methods_are_discoverable_via_inspect_only():
+    assert not hasattr(Gmail, "allowed_actions")
+    assert not hasattr(SQL, "allowed_actions")
+    assert not hasattr(Sheets, "allowed_actions")
+    assert not hasattr(Drive, "allowed_actions")
+    assert not hasattr(Docs, "allowed_actions")
+    assert not hasattr(Calendar, "allowed_actions")
+    assert not hasattr(WebSearch, "allowed_actions")
+
+    # Native method discovery should flow through inspect().
+    ws = WebSearch()
+    assert ws.inspect()["methods"] == ["search"]
 
 
 def test_dynamic_action_mapping_for_mcp_like_tools():
@@ -28,6 +32,23 @@ def test_dynamic_action_mapping_for_mcp_like_tools():
     assert map_frontend_action_to_registry_action("github", "CREATE_ISSUE") == "CREATE_ISSUE"
     assert map_frontend_action_to_registry_action("github", "create-issue") == "CREATE_ISSUE"
     assert map_frontend_action_to_registry_action("github", "list repositories") == "LIST_REPOSITORIES"
+
+
+def test_native_inspect_matches_mcp_style_structure_and_printing():
+    ws = WebSearch()
+
+    compact = ws.inspect()
+    assert compact["tool"] == "websearch"
+    assert compact["methods"] == ["search"]
+    assert compact["total"] == 1
+    assert "📋 Tool: websearch" in str(compact)
+
+    detailed = ws.inspect(verbose=True)
+    assert detailed["tool"] == "websearch"
+    assert detailed["allowed"] == "all"
+    assert isinstance(detailed["methods"], list)
+    assert detailed["methods"][0]["name"] == "search"
+    assert "Search the web" in detailed["methods"][0]["description"]
 
 
 def test_mcp_namespace_blocks_disallowed_actions():
