@@ -569,9 +569,7 @@ TOOL_ACTION_SUMMARIES = {
         "SAVE": "Save internal/temporary output files (HIDDEN from user, use docs/sheets to share)",
         "LIST": "List uploaded task files (NOT user desktop/system files)",
     },
-    "approval": {
-        "ASK": "Request user approval for sensitive actions",
-    },
+
 }
 
 # Compressed API docs per tool+action (~80% smaller than full docs)
@@ -682,14 +680,7 @@ await files.save("data.xlsx", data, desc="...")  # List[Dict] -> Excel
 files_list = await files.list()
 # Returns: List[Dict] - [{filename, file_type, size_bytes, path}, ...]""",
 
-    "approval:ASK": """# approval.ask() - Request user approval
-approved = await approval.ask("I want to send emails", "Sending updates")
-# CRITICAL: Do NOT stop generating code here. The code will auto-pause.
-if approved: 
-    # Write the REST of your actual logic here
-    await gmail.send(...)
-else:
-    print("User denied.")""",
+
 }
 
 # Minimal examples per action (only essential patterns)
@@ -765,7 +756,7 @@ def build_prefilter_prompt(task: str, available_tools: Dict[str, Set[str]], conn
     # Always list built-in tools (llm, files, approval) without connection names
     lines.append("")
     lines.append("Built-ins:")
-    for builtin in ['llm', 'files', 'approval']:
+    for builtin in ['llm', 'files']:
         actions = available_tools.get(builtin, set())
         if actions:
             for action in sorted(actions):
@@ -779,7 +770,7 @@ def build_prefilter_prompt(task: str, available_tools: Dict[str, Set[str]], conn
         for tool_name, desc in custom_descriptions.items():
             t_name = tool_name.lower()
             # Skip if it's a known built-in or already handled via connections
-            if t_name in ['llm', 'files', 'approval', 'websearch'] or t_name in TOOL_ACTION_SUMMARIES:
+            if t_name in ['llm', 'files', 'websearch'] or t_name in TOOL_ACTION_SUMMARIES:
                 continue
             if any(getattr(c, 'tool_name', '').lower() == t_name for c in (connections or [])):
                 continue
@@ -864,7 +855,7 @@ def parse_prefilter_response(response: str, connections: List[Any] = None) -> tu
     conn_lookup = _build_connection_lookup(connections)
     
     # Built-in tools that don't need connections
-    builtins = {'llm', 'files', 'approval', 'websearch'}
+    builtins = {'llm', 'files', 'websearch'}
     
     selected_actions = []
     connection_map = {}  # tool_name -> [connection_name, ...]
@@ -985,7 +976,7 @@ def get_available_actions_for_connections(connections: List[Any], custom_tools: 
                     result[tool_name].add(mapped)
     
     # Always include built-in tools (excluding websearch which is treated as an explicit tool)
-    for builtin in ['llm', 'files', 'approval']:
+    for builtin in ['llm', 'files']:
         if builtin in TOOL_ACTION_SUMMARIES:
             result[builtin] = set(TOOL_ACTION_SUMMARIES[builtin].keys())
             

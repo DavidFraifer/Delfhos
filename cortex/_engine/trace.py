@@ -47,7 +47,7 @@ class PrefilterTrace:
     tools_rejected: List[str] = field(default_factory=list)
     tokens_input: int = 0
     tokens_output: int = 0
-    cost_usd: float = 0.0
+    cost_usd: Optional[float] = None
     ran_parallel_with: Optional[str] = None
 
     @property
@@ -68,7 +68,7 @@ class CodeGenTrace:
     code_generated: str = ""
     tokens_input: int = 0
     tokens_output: int = 0
-    cost_usd: float = 0.0
+    cost_usd: Optional[float] = None
     attempt: int = 1
 
     @property
@@ -98,7 +98,7 @@ class ExecutionTrace:
     retry_reason: Optional[str] = None
     tokens_input: int = 0
     tokens_output: int = 0
-    cost_usd: float = 0.0
+    cost_usd: Optional[float] = None
 
     @property
     def tokens_total(self) -> int:
@@ -154,7 +154,7 @@ class Trace:
     tool_calls: List[ToolCallTrace] = field(default_factory=list)
     chat_compression: Optional[ChatCompressionTrace] = None
     session_close: Optional[SessionCloseTrace] = None
-    total_cost_usd: float = 0.0
+    total_cost_usd: Optional[float] = None
     pricing_path: str = ""
     cost_by_function: Dict[str, float] = field(default_factory=dict)
 
@@ -216,7 +216,7 @@ class Trace:
             parallel_str = f"  (parallel with {self.prefilter.ran_parallel_with})" if self.prefilter.ran_parallel_with else ""
             lines.append(f"║ PREFILTER                 {self.prefilter.duration_ms:,}ms{parallel_str}".ljust(60)+"║")
             lines.append(f"║   Model                   {self.prefilter.model_used}".ljust(60)+"║")
-            lines.append(f"║   Cost USD                ${self.prefilter.cost_usd:.6f}".ljust(60)+"║")
+            lines.append(f"║   Cost USD                {'None' if self.prefilter.cost_usd is None else f'${self.prefilter.cost_usd:.6f}'}".ljust(60)+"║")
             lines.append(f"║   Tools available         {self.prefilter.tools_available}".ljust(60)+"║")
             
             sel = ", ".join(self.prefilter.tools_selected)
@@ -233,12 +233,12 @@ class Trace:
             lines.append(f"║ CODE GENERATION           {self.code_generation.duration_ms:,}ms".ljust(60)+"║")
             lines.append(f"║   Model                   {self.code_generation.model_used}".ljust(60)+"║")
             lines.append(f"║   Tokens in/out           {self.code_generation.tokens_input:,} / {self.code_generation.tokens_output:,}".ljust(60)+"║")
-            lines.append(f"║   Cost USD                ${self.code_generation.cost_usd:.6f}".ljust(60)+"║")
+            lines.append(f"║   Cost USD                {'None' if self.code_generation.cost_usd is None else f'${self.code_generation.cost_usd:.6f}'}".ljust(60)+"║")
             lines.append(f"║".ljust(60)+"║")
 
         if self.execution:
             lines.append(f"║ EXECUTION                 {self.execution.duration_ms:,}ms".ljust(60)+"║")
-            lines.append(f"║   Cost USD                ${self.execution.cost_usd:.6f}".ljust(60)+"║")
+            lines.append(f"║   Cost USD                {'None' if self.execution.cost_usd is None else f'${self.execution.cost_usd:.6f}'}".ljust(60)+"║")
             lines.append(f"║   Tool calls              {len(self.tool_calls)}".ljust(60)+"║")
             for tc in self.tool_calls:
                 status_char = '✓' if tc.outcome == 'success' else '✗'
@@ -293,7 +293,7 @@ class Trace:
         lines.append(f"║   Memory Extractor        {ext_str}".ljust(60)+"║")
         lines.append(f"║   Chat Summarizer         {summ_str}".ljust(60)+"║")
         lines.append(f"║   Total                   {usage.total:,}".ljust(60)+"║")
-        lines.append(f"║   Cost USD                ${self.total_cost_usd:.6f}".ljust(60)+"║")
+        lines.append(f"║   Cost USD                {'None' if self.total_cost_usd is None else f'${self.total_cost_usd:.6f}'}".ljust(60)+"║")
         if self.pricing_path:
             lines.append(f"║   Pricing source          {self.pricing_path}".ljust(60)+"║")
         lines.append(f"║   Overhead                {usage.overhead_percent}%".ljust(60)+"║")

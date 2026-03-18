@@ -15,6 +15,7 @@ sys.path.insert(0, ".")
 import os
 import tempfile
 import threading
+import sqlite3
 
 # ---------------------------------------------------------------------------
 # Memory tests
@@ -154,6 +155,55 @@ def test_chat_apply_compression_keeps_recent():
     if os.path.exists(chat_db):
         os.remove(chat_db)
 
+
+def test_chat_non_persistent_by_default_does_not_create_sqlite_file():
+    """Chat should be in-memory by default and not create/load SQLite state."""
+    print("\n=== Chat: default non-persistent mode ===")
+    from delfhos.memory import Chat
+
+    chat_db = os.path.join(tempfile.gettempdir(), "delfhos_chat_non_persistent_default.db")
+    if os.path.exists(chat_db):
+        os.remove(chat_db)
+
+    chat = Chat(path=chat_db, namespace="chat_non_persistent_default")
+    chat.append("user", "hello")
+    chat.apply_compression("summary", compressed_count=1)
+
+    assert len(chat.messages) == 1
+    assert chat.summary == "summary"
+    assert not os.path.exists(chat_db), "SQLite file should not be created when persist=False"
+    print("  In-memory mode: OK")
+
+
+def test_chat_persistent_mode_saves_and_loads_state():
+    """Chat(persist=True) should keep current SQLite-backed behavior."""
+    print("\n=== Chat: persistent mode ===")
+    from delfhos.memory import Chat
+
+    chat_db = os.path.join(tempfile.gettempdir(), "delfhos_chat_persistent_mode.db")
+    if os.path.exists(chat_db):
+        os.remove(chat_db)
+
+    chat = Chat(persist=True, path=chat_db, namespace="chat_persistent_mode")
+    chat.append("user", "persist this")
+    chat.apply_compression("persisted summary", compressed_count=0)
+
+    reloaded = Chat(persist=True, path=chat_db, namespace="chat_persistent_mode")
+    assert len(reloaded.messages) == 1
+    assert reloaded.messages[0]["content"] == "persist this"
+    assert reloaded.summary == "persisted summary"
+
+    with sqlite3.connect(chat_db) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE namespace = ?",
+            ("chat_persistent_mode",),
+        ).fetchone()[0]
+    assert count == 1
+    print("  SQLite persistence mode: OK")
+
+    if os.path.exists(chat_db):
+        os.remove(chat_db)
+
     chat = Chat(keep=3, summarize=True, path=chat_db, namespace="chat_keep_recent")
     for i in range(6):
         chat.append("user", f"msg {i}")
@@ -183,7 +233,7 @@ def test_orchestrator_on_task_complete_appends_to_chat():
     if os.path.exists(chat_db):
         os.remove(chat_db)
 
-    chat = Chat(keep=10, summarize=False, path=chat_db, namespace="chat_orchestrator_append")
+    chat = Chat(keep=10, summarize=False, persist=True, path=chat_db, namespace="chat_orchestrator_append")
 
     # Simulate what Agent.__init__ registers
     def _append_assistant_response(task_id: str, message: str):
@@ -202,6 +252,25 @@ def test_orchestrator_on_task_complete_appends_to_chat():
 
     if os.path.exists(chat_db):
         os.remove(chat_db)
+
+
+def test_agent_stop_clears_non_persistent_chat():
+    """Stopping agent should clear in-memory Chat when persist=False."""
+    print("\n=== Agent stop: clears non-persistent chat ===")
+    from delfhos import Agent
+    from delfhos.memory import Chat
+
+    chat = Chat(persist=False)
+    chat.append("user", "temp session message")
+    assert len(chat.messages) == 1
+
+    agent = Agent(tools=[], llm="gemini-3.1-flash-lite-preview", chat=chat)
+    agent.start()
+    agent.stop()
+
+    assert len(chat.messages) == 0
+    assert chat.summary == ""
+    print("  Non-persistent chat cleared on stop: OK")
 
 
 if __name__ == "__main__":

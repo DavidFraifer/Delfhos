@@ -7,6 +7,9 @@ from typing import List, Dict, Optional, Any
 import threading
 import io
 from contextlib import redirect_stdout, redirect_stderr
+from datetime import datetime
+from typing import Union, Iterator
+from .types import Fact
 
 class Memory:
     """
@@ -24,8 +27,9 @@ class Memory:
         # Better quality local model
         memory = Memory(embedding_model="nomic-embed-text")
 
-        # Any Sentence Transformers-compatible model id
-        memory = Memory(embedding_model="BAAI/bge-small-en-v1.5")
+        # Use a specific namespace to isolate facts
+        user_memory = Memory(namespace="user_profile")
+        user_memory.save("User likes Python.")
 
     Any Sentence Transformers-compatible embedding model can be used.
     The following aliases are built-in::
@@ -223,7 +227,14 @@ class Memory:
             
         return "\n".join(row[0] for row in rows)
 
-    def retrieve(self, query: str, top_k: int = 5, threshold: float = 0.3) -> str:
+    def _parse_ts(self, ts_str: str) -> datetime:
+        if not ts_str: return datetime.now()
+        try:
+            return datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return datetime.now()
+
+    def search(self, query: str, top_k: int = 5, threshold: float = 0.3) -> List[Fact]:
         """Fetch the most relevant memories using semantic similarity.
         
         Uses local embeddings (no API calls) to find the closest match to your query.
@@ -235,20 +246,21 @@ class Memory:
             threshold: Min similarity score (0.0–1.0) to include. Lower = broader matches.
         
         Returns:
-            Newline-joined string of relevant facts above threshold, or "" if no matches.
+            List of `Fact` objects above threshold, or empty list if no matches.
         
         Example::
         
             memory = Memory(namespace="user_profile")
             memory.save("User is David. Likes Python. Works at Acme Corp.")
-            memory.retrieve("What's the user's company?")  # → "Works at Acme Corp."
+            results = memory.search("What's the user's company?")
+            print(results[0].content)  # → "Works at Acme Corp."
         """
         import numpy as np
 
         with sqlite3.connect(self.path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                """SELECT m.id, m.content, e.embedding
+                """SELECT m.id, m.content, m.timestamp, e.embedding
                    FROM memories m
                    JOIN memory_embeddings e ON e.memory_id = m.id
                    WHERE m.namespace = ?""",
@@ -257,20 +269,29 @@ class Memory:
             rows = cursor.fetchall()
 
         if not rows:
-            # Fallback: return full context if no embeddings yet
-            return self.context()
+            return []
 
         query_vec = self._embed_query(query)
         scored = []
-        for _id, content, blob in rows:
+        for _id, content, timestamp, blob in rows:
             vec = self._blob_to_vec(blob)
             sim = float(np.dot(query_vec, vec))  # both L2-normalized → dot = cosine
             if sim >= threshold:
-                scored.append((sim, content))
+                fact = Fact(
+                    content=content,
+                    saved_at=self._parse_ts(timestamp),
+                    namespace=self.namespace
+                )
+                scored.append((sim, fact))
 
         scored.sort(key=lambda x: x[0], reverse=True)
         top = scored[:top_k]
-        return "\n".join(fact for _, fact in top) if top else ""
+        return [fact for _, fact in top]
+
+    # Alias for backward compatibility
+    def retrieve(self, query: str, top_k: int = 5, threshold: float = 0.3) -> str:
+        results = self.search(query, top_k, threshold)
+        return "\n".join(f.content for f in results) if results else ""
 
     def save(self, content: str):
         """Store facts in long-term semantic memory.
@@ -341,3 +362,64 @@ class Memory:
                     "INSERT OR IGNORE INTO memory_embeddings (memory_id, embedding) VALUES (?, ?)",
                     (mid, self._vec_to_blob(vec)),
                 )
+
+    # ------------------------------------------------------------------
+    # Pythonic API
+    # ------------------------------------------------------------------
+
+    def _get_all_facts(self) -> List[Fact]:
+        with sqlite3.connect(self.path) as conn:
+            rows = conn.execute(
+                "SELECT content, timestamp FROM memories WHERE namespace = ? ORDER BY timestamp ASC",
+                (self.namespace,),
+            ).fetchall()
+            
+        return [
+            Fact(
+                content=row[0], 
+                saved_at=self._parse_ts(row[1]), 
+                namespace=self.namespace
+            ) for row in rows
+        ]
+
+    def __iter__(self) -> Iterator[Fact]:
+        return iter(self._get_all_facts())
+
+    def __len__(self) -> int:
+        with sqlite3.connect(self.path) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE namespace = ?", 
+                (self.namespace,)
+            ).fetchone()
+            return count[0] if count else 0
+
+    def __getitem__(self, key: Union[int, slice]) -> Union[Fact, List[Fact]]:
+        facts = self._get_all_facts()
+        return facts[key]
+
+    def clear(self):
+        """Irreversibly delete all facts in this namespace."""
+        with sqlite3.connect(self.path) as conn:
+            # Deletes embeddings first due to ON DELETE CASCADE (or explicitly here)
+            conn.execute(
+                """DELETE FROM memory_embeddings 
+                   WHERE memory_id IN (SELECT id FROM memories WHERE namespace = ?)""", 
+                (self.namespace,)
+            )
+            conn.execute("DELETE FROM memories WHERE namespace = ?", (self.namespace,))
+
+    def __str__(self) -> str:
+        facts = self._get_all_facts()
+        count = len(facts)
+        
+        lines = [f"Memory — {count} facts  [namespace: {self.namespace}]", "─" * 42]
+        
+        for i, fact in enumerate(facts, 1):
+            date_str = fact.saved_at.strftime("%Y-%m-%d")
+            # Break content into lines & wrap
+            import textwrap
+            wrapped = textwrap.fill(fact.content, width=55, subsequent_indent="                ")
+            lines.append(f"[{i}] {date_str}  {wrapped}\n")
+            
+        lines.append("─" * 42)
+        return "\n".join(lines)

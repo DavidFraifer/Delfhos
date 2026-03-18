@@ -12,6 +12,56 @@ from rich.table import Table
 from rich.markdown import Markdown
 from rich.columns import Columns
 
+
+DEFAULT_ERROR_HINT = (
+    "Review the error details and retry. If it persists, check docs or open an issue."
+)
+
+
+def normalize_error_code(raw_code: Optional[str]) -> str:
+    """Normalize all displayed error codes to ERR-* format."""
+    if not raw_code:
+        return "ERR-SYSTEM-UNHANDLED"
+    code = str(raw_code).strip().upper()
+    if code.startswith("ERR-"):
+        return code
+    return f"ERR-{code}"
+
+
+def _extract_code_and_message_from_text(text: str) -> tuple[Optional[str], str]:
+    """Extract [CODE] Message from exception strings when present."""
+    if not text:
+        return None, "Unknown error"
+    match = re.search(r"\[([A-Za-z0-9-]+)\]\s*(.*)", text)
+    if match:
+        return match.group(1), (match.group(2) or text).strip()
+    return None, text.strip()
+
+
+def extract_error_payload(exc: BaseException) -> tuple[str, str, str]:
+    """Return (normalized_code, message, hint) for any exception type."""
+    if hasattr(exc, "code") and hasattr(exc, "resolution"):
+        raw_code = getattr(exc, "code", "SYSTEM-UNHANDLED")
+        explicit_msg = getattr(exc, "_message", None)
+        if explicit_msg:
+            msg = str(explicit_msg).strip()
+        elif hasattr(exc, "message_template"):
+            try:
+                kwargs = getattr(exc, "kwargs", {}) or {}
+                msg = str(getattr(exc, "message_template")).format(**kwargs).strip()
+            except Exception:
+                msg = str(exc).strip() or type(exc).__name__
+        else:
+            msg = str(exc).strip() or type(exc).__name__
+        hint = str(getattr(exc, "resolution", "") or DEFAULT_ERROR_HINT).strip()
+        return normalize_error_code(raw_code), msg, hint
+
+    exc_text = str(exc).strip() or type(exc).__name__
+    parsed_code, parsed_msg = _extract_code_and_message_from_text(exc_text)
+    code = normalize_error_code(parsed_code or type(exc).__name__)
+    message = parsed_msg if parsed_msg else exc_text
+    return code, message, DEFAULT_ERROR_HINT
+
 class LogLevel(Enum):
     INFO = "INFO"
     SUCCESS = "SUCCESS" 
@@ -165,8 +215,10 @@ class ProfessionalConsole:
 
         # Tokens
         summary_table.add_row("Tokens", f"{tokens.get('tokens_used', 0)} (in: {tokens.get('input_tokens', 0)}, out: {tokens.get('output_tokens', 0)})")
-        summary_table.add_row("LLM Calls", str(tokens.get('llm_calls', 0)))
-        summary_table.add_row("Cost (USD)", f"${float(tokens.get('total_cost_usd', 0.0) or 0.0):.6f}")
+        # Cost (USD)
+        cost_val = tokens.get('total_cost_usd')
+        cost_str = f"${float(cost_val):.6f}" if cost_val is not None else "None"
+        summary_table.add_row("Cost (USD)", cost_str)
 
         # LLM Configuration
         if llm_config:
@@ -197,6 +249,46 @@ class ProfessionalConsole:
             # Just show summary if no result message
             self.console.print(summary_panel)
 
+    def print_exception(self, exc: Exception, title: str = "Task failed"):
+        """Print a beautiful error box for a caught exception."""
+        from rich.panel import Panel
+        from rich.console import Group
+        from rich.traceback import Traceback
+        from rich.text import Text
+        import sys
+        
+        # Make sure we stop any ongoing progress bars before printing
+        try:
+            self.stop_all()
+        except Exception:
+            pass
+
+        code, message, hint = extract_error_payload(exc)
+
+        # Use sys.exc_info() if available to get the full traceback, else just create from exception
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        if exc_value is exc:
+            tb = Traceback.from_exception(exc_type, exc_value, exc_traceback, show_locals=False)
+        else:
+            tb = Traceback.from_exception(type(exc), exc, exc.__traceback__, show_locals=False)
+
+        group = Group(
+            Text(f"Delfhos encountered an error during: {title}", style="bold red"),
+            Text(""),
+            tb,
+            Text(""),
+            Text(f"Message: {message}", style="white"),
+            Text(f"💡 Hint: {hint}", style="bold yellow")
+        )
+
+        panel = Panel(
+            group,
+            title=f"[bold red]❌ [{code}] Delfhos Error[/bold red]",
+            border_style="red",
+            expand=False
+        )
+        self.console.print(panel)
+
 def _delfhos_excepthook(exc_type, exc_val, tb_obj):
     """Custom exception hook to print beautiful error boxes for Delfhos errors."""
     from rich.panel import Panel
@@ -211,39 +303,22 @@ def _delfhos_excepthook(exc_type, exc_val, tb_obj):
 
     # Create the beautiful traceback
     tb = Traceback.from_exception(exc_type, exc_val, tb_obj, show_locals=False)
-    
-    # Check if it's a Delfhos error (has code and resolution)
-    if hasattr(exc_val, "code") and hasattr(exc_val, "resolution"):
-        code = getattr(exc_val, "code", "ERR")
-        resolution = getattr(exc_val, "resolution", "")
-        
-        group = Group(
-            Text(f"Delfhos encountered an error:", style="bold red"),
-            Text(""),
-            tb,
-            Text(""),
-            Text(f"💡 Hint: {resolution}", style="bold yellow")
-        )
-        
-        panel = Panel(
-            group,
-            title=f"[bold red]❌ [{code}] Delfhos Error[/bold red]",
-            border_style="red",
-            expand=False
-        )
-    else:
-        # Standard unhandled exception
-        group = Group(
-            Text(f"Unhandled Exception:", style="bold red"),
-            Text(""),
-            tb
-        )
-        panel = Panel(
-            group,
-            title=f"[bold red]❌ {exc_type.__name__}[/bold red]",
-            border_style="red",
-            expand=False
-        )
+    code, message, hint = extract_error_payload(exc_val)
+
+    group = Group(
+        Text("Delfhos encountered an error:", style="bold red"),
+        Text(""),
+        tb,
+        Text(""),
+        Text(f"Message: {message}", style="white"),
+        Text(f"💡 Hint: {hint}", style="bold yellow")
+    )
+    panel = Panel(
+        group,
+        title=f"[bold red]❌ [{code}] Delfhos Error[/bold red]",
+        border_style="red",
+        expand=False
+    )
 
     # Make sure we stop any ongoing progress bars before printing
     try:

@@ -38,7 +38,7 @@ Advanced (multiple LLMs, session memory)::
         tools=[...],
         light_llm="gemini-3.1-flash-lite-preview\",
         heavy_llm="gemini-3.1-pro\",
-        chat=Chat(keep=5, summarize=True),
+        chat=Chat(keep=5, summarize=True, persist=True),  # persist=True for cross-run memory
         verbose=True
     )
 
@@ -69,12 +69,9 @@ if TYPE_CHECKING:
     # Static typing/IDE support: lets hover resolve Agent docs/signature.
     from cortex.cortex import Cortex as Agent
 
-# Runtime best-effort static export for stable IDE hover/docs.
-try:
-    from cortex.cortex import Cortex as Agent
-except Exception:
-    # Keep lazy fallback below for environments where import order matters.
-    pass
+
+# Agent is lazily imported via __getattr__ below to avoid pulling in
+# the full cortex engine (google.api_core, rich, etc.) on first import.
 
 __all__ = [
     # Core

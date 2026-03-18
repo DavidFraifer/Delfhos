@@ -328,14 +328,13 @@ class PythonExecutor:
     """
     
     def __init__(self, tool_manager, task_id: str, agent_id: str, light_llm: str, heavy_llm: str, orchestrator=None,
-                 vision_model: Optional[str] = None, search_model: Optional[str] = None):
+                 vision_model: Optional[str] = None):
         self.tool_manager = tool_manager
         self.task_id = task_id
         self.agent_id = agent_id
         self.light_llm = light_llm
         self.heavy_llm = heavy_llm
         self.vision_model = vision_model or self.heavy_llm
-        self.search_model = search_model or self.light_llm
         self.orchestrator = orchestrator
         self.execution_timeout = 300  # 5 minutes max per task
         self.namespace = None
@@ -371,7 +370,6 @@ class PythonExecutor:
                 self.heavy_llm,
                 tool_tracker=tool_tracker,
                 vision_llm=self.vision_model,
-                search_llm=self.search_model,
                 memory=self.orchestrator.memory if self.orchestrator else None,
             )
             
@@ -553,7 +551,7 @@ class PythonExecutor:
         
         # Safe builtins - exclude dangerous or interactive functions like input()
         def _blocked_input(*args, **kwargs):
-            raise ToolExecutionError(tool_name="python_executor", detail="input() is not available in this environment. Use approval.ask(...) for user consent instead.")
+            raise ToolExecutionError(tool_name="python_executor", detail="input() is not available in this environment.")
 
         # A safe print function that always flushes
         def _safe_print(*args, **kwargs):

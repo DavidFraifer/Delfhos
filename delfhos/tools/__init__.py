@@ -17,26 +17,31 @@ Short names (Gmail, Drive) are preferred over long names (GmailTool, DriveTool).
 
 from delfhos.tool import tool, ToolException
 
-# Built-in native tools
-from .native import (
-    Gmail,
-    SQL,
-    Sheets,
-    Drive,
-    Calendar,
-    Docs,
-    WebSearch,
-    GmailTool,
-    SQLTool,
-    SheetsTool,
-    DriveTool,
-    CalendarTool,
-    DocsTool,
-    WebSearchTool,
-)
+# All tool names that are lazily forwarded to .native or .mcp
+_LAZY_NAMES = {
+    "Gmail", "SQL", "Sheets", "Drive", "Calendar", "Docs", "WebSearch",
+    "GmailTool", "SQLTool", "SheetsTool", "DriveTool", "CalendarTool", "DocsTool", "WebSearchTool",
+    "MCP",
+}
 
-# MCP tools
-from .mcp import MCP
+
+def __getattr__(name):
+    if name in _LAZY_NAMES:
+        if name == "MCP":
+            from .mcp import MCP
+            globals()["MCP"] = MCP
+            return MCP
+        # Forward to native module (which itself is lazy)
+        from . import native
+        klass = getattr(native, name)
+        globals()[name] = klass
+        return klass
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted({"tool", "ToolException"} | _LAZY_NAMES)
+
 
 __all__ = [
     # Base
@@ -60,3 +65,4 @@ __all__ = [
     "DocsTool",
     "WebSearchTool",
 ]
+

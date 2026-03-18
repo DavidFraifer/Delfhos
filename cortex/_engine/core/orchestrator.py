@@ -65,7 +65,7 @@ class Orchestrator:
                  on_confirm=None,
                  confirm: Optional[Union[bool, List[str], str]] = None, system_prompt: Optional[str] = None,
                  prefilter_llm: Optional[str] = None, code_generation_llm: Optional[str] = None,
-                 vision_llm: Optional[str] = None, search_llm: Optional[str] = None, token_usage=None,
+                 vision_llm: Optional[str] = None, token_usage=None,
                  memory=None, trace_mode: Union[str, bool] = "full", trace_callback=None, llm_config: Optional[str] = None,
                  verbose: str = "low"):
         approval_enabled = bool(on_confirm is not None or _has_confirm_policy(confirm))
@@ -84,7 +84,6 @@ class Orchestrator:
         self.prefilter_llm = prefilter_llm or self.light_llm
         self.code_generation_llm = code_generation_llm or self.heavy_llm
         self.vision_llm = vision_llm or self.heavy_llm
-        self.search_llm = search_llm or self.light_llm
         
         self.agent_id = agent_id
         self.enable_human_approval = approval_enabled
@@ -104,7 +103,10 @@ class Orchestrator:
         from ..tools.internal_tools import internal_tools
         for tool_name, tool_func in internal_tools.items():
             self.tools.add_tool(tool_name, tool_func)
-        self.message_queue = queue.Queue()
+        self.message_queue = queue.Queue()  # Kept for legacy compat (unused by scheduler)
+        self._async_queue: asyncio.Queue = None  # Created inside the scheduler's event loop
+        self._scheduler_loop: asyncio.AbstractEventLoop = None  # Ref to scheduler's event loop
+        self._scheduler_ready = threading.Event()  # Fired once the loop + queue are ready
         self.scheduler_thread = None
         self.running = False
         self.agent_memory = AgentMemory(f"Orchestrator-Agent-{agent_id}", max_tasks=50)
@@ -305,8 +307,11 @@ class Orchestrator:
     def start(self):
         if not self.running:
             self.running = True
+            self._scheduler_ready.clear()
             self.scheduler_thread = threading.Thread(target=self._scheduler_worker, daemon=True)
             self.scheduler_thread.start()
+            # Wait until the asyncio loop + queue are initialized (fast, typically <1ms)
+            self._scheduler_ready.wait(timeout=2.0)
     
     def stop(self):
         self.running = False
@@ -488,7 +493,14 @@ class Orchestrator:
         return self.task_tool_timings.get(task_id, [])
     
     def receive_message(self, message):
-        return self.message_queue.put(message) if self.running else False
+        if self.running and self._scheduler_loop and self._async_queue:
+            # Thread-safe enqueue into the scheduler's asyncio event loop
+            self._scheduler_loop.call_soon_threadsafe(self._async_queue.put_nowait, message)
+        elif self.running:
+            # Race: scheduler not fully ready yet — wait briefly then retry
+            if self._scheduler_ready.wait(timeout=1.0) and self._scheduler_loop and self._async_queue:
+                self._scheduler_loop.call_soon_threadsafe(self._async_queue.put_nowait, message)
+        return self.running
     
     def _cleanup_wait_times_if_needed(self):
         """Cleanup old wait_times entries if limit exceeded"""
@@ -502,29 +514,44 @@ class Orchestrator:
     def _scheduler_worker(self):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        self._scheduler_loop = loop
+        self._async_queue = asyncio.Queue()
+        self._scheduler_ready.set()  # Signal that the loop + queue are ready
         running_tasks = set()
-        
+
         async def scheduler_loop():
             nonlocal running_tasks
             while self.running:
+                # Drain any pre-enqueued messages (race-condition safety)
+                while not self._async_queue.empty():
+                    try:
+                        message = self._async_queue.get_nowait()
+                        task = asyncio.create_task(self._process_message_async(message))
+                        running_tasks.add(task)
+                        running_tasks -= {t for t in running_tasks if t.done()}
+                    except asyncio.QueueEmpty:
+                        break
+
+                # Yield control so running tasks can make progress, then wait for next message
                 try:
-                    message = self.message_queue.get(timeout=0.1)
+                    # Wait for the next message — yields immediately to event loop
+                    message = await asyncio.wait_for(self._async_queue.get(), timeout=0.2)
                     task = asyncio.create_task(self._process_message_async(message))
                     running_tasks.add(task)
                     running_tasks -= {t for t in running_tasks if t.done()}
-                    self.message_queue.task_done()
-                except queue.Empty: 
-                    await asyncio.sleep(0.1)
-                except Exception: 
-                    await asyncio.sleep(0.1)
-        
+                except asyncio.TimeoutError:
+                    # Timeout is just a heartbeat to re-check self.running
+                    pass
+
         try:
             loop.run_until_complete(scheduler_loop())
-            if running_tasks: 
+            if running_tasks:
                 loop.run_until_complete(asyncio.gather(*running_tasks, return_exceptions=True))
-        except Exception: 
+        except Exception:
             pass
-        finally: 
+        finally:
+            self._scheduler_loop = None
+            self._async_queue = None
             loop.close()
     
     async def _process_message_async(self, message):
@@ -655,8 +682,7 @@ class Orchestrator:
                     self.light_llm,
                     self.heavy_llm,
                     orchestrator=self,
-                    vision_model=self.vision_llm,
-                    search_model=self.search_llm
+                    vision_model=self.vision_llm
                 )
                 
                 if self.current_trace:
@@ -798,7 +824,7 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
                 'input_tokens': task_data.get('input_tokens', 0),
                 'output_tokens': task_data.get('output_tokens', 0), 
                 'llm_calls': task_data.get('llm_calls', 0),
-                'total_cost_usd': round(task_data.get('total_cost_usd', 0.0), 8),
+                'total_cost_usd': round(task_data.get('total_cost_usd'), 8) if task_data.get('total_cost_usd') is not None else None,
                 'pricing_path': task_data.get('pricing_path'),
             }
             
@@ -810,14 +836,16 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
                     model = call.get('model', 'unknown')
                     input_tokens = call.get('input_tokens', 0)
                     output_tokens = call.get('output_tokens', 0)
-                    call_cost_usd = float(call.get('cost_usd', 0.0) or 0.0)
+                    call_cost_usd = call.get('cost_usd')
                     function_name = call.get('function_name', 'unknown')
                     duration = call.get('duration')
                     dur_str = f" in {duration:.2f}s" if duration is not None else ""
-                    summary_lines.append(f"  {i}. {function_name} ({model}){dur_str}: {input_tokens} in, {output_tokens} out | ${call_cost_usd:.6f}")
+                    cost_str = f"${call_cost_usd:.6f}" if call_cost_usd is not None else "None"
+                    summary_lines.append(f"  {i}. {function_name} ({model}){dur_str}: {input_tokens} in, {output_tokens} out | {cost_str}")
                 total_duration = sum(call.get('duration') or 0.0 for call in llm_breakdown)
                 total_dur_str = f" in {total_duration:.2f}s" if total_duration > 0 else ""
-                summary_lines.append(f"Total: {token_info['llm_calls']} calls{total_dur_str}, {token_info['input_tokens']} in, {token_info['output_tokens']} out, ${token_info['total_cost_usd']:.6f}")
+                tot_cost_str = f"${token_info['total_cost_usd']:.6f}" if token_info['total_cost_usd'] is not None else "None"
+                summary_lines.append(f"Total: {token_info['llm_calls']} calls{total_dur_str}, {token_info['input_tokens']} in, {token_info['output_tokens']} out, {tot_cost_str}")
                 console.debug("LLM Calls Summary", "\n".join(summary_lines),
                             task_id=task_id, agent_id=self.agent_id)
             
@@ -917,7 +945,7 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
                         'input_tokens': call.get('input_tokens', 0),
                         'output_tokens': call.get('output_tokens', 0),
                         'total_tokens': call.get('input_tokens', 0) + call.get('output_tokens', 0),
-                        'cost_usd': float(call.get('cost_usd', 0.0) or 0.0),
+                        'cost_usd': call.get('cost_usd'),
                     })
                 
                 # Add tool/phase calls to timeline
@@ -930,6 +958,7 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
                         'type': 'tool',
                         'timestamp': entry.get('timestamp', 0),
                         'name': tool_name,
+                        'model': entry.get('model', ''),
                         'description': entry.get('description', ''),
                         'duration': entry.get('duration', 0),
                         'status': entry.get('status', 'unknown'),
@@ -953,7 +982,9 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
                     duration_str = f"{duration_val:.2f}s" if duration_val > 0 else "-"
                     
                     if item['type'] == 'llm':
-                        tokens_str = f"In: {item['input_tokens']}, Out: {item['output_tokens']}, Tot: {item['total_tokens']}, ${item['cost_usd']:.6f}"
+                        c_val = item['cost_usd']
+                        c_str = f"${c_val:.6f}" if c_val is not None else "None"
+                        tokens_str = f"In: {item['input_tokens']}, Out: {item['output_tokens']}, Tot: {item['total_tokens']}, {c_str}"
                         model_suffix = f" ({item['model']})" if item['model'] else ""
                         name_display = name + model_suffix
                         type_style = "[bold magenta]LLM[/bold magenta]"
@@ -961,7 +992,8 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
                         status_emoji = "✓" if item['status'] == 'success' else "✗"
                         desc = f" - {item['description']}" if item['description'] else ""
                         tokens_str = f"{status_emoji} {item['status']}{desc}"
-                        name_display = name
+                        model_suffix = f" ({item['model']})" if item['model'] else ""
+                        name_display = name + model_suffix
                         type_style = "[bold green]TOOL[/bold green]"
                     
                     timeline_table.add_row(
@@ -1037,42 +1069,37 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
                 "duration": task_duration,
                 "compute_time": computational_time,
                 "tokens_used": token_info.get('tokens_used', 0),
-                "cost_usd": token_info.get('total_cost_usd', 0.0),
+                "cost_usd": token_info.get('total_cost_usd'),
+                "trace": self.current_trace
             }
             
             if self.current_trace:
                 from datetime import datetime
                 self.current_trace.ended_at = datetime.now()
                 self.current_trace.outcome = "success" if result.get("success", False) else "failed"
-                self.current_trace.total_cost_usd = float(token_info.get('total_cost_usd', 0.0) or 0.0)
+                self.current_trace.total_cost_usd = token_info.get('total_cost_usd')
                 self.current_trace.pricing_path = token_info.get('pricing_path', "") or ""
 
                 cost_by_function = {}
                 for call in llm_breakdown:
                     fn = call.get("function_name", "unknown")
-                    cost_by_function[fn] = float(cost_by_function.get(fn, 0.0)) + float(call.get("cost_usd", 0.0) or 0.0)
+                    c_val = call.get("cost_usd")
+                    if c_val is not None:
+                        cost_by_function[fn] = cost_by_function.get(fn, 0.0) + float(c_val)
                 self.current_trace.cost_by_function = {k: round(v, 8) for k, v in cost_by_function.items()}
 
+                def _sum_costs(*fns):
+                    costs = [cost_by_function[f] for f in fns if f in cost_by_function]
+                    return round(sum(costs), 8) if costs else None
+
                 if self.current_trace.prefilter:
-                    self.current_trace.prefilter.cost_usd = round(
-                        float(cost_by_function.get("prefilter", 0.0))
-                        + float(cost_by_function.get("llm_connection_filtering", 0.0))
-                        + float(cost_by_function.get("llm_rag_retrieval", 0.0)),
-                        8,
-                    )
+                    self.current_trace.prefilter.cost_usd = _sum_costs("prefilter", "llm_connection_filtering", "llm_rag_retrieval")
                 if self.current_trace.code_generation:
-                    self.current_trace.code_generation.cost_usd = round(
-                        float(cost_by_function.get("llm_code_generation", 0.0))
-                        + float(cost_by_function.get("llm_retry", 0.0)),
-                        8,
-                    )
+                    self.current_trace.code_generation.cost_usd = _sum_costs("llm_code_generation", "llm_retry")
                 if self.current_trace.execution:
                     reserved = {"prefilter", "llm_connection_filtering", "llm_rag_retrieval", "llm_code_generation", "llm_retry"}
-                    exec_cost = 0.0
-                    for fn, c in cost_by_function.items():
-                        if fn not in reserved:
-                            exec_cost += float(c)
-                    self.current_trace.execution.cost_usd = round(exec_cost, 8)
+                    exec_fns = [fn for fn in cost_by_function if fn not in reserved]
+                    self.current_trace.execution.cost_usd = _sum_costs(*exec_fns)
 
                 self.current_trace.add_event("session_end", f"outcome: {self.current_trace.outcome}")
             
@@ -1096,7 +1123,7 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
             comp_time = max(elapsed - total_wait_time, 0.0)
 
             error_text = f"{type(e).__name__}: {str(e)}"
-            console.error("Task failed", error_text, task_id=task_id, agent_id=self.agent_id)
+            console.print_exception(e, title="Task Execution Failed")
 
             if self.logger:
                 self.logger.complete_task(task_id, "error", comp_time)
@@ -1109,6 +1136,7 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
                 "duration": elapsed,
                 "compute_time": comp_time,
                 "tokens_used": 0,
+                "trace": self.current_trace
             }
 
             # Cleanup
@@ -1419,7 +1447,7 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
                             actions_by_tool[tool].append(act)
                 
                 # Identify internal framework tools
-                internal_tool_names = {"approval", "files", "llm", "lzmafilter", "sql", "gmail", "sheets", "drive", "calendar", "docs", "websearch", "memory"}
+                internal_tool_names = {"files", "llm", "lzmafilter", "sql", "gmail", "sheets", "drive", "calendar", "docs", "websearch", "memory"}
                 
                 # Add memory tool if configured
                 if self.memory:
@@ -1474,7 +1502,7 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
                 actions_table.caption = (
                     "[bold]Legend:[/bold] "
                     "[bold magenta]User[/bold magenta] = Tools you provided (Native, MCP, Custom Tools) | "
-                    "[dim white]Internal[/dim white] = Sandbox-only tools (files, llm, approval)"
+                    "[dim white]Internal[/dim white] = Sandbox-only tools (files, llm)"
                 )
                 
                 actions_panel = Panel(actions_table, border_style="cyan", expand=False)
@@ -1534,18 +1562,9 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
             python_examples = ""  # Examples are included in compressed docs
             
         except Exception as e:
-            # Fallback: use all available actions with compressed docs
-            console.warning("Prefilter failed, using all available actions", str(e), 
+            console.error("Prefilter failed", str(e), 
                            task_id=task_id, agent_id=self.agent_id)
-            
-            # Build list of all tool:action pairs as fallback
-            selected_actions = []
-            for tool_name, actions in available_actions.items():
-                for action in actions:
-                    selected_actions.append(f"{tool_name}:{action}")
-            
-            python_api_docs = build_filtered_api_docs(selected_actions, custom_descriptions=self.tool_descriptions)
-            python_examples = ""  # Examples are included in compressed docs
+            raise
         
         # Log what we're using
         tools_info = ", ".join(selected_actions) if selected_actions else "prefiltered"
@@ -1639,7 +1658,15 @@ RULES:
 - RESPONSE DEPENDENCY: If your final wording depends on info from a tool call that has not run yet, run the tool first, then call llm.* with that result to craft the response.
 - PARALLEL: Use asyncio.gather() for independent ops. results=await asyncio.gather(*[tool.method(...)]) ✅
 - Libs: asyncio, json, re, datetime, time, math, statistics. NO pandas.
-- SHEETS: Use sheets.create(title, data=...) to initialize with data in ONE call for faster execution. Avoid separate create() then write().{examples_section}
+- SHEETS: Use sheets.create(title, data=...) to initialize with data in ONE call for faster execution. Avoid separate create() then write().
+- WEBSEARCH: LLM-powered tool. Always request machine-readable format in query when value will be reused (JSON or single scalar).
+- WEBSEARCH STRICT RULES:
+    - If a numeric/date/value is needed for calculations, ask websearch to return ONLY that value or strict JSON with exact keys.
+    - Parse websearch output and use parsed value; NEVER hardcode guessed fallback facts (rates, prices, stats, dates) unless user explicitly requests an estimate.
+    - Preferred pattern: "Return ONLY JSON: {{\"interest_rate_percent\": number, \"source\": string, \"as_of\": string}}" then parse with json.loads(...).
+    - If parsing fails, do not invent values; print a clear message with the raw result and request refinement/retry.
+    - Example scalar: "Current 30-year mortgage rate USA? Return ONLY the number".
+    - Example JSON: "Current 30-year mortgage rate USA. Return ONLY JSON with interest_rate_percent".{examples_section}
 
 OUTPUT: Python code ONLY. NO comments. Only print() is visible, use markdown."""
         

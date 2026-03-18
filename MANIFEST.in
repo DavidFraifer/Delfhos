@@ -1,0 +1,2 @@
+include delfhos/py.typed
+recursive-include delfhos *.pyi

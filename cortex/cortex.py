@@ -19,9 +19,11 @@ That's it.
 """
 
 import time
+import asyncio
 from typing import List, Optional, Union, Dict, Any, Callable
 from cortex._engine.agent import Agent
 from cortex._engine.connection import Connection
+from cortex._engine.types import Response
 from delfhos.memory import Chat, Memory
 
 
@@ -49,9 +51,13 @@ class Cortex:
         agent = Cortex(tools=[Gmail(), Drive()], llm="gemini-3.1-flash-lite-preview")
         agent.start().run("Archive unread emails and summarize to alice@co.com")
 
-    Advanced example:
+    Advanced example with web search:
         agent = Cortex(
-            tools=[WebSearch(), SQL(url="postgresql://..."), Sheets(...)],
+            tools=[
+                WebSearch(llm="gemini-3.1-flash-lite-preview"),  # Web search requires explicit model
+                SQL(url="postgresql://..."),
+                Sheets(...)
+            ],
             light_llm="gemini-3.1-flash-lite-preview",
             heavy_llm="gemini-3.1-pro",
             chat=Chat(keep=5, summarize=True),
@@ -59,9 +65,15 @@ class Cortex:
             confirm=["write", "delete"],
             on_confirm=lambda brief: input(f"Approve {brief}? ").lower() == "y"
         )
+        
+    WebSearch Tip: Request specific formats in your query for structured results:
+        agent.run("Find mortgage rate. Ask WebSearch to return ONLY the percentage.")
+        agent.run("Top 3 AI trends. Request: Format as 1. trend, 2. trend, 3. trend")
+        agent.run("COVID stats. Request: Return JSON with country and cases fields.")
 
     Args:
-        tools: Service tools (Gmail, Drive, SQL, MCP, etc) or @tool functions.
+        tools: Service tools (Gmail, Drive, SQL, MCP, WebSearch, etc) or @tool functions.
+               Note: WebSearch(llm="model") requires an explicit model (Gemini or OpenAI/GPT).
         llm: Single LLM for all ops (simple). Use either llm OR (light_llm + heavy_llm).
         light_llm: Fast LLM for prefiltering (advanced; requires heavy_llm).
         heavy_llm: Stronger LLM for code generation (advanced; requires light_llm).
@@ -154,10 +166,7 @@ class Cortex:
             }
         )
 
-    @property
-    def last_trace(self):
-        """Retrieve the last execution trace of the agent."""
-        return self._agent.last_trace
+
 
     # ─── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -188,7 +197,7 @@ class Cortex:
         # Note: run() will auto-start the agent and print task box first
         self._agent.run(task)
 
-    def run(self, task: str, timeout: float = 60.0) -> bool:
+    def run(self, task: str, timeout: float = 60.0) -> Response:
         """
         Submit a task and block until it completes (or timeout is reached).
 
@@ -197,27 +206,19 @@ class Cortex:
             timeout: Maximum seconds to wait (default: 60).
 
         Returns:
-            True if completed, False if timed out.
+            Response object containing the final result, cost, and metadata.
         """
-        # Note: run() will auto-start the agent and print task box first
-        # Capture current active task count as baseline
-        before = self._active_task_count()
-        self._agent.run(task)
+        task_id = self._agent.run(task)
 
-        # Wait for the new task to start and then finish.
-        # Prevent returning early before the scheduler picks up the task.
         deadline = time.time() + timeout
-        task_started = False
-        poll_interval = 0.1  # Internal polling frequency
+        poll_interval = 0.1
         while time.time() < deadline:
-            current = self._active_task_count()
-            if not task_started and current > before:
-                task_started = True
-            elif task_started and current <= before:
-                return True
+            res = self._agent.orchestrator.task_results.get(task_id)
+            if res is not None:
+                return self._build_response(res)
             time.sleep(poll_interval)
-        return False
-    async def arun(self, task: str, timeout: float = 60.0) -> bool:
+        return Response(text="Timeout", status=False, error="Timeout waiting for task")
+    async def arun(self, task: str, timeout: float = 60.0) -> Response:
         """
         Submit a task asynchronously and wait for its completion.
 
@@ -226,29 +227,22 @@ class Cortex:
             timeout: Maximum seconds to wait (default: 60).
 
         Returns:
-            True if completed, False if timed out.
+            Response object containing the final result, cost, and metadata.
         """
-        import asyncio
         if not self._agent.running:
             self._agent.start()
 
-        # Capture current active task count as baseline
-        before = self._active_task_count()
-        await self._agent.run_async(task)
+        task_id = await self._agent.run_async(task)
 
-        # Wait for the new task to start and then finish.
-        # Prevent returning early before the scheduler picks up the task.
         deadline = time.time() + timeout
-        task_started = False
-        poll_interval = 0.1  # Internal polling frequency
+        poll_interval = 0.1
         while time.time() < deadline:
-            current = self._active_task_count()
-            if not task_started and current > before:
-                task_started = True
-            elif task_started and current <= before:
-                return True
+            res = self._agent.orchestrator.task_results.get(task_id)
+            if res is not None:
+                return self._build_response(res)
             await asyncio.sleep(poll_interval)
-        return False
+            
+        return Response(text="", status=False, error="Timeout waiting for task")
 
     # ─── Human approval ───────────────────────────────────────────────────────
 
@@ -323,3 +317,16 @@ class Cortex:
             return len(self._agent.logger.active_tasks)
         except Exception:
             return 0
+            
+    def _build_response(self, res: dict) -> Response:
+        status = res.get("completed", False)
+        error = res.get("final_message") if not status else None
+        text = res.get("final_message", "") if status else ""
+        return Response(
+            text=text,
+            status=status,
+            error=error,
+            cost_usd=res.get("cost_usd"),
+            duration_ms=int(res.get("duration", 0) * 1000),
+            trace=res.get("trace")
+        )

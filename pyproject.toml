@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "delfhos"
-version = "0.4.2"
+version = "0.4.3"
 description = "Delfhos — AI agent SDK with typed connections and tool orchestration"
 keywords = ["ai", "agents", "sdk", "automation", "mcp", "gemini"]
 authors = [
@@ -77,6 +77,9 @@ include = ["cortex*", "delfhos*"]
 
 [tool.setuptools]
 include-package-data = true
+
+[tool.setuptools.package-data]
+delfhos = ["py.typed", "*.pyi", "tools/*.pyi", "memory/*.pyi"]
 
 [project.urls]
 "Homepage" = "https://github.com/DavidFraifer/delfhos"

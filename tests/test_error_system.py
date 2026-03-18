@@ -20,6 +20,8 @@ def test_error_message_includes_code_message_hint():
     assert "Message:" in text
     assert "Hint:" in text
     assert "network timeout" in text
+    assert "By default" in text
+    assert "@tool(handle_error=True)" not in text
 
 
 def test_error_manual_message_override():

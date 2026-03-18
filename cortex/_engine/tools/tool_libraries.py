@@ -1676,13 +1676,39 @@ class CalendarLibrary(ToolLibraryBase):
 
 class WebSearchLibrary(ToolLibraryBase):
     """
-    Web Search Library - Search the internet for information.
+    Web Search Library - Search the internet for information using an LLM.
+    
+    LLM-powered: Request specific output formats (JSON, numbers, lists) in your query.
     
     Usage:
-        from tools import websearch
+        # Basic search
+        results = await websearch.search("Python async programming best practices")
         
-        results = await websearch.search("Python async programming", max_results=5)
+        # Request format - LLM will extract and return data in requested format
+        rate = await websearch.search(
+            "Current 30-year fixed mortgage rate USA? Return ONLY the percentage number"
+        )
+        
+        # JSON format request
+        stats = await websearch.search(
+            "COVID cases by country. Return as JSON: {country: cases}"
+        )
     """
+    
+    def __init__(self, tool_manager, task_id: str, agent_id: str, light_llm: str, heavy_llm: str, tool_tracker=None,
+                 vision_llm: Optional[str] = None, search_llm: Optional[str] = None, memory: Optional[Any] = None):
+        """Override base __init__ to extract llm from WebSearch connection if available"""
+        super().__init__(tool_manager, task_id, agent_id, light_llm, heavy_llm, tool_tracker, vision_llm, search_llm, memory)
+        
+        # Try to get the llm from WebSearch connection metadata
+        # This allows WebSearch to be self-contained with its own model
+        if hasattr(tool_manager, 'connections'):
+            for conn_name, conn in tool_manager.connections.items():
+                if hasattr(conn, 'tool_name') and conn.tool_name.lower() == 'websearch':
+                    # Extract llm from connection metadata
+                    if hasattr(conn, 'metadata') and conn.metadata and 'llm' in conn.metadata:
+                        self.search_llm = conn.metadata['llm']
+                        break
     
     @property
     def tool_name(self) -> str:
@@ -1690,15 +1716,18 @@ class WebSearchLibrary(ToolLibraryBase):
     
     async def search(self, query: str, max_results: int = 5, desc: str = None) -> str:
         """
-        Search the web and return results.
+        Search the web using an LLM-powered interface.
+        
+        Include format instructions in the query for structured results.
         
         Args:
-            query: Search query
-            max_results: Maximum number of results to return
-            desc: Optional description (e.g., "Researching Python best practices")
+            query: Search query with optional format instructions
+                   Examples: "Return percentage", "Format as JSON", "List as 1. 2. 3."
+            max_results: Maximum results (unused - kept for compatibility)
+            desc: Optional description for logging
         
         Returns:
-            str - Summary of search results
+            str - Formatted search results per your query instructions
         """
         import time
         from ..tools.websearch import web_search
@@ -1708,7 +1737,7 @@ class WebSearchLibrary(ToolLibraryBase):
         start_time = time.time()
         
         if self.tool_tracker:
-            await self.tool_tracker.track_start(tool_name, description)
+            await self.tool_tracker.track_start(tool_name, description, model=self.search_llm)
         
         try:
             result, token_info = await web_search(
@@ -1719,25 +1748,25 @@ class WebSearchLibrary(ToolLibraryBase):
             )
             
             duration = time.time() - start_time
+            
+            # Build success description with token info
+            success_desc = description
+            if token_info:
+                tokens_used = token_info.get("tokens_used", 0)
+                input_tokens = token_info.get("input_tokens", 0)
+                output_tokens = token_info.get("output_tokens", 0)
+                success_desc = f"{description}\nTokens: In: {input_tokens}, Out: {output_tokens}, Tot: {tokens_used}"
+            
             if self.tool_tracker:
-                await self.tool_tracker.track_end(tool_name, duration, success=True, description=description)
+                await self.tool_tracker.track_end(tool_name, duration, success=True, description=success_desc, model=self.search_llm)
             if self.tool_tracker and self.tool_tracker.orchestrator:
                 self.tool_tracker.orchestrator.track_tool_usage(self.task_id, tool_name)
-            
-            # Log tokens
-            if self.tool_tracker and self.tool_tracker.orchestrator and token_info:
-                try:
-                    self.tool_tracker.orchestrator.logger.add_tokens(
-                        self.task_id, token_info, self.search_llm, "web_search"
-                    )
-                except Exception:
-                    pass
             
             return result if isinstance(result, str) else str(result)
         except Exception as e:
             duration = time.time() - start_time
             if self.tool_tracker:
-                await self.tool_tracker.track_end(tool_name, duration, success=False, error=str(e), description=description)
+                await self.tool_tracker.track_end(tool_name, duration, success=False, error=str(e), description=description, model=self.search_llm)
             raise
 
 
@@ -1940,6 +1969,10 @@ class LLMLibrary(ToolLibraryBase):
                 end_meta = {"_tool_trace_result": result_str[:500] + ("..." if len(result_str) > 500 else "")}
                 await self.tool_tracker.track_end("llm", duration, success=True, model=llm_model, ui_metadata=end_meta)
             
+            # Track tool usage - record that llm was used
+            if self.tool_tracker and hasattr(self.tool_tracker, 'orchestrator') and self.tool_tracker.orchestrator:
+                self.tool_tracker.orchestrator.track_tool_usage(self.task_id, "llm")
+            
             # Track tokens and cost in orchestrator logger so they appear in summary
             orchestrator = getattr(self.tool_tracker, "orchestrator", None) if self.tool_tracker else None
             logger = getattr(orchestrator, "logger", None) if orchestrator else None
@@ -2064,6 +2097,12 @@ async def _execute_tracked_callable(
             success=True,
             ui_metadata={"_tool_trace_result": str(result)[:500]}
         )
+        
+        # Track tool usage - extract tool name from call_name (e.g., "filesystem.read_file" -> "filesystem")
+        tool_name = call_name.split('.')[0] if '.' in call_name else call_name
+        if tool_tracker and hasattr(tool_tracker, 'orchestrator') and tool_tracker.orchestrator:
+            tool_tracker.orchestrator.track_tool_usage(tool_tracker.task_id, tool_name)
+        
         return result
     except Exception as e:
         duration = time.time() - start_time
@@ -2207,7 +2246,7 @@ def _wrap_for_tracking(tool_name: str, tool_obj: Any, tool_tracker: Any) -> Any:
     return tool_obj
 
 def create_tool_libraries(tool_manager, task_id: str, agent_id: str, light_llm: str, heavy_llm: str,
-                         tool_tracker=None, vision_llm: Optional[str] = None, search_llm: Optional[str] = None,
+                         tool_tracker=None, vision_llm: Optional[str] = None,
                          memory: Optional[Any] = None) -> dict:
     """
     Create all tool library instances for a task execution.
@@ -2226,7 +2265,6 @@ def create_tool_libraries(tool_manager, task_id: str, agent_id: str, light_llm: 
         "heavy_llm": heavy_llm,
         "tool_tracker": tool_tracker,
         "vision_llm": vision_llm,
-        "search_llm": search_llm,
         "memory": memory,
     }
     
@@ -2258,7 +2296,6 @@ def create_tool_libraries(tool_manager, task_id: str, agent_id: str, light_llm: 
     always_available_libraries = {
         "llm": LLMLibrary,
         "files": FilesLibrary,
-        "approval": ApprovalLibrary,
         "websearch": WebSearchLibrary,
         "memory": MemoryLibrary,
     }
@@ -2457,44 +2494,3 @@ class FilesLibrary(ToolLibraryBase):
         return file_path
 
 
-class ApprovalLibrary(ToolLibraryBase):
-    """
-    Approval Library - Explicit human-in-the-loop permission requests.
-    
-    Usage:
-        from tools import approval
-        
-        approved = await approval.ask(
-            "I want to read your last email subject and sender.",
-            "Reading last email to extract sender"
-        )
-        if not approved:
-            print("User did not grant permission; aborting.")
-            return
-    """
-    
-    @property
-    def tool_name(self) -> str:
-        return "approval"
-    
-    async def ask(self, message: str, context: str = "", desc: str = None) -> bool:
-        """
-        Ask the user for approval before performing a sensitive action.
-        
-        - message: human-friendly explanation of what you plan to do
-        - context: optional extra technical context (logged, not shown)
-        - desc: optional short description for the timeline (defaults to message)
-        """
-        if not self.tool_tracker:
-            return True
-        
-        orchestrator = getattr(self.tool_tracker, "orchestrator", None)
-        if not orchestrator or not getattr(orchestrator, "approval_manager", None):
-            # No human approval configured – treat as auto-approved
-            return True
-        
-        return await orchestrator.require_approval(
-            task_id=self.task_id,
-            message=desc or message,
-            context=context or message,
-        )

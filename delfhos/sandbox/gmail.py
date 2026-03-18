@@ -50,11 +50,17 @@ class MockEmail(BaseConnection):
     """
     
     TOOL_NAME = "gmail"
+    ALLOWED_ACTIONS = ["read", "send"]
+
+    @classmethod
+    def inspect(cls, verbose: bool = False) -> dict:
+        """Inspect available mock email actions without creating an instance."""
+        return super().inspect(verbose=verbose)
     
-    def __init__(self, name: str = "gmail"):
+    def __init__(self, name: str = "gmail", allow=None):
         super().__init__(
             credentials={"mock": True},
-            allow=["READ", "SEND"], # Allow core actions
+            allow=allow,  # None means allow all actions
             name=name,
             auth_type=AuthType.NONE
         )

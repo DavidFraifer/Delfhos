@@ -4,6 +4,7 @@ import sys
 sys.path.insert(0, ".")
 
 from delfhos import Calendar, Docs, Drive, Gmail, SQL, Sheets, WebSearch
+from delfhos.sandbox import MockDatabase, MockEmail
 from cortex._engine.mcp import executor as mcp_executor
 from cortex._engine.tools.tool_registry import map_frontend_action_to_registry_action, TOOL_ACTION_SUMMARIES
 
@@ -20,6 +21,16 @@ def test_native_methods_are_discoverable_via_inspect_only():
     # Native method discovery should flow through inspect().
     ws = WebSearch()
     assert ws.inspect()["methods"] == ["search"]
+
+
+def test_sandbox_mock_tools_are_discoverable_via_class_inspect():
+    mock_email = MockEmail.inspect()
+    assert mock_email["tool"] == "gmail"
+    assert mock_email["methods"] == ["read", "send"]
+
+    mock_db = MockDatabase.inspect()
+    assert mock_db["tool"] == "sql"
+    assert mock_db["methods"] == ["schema", "query", "write"]
 
 
 def test_dynamic_action_mapping_for_mcp_like_tools():

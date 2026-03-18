@@ -10,6 +10,18 @@ Each error includes:
 from typing import Optional
 
 
+def format_error_block(code: str, message: str, hint: str, title: str = "Delfhos Error") -> str:
+    """Render standardized multiline error output used across SDK and engine."""
+    return (
+        f"\n\n"
+        f"❌ [{code}] {title}\n"
+        f"{'-' * 40}\n"
+        f"Message: {message}\n"
+        f"{'-' * 40}\n"
+        f"💡 Hint: {hint}\n"
+    )
+
+
 class DelfhosConfigError(Exception):
     """Base class for all Delfhos exceptions."""
     code: str = "ERR-BASE"
@@ -46,14 +58,7 @@ class DelfhosConfigError(Exception):
 
         hint = _safe_format(self.resolution)
         
-        return (
-            f"\n\n"
-            f"❌ [{self.code}] Delfhos Error\n"
-            f"{'-' * 40}\n"
-            f"Message: {msg}\n"
-            f"{'-' * 40}\n"
-            f"💡 Hint: {hint}\n"
-        )
+        return format_error_block(self.code, msg, hint)
 
 
 class ModelConfigurationError(DelfhosConfigError):
@@ -72,10 +77,10 @@ class MemorySetupError(DelfhosConfigError):
     resolution = "Check that the directory exists and you have write permissions, or use an in-memory database like ':memory:'."
 
 class ToolExecutionError(DelfhosConfigError):
-    """Raised when a tool fails internally and handle_error=False is used."""
+    """Raised when a tool fails during execution and cannot be recovered automatically."""
     code = "ERR-TOOL-001"
     message_template = "Tool '{tool_name}' failed during execution: {detail}"
-    resolution = "Review the arguments sent to the tool. If the error is expected, consider setting `@tool(handle_error=True)` so the LLM can see the error as a string message and recover."
+    resolution = "Review the arguments sent to the tool. By default, `@tool` uses `handle_error=True` and returns `ToolException` messages to the LLM for recovery."
 
 class MCPConnectionError(DelfhosConfigError):
     code = "ERR-MCP-001"

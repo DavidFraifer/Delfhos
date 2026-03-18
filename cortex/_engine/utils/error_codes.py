@@ -5,7 +5,7 @@ Provides consistent error handling across the entire system.
 
 from enum import Enum
 from typing import Optional, Dict, Any, Union
-from delfhos.errors import ToolDefinitionError
+from delfhos.errors import ToolDefinitionError, format_error_block
 from .console import console
 
 
@@ -62,11 +62,18 @@ class CORTEXError:
         self.solution = solution
     
     def __str__(self):
-        return f"[{self.code}] {self.message}"
+        return f"[{self.display_code}] {self.message}"
+
+    @property
+    def display_code(self) -> str:
+        """Canonical display code format shared across SDK + engine output."""
+        if self.code.startswith("ERR-"):
+            return self.code
+        return f"ERR-{self.code}"
     
     def format_full(self) -> str:
         """Get full formatted error message (verbose)"""
-        lines = [f"[{self.code}] {self.message}"]
+        lines = [f"[{self.display_code}] {self.message}"]
         if self.description:
             lines.append(f"Description: {self.description}")
         if self.solution:
@@ -75,14 +82,7 @@ class CORTEXError:
     
     def format_message(self) -> str:
         """Format error for console output (matches SDK error format)"""
-        return (
-            f"\n\n"
-            f"❌ [{self.code}] Delfhos Error\n"
-            f"{'-' * 40}\n"
-            f"Message: {self.message}\n"
-            f"{'-' * 40}\n"
-            f"💡 Hint: {self.solution}\n"
-        )
+        return format_error_block(self.display_code, self.message, self.solution)
 
 
 # ==================== ERROR CODE DEFINITIONS ====================
@@ -225,6 +225,15 @@ class ErrorCodes:
         "The LLM-integrated web search encountered an error during execution",
         _docs_hint("Check LLM API connectivity and model availability. If the issue persists,")
     )
+    
+    WEB_006 = CORTEXError(
+        "WEB-006", ErrorCategory.TOOL, ErrorSeverity.ERROR,
+        "Model does not support web search",
+        "The specified LLM model does not support web search capability",
+        "Web search is supported for Gemini and OpenAI/GPT models. Initialize WebSearch with a supported model:\n"
+        "  WebSearch(llm='gemini-3.1-flash-lite-preview')  # Gemini\n"
+        "  WebSearch(llm='gpt-4')  # OpenAI"
+    )
 
 
 class ErrorHandler:
@@ -240,13 +249,13 @@ class ErrorHandler:
         
         # Send to console based on severity
         if error.severity == ErrorSeverity.CRITICAL:
-            console.error(f"CRITICAL {error.code}", formatted, task_id=task_id, agent_id=agent_id)
+            console.error(f"CRITICAL {error.display_code}", formatted, task_id=task_id, agent_id=agent_id)
         elif error.severity == ErrorSeverity.ERROR:
-            console.error(f"{error.code}", formatted, task_id=task_id, agent_id=agent_id)
+            console.error(f"{error.display_code}", formatted, task_id=task_id, agent_id=agent_id)
         elif error.severity == ErrorSeverity.WARNING:
-            console.warning(f"{error.code}", formatted, task_id=task_id, agent_id=agent_id)
+            console.warning(f"{error.display_code}", formatted, task_id=task_id, agent_id=agent_id)
         else:  # INFO
-            console.info(f"{error.code}", formatted, task_id=task_id, agent_id=agent_id)
+            console.info(f"{error.display_code}", formatted, task_id=task_id, agent_id=agent_id)
         
         # Log additional context if provided
         if context:
@@ -303,7 +312,9 @@ def report_error(code: str, task_id: Optional[str] = None, agent_id: Optional[st
     if error:
         ErrorHandler.report_error(error, task_id, agent_id, context)
     else:
-        console.error("Unknown Error", f"Error code {code} not found", task_id=task_id, agent_id=agent_id)
+        unknown_code = code if str(code).startswith("ERR-") else f"ERR-{code}"
+        formatted = format_error_block(unknown_code, "Error code not found", "Verify the code is registered in ErrorCodes.")
+        console.error("Unknown Error", formatted, task_id=task_id, agent_id=agent_id)
 
 
 def raise_error(code: str, context: Optional[Union[str, Dict[str, Any]]] = None):
@@ -313,7 +324,8 @@ def raise_error(code: str, context: Optional[Union[str, Dict[str, Any]]] = None)
         raise ErrorHandler.create_exception(error, _format_context(context))
     else:
         context_str = _format_context(context)
-        detail = f"Unknown error code: {code}"
+        display_code = code if str(code).startswith("ERR-") else f"ERR-{code}"
+        detail = f"Unknown error code: {display_code}"
         if context_str:
             detail += f" | Context: {context_str}"
         raise ToolDefinitionError(detail=detail)

@@ -65,15 +65,22 @@ class MockDatabase(SQLConnection):
     """
     
     TOOL_NAME = "sql"
+    ALLOWED_ACTIONS = ["schema", "query", "write"]
+
+    @classmethod
+    def inspect(cls, verbose: bool = False) -> dict:
+        """Inspect available mock SQL actions without creating an instance."""
+        return super().inspect(verbose=verbose)
     
-    def __init__(self, name: str = "db"):
+    def __init__(self, name: str = "db", allow=None):
         # We don't need real credentials, but the base class expects something
         super().__init__(
             host="sandbox-memory-db", 
             database="sandbox", 
             user="sandbox", 
             password="pwd",
-            name=name
+            name=name,
+            allow=allow  # None means allow all actions
         )
         # Mark this as a sandbox connection so the internal tool knows to intercept
         self.is_sandbox = True

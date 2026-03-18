@@ -5,6 +5,13 @@ from cortex._engine.tools.tool_libraries import _requires_approval, _resolve_eff
 
 
 class TestConfirmPolicy(unittest.TestCase):
+    def test_agent_allows_empty_tools_for_llm_only_mode(self):
+        agent = Agent(tools=[], llm="gemini-3.1-flash-lite-preview")
+
+        self.assertEqual(agent.tools, [])
+        self.assertTrue(agent.enable_human_approval)
+        self.assertIsNotNone(agent.orchestrator.approval_manager)
+
     def test_string_policy_exact_match(self):
         self.assertTrue(_requires_approval("write", "write"))
         self.assertFalse(_requires_approval("write", "delete"))

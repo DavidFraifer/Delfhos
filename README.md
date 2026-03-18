@@ -22,7 +22,7 @@ pip install -e .
 from delfhos import Agent, WebSearch
 
 agent = Agent(
-    tools=[WebSearch()],
+    tools=[WebSearch(llm="gpt-5.4-mini")],
     llm="gemini-3.1-flash-lite-preview",
 )
 
@@ -57,6 +57,8 @@ agent = Agent(tools=[gmail, db, drive], llm="gemini-3.1-flash-lite-preview")
 Notes:
 - Use `allow=[...]` to restrict actions.
 - Inspect available methods with `tool.inspect()` or detailed output with `tool.inspect(verbose=True)`.
+- `WebSearch` requires an explicit search model: `WebSearch(llm="gemini-..." )` or `WebSearch(llm="gpt-...")`.
+- For parseable outputs, request format in the query (e.g., "Return ONLY JSON: {\"rate\": number}").
 
 ## Custom Tools
 
@@ -79,7 +81,7 @@ agent = Agent(
 from delfhos import Agent, Chat, Memory, WebSearch
 
 agent = Agent(
-    tools=[WebSearch()],
+    tools=[WebSearch(llm="gpt-5.4-mini")],
     chat=Chat(keep=8, summarize=True, namespace="support_agent"),
     memory=Memory(namespace="support_agent"),
     llm="gemini-3.1-flash-lite-preview",

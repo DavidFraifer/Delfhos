@@ -89,7 +89,6 @@ class Agent:
                  prefilter_llm: Optional[str] = None,
                  code_generation_llm: Optional[str] = None,
                  vision_llm: Optional[str] = None,
-                 search_llm: Optional[str] = None,
                  chat: Optional[Chat] = None,
                  memory: Optional[Memory] = None,
                  providers: Optional[Dict[str, str]] = None,
@@ -180,8 +179,7 @@ class Agent:
                 "summarizer_llm": _explicit_llms.get("summarizer_llm", summarizer_llm is not None),
                 "prefilter_llm": prefilter_llm is not None,
                 "code_generation_llm": code_generation_llm is not None,
-                "vision_llm": vision_llm is not None,
-                "search_llm": search_llm is not None
+                "vision_llm": vision_llm is not None
             }
         else:
             # Infer from parameters (for direct Agent usage)
@@ -192,8 +190,7 @@ class Agent:
                 "summarizer_llm": summarizer_llm is not None,
                 "prefilter_llm": prefilter_llm is not None,
                 "code_generation_llm": code_generation_llm is not None,
-                "vision_llm": vision_llm is not None,
-                "search_llm": search_llm is not None
+                "vision_llm": vision_llm is not None
             }
 
         approval_enabled = bool(
@@ -209,7 +206,7 @@ class Agent:
         self.confirm_policy = resolved_confirm
         self.verbose = verbose
         self.trace_mode = "full" if verbose else "minimal"
-        self.last_trace = None
+        self._last_trace = None
         
         # Basic model validation (accept provider-compatible model IDs, not a fixed list)
         models_to_validate = [
@@ -218,8 +215,7 @@ class Agent:
             (summarizer_llm, "summarizer_llm"),
             (prefilter_llm, "prefilter_llm"),
             (code_generation_llm, "code_generation_llm"),
-            (vision_llm, "vision_llm"),
-            (search_llm, "search_llm")
+            (vision_llm, "vision_llm")
         ]
         
         for model, name in models_to_validate:
@@ -238,7 +234,6 @@ class Agent:
         self.prefilter_llm = prefilter_llm or self.light_llm
         self.code_generation_llm = code_generation_llm or self.heavy_llm
         self.vision_llm = vision_llm or self.heavy_llm
-        self.search_llm = search_llm or self.light_llm
         
         self.logger = CORTEXLogger() 
         self.usage = TokenUsage()
@@ -254,7 +249,6 @@ class Agent:
             prefilter_llm=self.prefilter_llm,
             code_generation_llm=self.code_generation_llm,
             vision_llm=self.vision_llm,
-            search_llm=self.search_llm,
             token_usage=self.usage,
             memory=memory,
             trace_mode=self.trace_mode,
@@ -276,17 +270,16 @@ class Agent:
         self.memory = memory
 
         # Wire chat so every completed task's output is captured as an assistant turn
-        if self.chat:
+        if self.chat is not None:
             def _append_assistant_response(task_id: str, message: str):
                 if message and message.strip() and message != "Task completed successfully":
                     self.chat.append("assistant", message)
             self.orchestrator.on_task_complete = _append_assistant_response
 
-        self._configure_tools()
-        self._warmup_clients()
+        self._tools_configured = False
 
     def _update_trace(self, trace: Trace):
-        self.last_trace = trace
+        self._last_trace = trace
     
     def _warmup_clients(self):
         """Eagerly build Google API clients for all connections.
@@ -318,11 +311,13 @@ class Agent:
     
     def _configure_tools(self):
         """Configure which tools are available to the orchestrator"""
-        if not self.tools:
-            raise_error("AGT-003", context={"tools_provided": self.tools})
-        
         self.orchestrator.tools.tools.clear()
         from .tools.internal_tools import internal_tools
+        
+        # Allow LLM-only mode (tools=[]): no user tools are registered,
+        # but the orchestrator can still complete pure-LLM tasks.
+        if not self.tools:
+            return
         
         for tool in self.tools:
             if isinstance(tool, Connection):
@@ -398,7 +393,7 @@ class Agent:
         
         # Case 2: User chose light_llm and heavy_llm, no specialized overrides
         if explicit["light_llm"] and explicit["heavy_llm"]:
-            specialized = [k for k in ["code_generation_llm", "vision_llm", "summarizer_llm", "prefilter_llm", "search_llm"]
+            specialized = [k for k in ["code_generation_llm", "vision_llm", "summarizer_llm", "prefilter_llm"]
                           if explicit.get(k)]
             
             if not specialized:
@@ -416,8 +411,6 @@ class Agent:
                 llm_parts.append(f"summarizer_llm: {self.summarizer_llm}")
             if explicit["prefilter_llm"] and self.prefilter_llm != self.light_llm:
                 llm_parts.append(f"prefilter_llm: {self.prefilter_llm}")
-            if explicit["search_llm"] and self.search_llm != self.light_llm:
-                llm_parts.append(f"search_llm: {self.search_llm}")
             
             return ", ".join(llm_parts)
         
@@ -476,6 +469,12 @@ class Agent:
             agent.stop()  # Clean up resources
         """
         if not self.running:
+            # Deferred tool setup (MCP compile, client warmup) — runs once
+            if not self._tools_configured:
+                self._configure_tools()
+                self._warmup_clients()
+                self._tools_configured = True
+
             self.orchestrator.start()
             self.running = True
             
@@ -528,6 +527,8 @@ class Agent:
                 self._cancel_inactivity_timer()
                 # Memory extraction is now expected to happen during task execution
                 # via runtime `memory.save(...)` calls in generated code.
+                if self.chat is not None and getattr(self.chat, "persist", True) is False:
+                    self.chat.clear()
 
                 console.system("Agent stopped", "All tasks terminated", agent_id=self.agent_id)
             else:
@@ -585,10 +586,10 @@ class Agent:
                 if self.logger and task_id:
                     self.logger.add_tokens(task_id, token_info, model=self.summarizer_llm, function_name="mid_session_compress")
             
-            if self.last_trace:
+            if self._last_trace:
                 from .trace import ChatCompressionTrace
                 from datetime import datetime
-                self.last_trace.chat_compression = ChatCompressionTrace(
+                self._last_trace.chat_compression = ChatCompressionTrace(
                     triggered_at=datetime.fromtimestamp(start_comp),
                     model_used=self.summarizer_llm,
                     messages_before=compressed_count,
@@ -607,10 +608,10 @@ class Agent:
 
     async def _session_close_boundary(self):
         """Unified LLM call to extract long-term memory at the end of a session."""
-        if not self.memory:
+        if self.memory is None:
             return
             
-        if not self.chat or (not self.chat.messages and not self.chat.summary):
+        if self.chat is None or (not self.chat._messages and not self.chat.summary):
             return
             
         from .internal.llm import llm_completion_async
@@ -618,11 +619,11 @@ class Agent:
         
         session_close_start = time.time()
         text_context = ""
-        if self.chat and self.chat.summary:
+        if self.chat is not None and self.chat.summary:
             text_context += f"PREVIOUS SUMMARY: {self.chat.summary}\n\n"
         text_context += "RECENT MESSAGES:\n"
-        if self.chat:
-            for msg in self.chat.messages:
+        if self.chat is not None:
+            for msg in self.chat._messages:
                 text_context += f"{msg['role'].upper()}: {msg['content']}\n"
             
         prompt = f"""You are a memory extraction system. Extract long-term actionable knowledge into a list of facts.
@@ -668,11 +669,11 @@ Never return null, "none", or plain text."""
                     if knowledge_str:
                         self.memory.save(knowledge_str)
                 
-                if self.last_trace:
+                if self._last_trace:
                     from datetime import datetime
                     from .trace import SessionCloseTrace
                     session_close_duration = time.time() - session_close_start
-                    self.last_trace.session_close = SessionCloseTrace(
+                    self._last_trace.session_close = SessionCloseTrace(
                         started_at=datetime.fromtimestamp(session_close_start),
                         duration_ms=int(session_close_duration * 1000),
                         model_used=self.light_llm,
@@ -728,7 +729,7 @@ Never return null, "none", or plain text."""
         
         task_id = self._prepare_run_task()
         
-        if self.chat:
+        if self.chat is not None:
             if isinstance(message, list):
                 for m in message:
                     self.chat.append(m.get('role', 'user'), m.get('content', str(m)))
@@ -739,7 +740,7 @@ Never return null, "none", or plain text."""
             asyncio.create_task(self._compress_chat_if_needed(task_id))
             
         task_content = ""
-        if self.chat:
+        if self.chat is not None:
             if self.chat.summary:
                 task_content += f"Conversation Summary: {self.chat.summary}\n\n"
             
@@ -755,6 +756,8 @@ Never return null, "none", or plain text."""
             
         console.info("AGENT", f"Task payload generated ({len(task_content)} chars)", agent_id=self.agent_id, task_id=task_id)
         self.orchestrator.receive_message({"payload": task_content.strip(), "task_id": task_id})
+        
+        return task_id
 
     def run(self, message: Union[str, List[Dict[str, str]]], max_history: int = 10):
         """Execute a task with the agent (blocking version).
@@ -794,7 +797,7 @@ Never return null, "none", or plain text."""
         
         task_id = self._prepare_run_task()
         
-        if self.chat:
+        if self.chat is not None:
             if isinstance(message, list):
                 for m in message:
                     self.chat.append(m.get('role', 'user'), m.get('content', str(m)))
@@ -814,7 +817,7 @@ Never return null, "none", or plain text."""
                 threading.Thread(target=run_in_thread, daemon=True).start()
         
         task_content = ""
-        if self.chat:
+        if self.chat is not None:
             if self.chat.summary:
                 task_content += f"Conversation Summary: {self.chat.summary}\n\n"
             
@@ -830,6 +833,8 @@ Never return null, "none", or plain text."""
             
         console.info("AGENT", f"Task payload generated ({len(task_content)} chars)", agent_id=self.agent_id, task_id=task_id)
         self.orchestrator.receive_message({"payload": task_content.strip(), "task_id": task_id})
+        
+        return task_id
         
     def info(self) -> dict:
         """Get comprehensive information about the agent's current state.

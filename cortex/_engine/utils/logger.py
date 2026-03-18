@@ -34,7 +34,7 @@ class CORTEXLogger:
             "input_tokens": 0,
             "output_tokens": 0,
             "llm_calls": 0,
-            "total_cost_usd": 0.0,
+            "total_cost_usd": None,
             "pricing_path": get_user_pricing_path(),
             "llm_breakdown": [],
             "status": "running",
@@ -56,14 +56,17 @@ class CORTEXLogger:
                 )
                 self._warned_unpriced_models.add(model_key)
 
-            call_cost_usd = calculate_cost_usd(model, input_tokens, output_tokens) if pricing_available else 0.0
+            call_cost_usd = calculate_cost_usd(model, input_tokens, output_tokens) if pricing_available else None
             
             # Update token and image counts
             self.active_tasks[task_id]["tokens_used"] += total_tokens
             self.active_tasks[task_id]["input_tokens"] += input_tokens
             self.active_tasks[task_id]["output_tokens"] += output_tokens
             self.active_tasks[task_id]["llm_calls"] += 1
-            self.active_tasks[task_id]["total_cost_usd"] += call_cost_usd
+            if call_cost_usd is not None:
+                if self.active_tasks[task_id]["total_cost_usd"] is None:
+                    self.active_tasks[task_id]["total_cost_usd"] = 0.0
+                self.active_tasks[task_id]["total_cost_usd"] += call_cost_usd
             if image_count:
                 self.active_tasks[task_id].setdefault("image_calls", 0)
                 self.active_tasks[task_id].setdefault("images_used", 0)
@@ -123,7 +126,7 @@ class CORTEXLogger:
                 "input_tokens": task_data.get("input_tokens", 0),
                 "output_tokens": task_data.get("output_tokens", 0),
                 "llm_calls": task_data.get("llm_calls", 0),
-                "total_cost_usd": round(task_data.get("total_cost_usd", 0.0), 8),
+                "total_cost_usd": round(task_data.get("total_cost_usd"), 8) if task_data.get("total_cost_usd") is not None else None,
                 "pricing_path": task_data.get("pricing_path"),
                 "llm_breakdown": task_data.get("llm_breakdown", []),
                 "status": task_data["status"],
@@ -151,7 +154,7 @@ class CORTEXLogger:
             
                 stats = {"total_tasks": 0, "total_duration": 0, "total_tokens": 0, "total_input_tokens": 0,
                     "total_output_tokens": 0, "total_llm_calls": 0, "total_iterations": 0, 
-                    "completed_tasks": 0, "total_cost_usd": 0.0}
+                    "completed_tasks": 0, "total_cost_usd": None}
             
             for line in lines:  
                 try:
@@ -163,7 +166,11 @@ class CORTEXLogger:
                     stats["total_output_tokens"] += entry.get("output_tokens", 0)
                     stats["total_llm_calls"] += entry.get("llm_calls", 0)
                     stats["total_iterations"] += entry.get("iterations", 0)
-                    stats["total_cost_usd"] += float(entry.get("total_cost_usd", 0.0) or 0.0)
+                    cost = entry.get("total_cost_usd")
+                    if cost is not None:
+                        if stats["total_cost_usd"] is None:
+                            stats["total_cost_usd"] = 0.0
+                        stats["total_cost_usd"] += float(cost)
                     
                     if entry.get("status") == "completed":
                         stats["completed_tasks"] += 1
@@ -179,10 +186,10 @@ class CORTEXLogger:
             stats.update({
                 "avg_duration": round(stats["total_duration"] / stats["total_tasks"], 2),
                 "avg_tokens": round(stats["total_tokens"] / stats["total_tasks"], 1),
-                "avg_cost_usd": round(stats["total_cost_usd"] / stats["total_tasks"], 6),
+                "avg_cost_usd": round(stats["total_cost_usd"] / stats["total_tasks"], 6) if stats["total_cost_usd"] is not None else None,
                 "avg_iterations": round(stats["total_iterations"] / stats["total_tasks"], 1),
                 "total_duration": round(stats["total_duration"], 2),
-                "total_cost_usd": round(stats["total_cost_usd"], 6),
+                "total_cost_usd": round(stats["total_cost_usd"], 6) if stats["total_cost_usd"] is not None else None,
                 "log_file": str(self.log_file)
             })
             

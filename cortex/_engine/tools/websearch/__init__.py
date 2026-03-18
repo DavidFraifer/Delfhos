@@ -3,6 +3,7 @@ from delfhos.errors import ToolDefinitionError
 from ...internal.llm import llm_completion_async
 from ...utils.console import console
 from ...utils import report_error
+from ...utils.search_utils import validate_search_model, get_search_support_error_message
 
 # Always use Gemini for web search, defaulting to lite for maximum speed
 WEBSEARCH_LLM = "gemini-3.1-flash-lite-preview"
@@ -31,24 +32,38 @@ IMPORTANT: Always respond in the SAME language as the user's query. If the query
         )
         return summary.strip(), token_info
     except Exception as e:
-        report_error("WEB-005", context={"query": query, "task_id": task_id, "error": str(e)})
+        # Check if error is due to unsupported model
+        error_msg = str(e).lower()
+        if "not support" in error_msg or "invalid" in error_msg:
+            report_error("WEB-006", context={"model": model, "task_id": task_id, "error": str(e)})
+        else:
+            report_error("WEB-005", context={"query": query, "task_id": task_id, "error": str(e)})
         return "Web search failed. Please try again later.", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
 
 async def web_search(query: str, task_id=1, _fast_search=True, model: str = None, agent_id: str = None, validation_mode: bool = False):
     """
-    Perform web search using LLM-integrated search.
+    Perform web search using an LLM with intelligent data extraction and formatting.
+    
+    LLM-powered tool: Request specific formats (JSON, numbers, lists) in the query string.
+    
+    Examples:
+        - "Current mortgage rate? Return ONLY the percentage number"
+        - "Top 3 AI trends. Format as: 1. trend, 2. trend"
+        - "COVID cases by country. Return JSON: {country: cases}"
     
     Args:
-        query: The search query (must be provided directly, no extraction)
+        query: Search query with optional format instructions
         task_id: Task identifier for logging
-        fast_search: Unused (kept for compatibility)
-        light_llm: Unused (always uses Gemini)
+        model: LLM model (e.g., "gemini-3.1-flash-lite-preview", "gpt-4")
+               Supported: Gemini, OpenAI/GPT. Claude not supported.
         agent_id: Agent identifier for logging
-        validation_mode: Unused (kept for compatibility)
     
     Returns:
-        Tuple of (search_results_summary, token_info_dict)
+        Tuple of (search_results_formatted_per_query, token_info_dict)
+    
+    Raises:
+        ToolDefinitionError: If model does not support web search
     """
     start_time = time.perf_counter()
     
@@ -58,8 +73,13 @@ async def web_search(query: str, task_id=1, _fast_search=True, model: str = None
     query = query.strip()
     console.info("Web Search", f"Searching for: '{query}'", task_id=task_id, agent_id=agent_id)
     
-    console.tool("Web Search", "Initiating LLM web search", task_id=task_id, agent_id=agent_id)
+    # Lazy validation: validate model supports web search at execution time
     search_llm = model or WEBSEARCH_LLM
+    if not validate_search_model(search_llm):
+        error_msg = get_search_support_error_message(search_llm)
+        raise ToolDefinitionError(detail=error_msg)
+    
+    console.tool("Web Search", "Initiating LLM web search", task_id=task_id, agent_id=agent_id)
     summary, token_info = await _llm_web_search(query=query, task_id=task_id, model=search_llm, agent_id=agent_id)
     
     total_duration = time.perf_counter() - start_time
@@ -87,4 +107,5 @@ async def web_search(query: str, task_id=1, _fast_search=True, model: str = None
     )
 
     return summary, merged_tokens
+
 

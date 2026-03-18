@@ -167,11 +167,11 @@ def has_pricing_for_model(model: Optional[str]) -> bool:
     return _resolve_model_pricing(model, pricing_map) is not None
 
 
-def calculate_cost_usd(model: Optional[str], input_tokens: int, output_tokens: int) -> float:
+def calculate_cost_usd(model: Optional[str], input_tokens: int, output_tokens: int) -> Optional[float]:
     pricing_map = load_pricing_map()
     rates = _resolve_model_pricing(model, pricing_map)
     if not rates:
-        return 0.0
+        return None
 
     in_rate = float(rates.get("input_per_million", 0.0))
     out_rate = float(rates.get("output_per_million", 0.0))

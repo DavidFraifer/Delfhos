@@ -47,6 +47,32 @@ class MCP(BaseConnection):
     def _normalize_action(value: str) -> str:
         return str(value).strip().lower().replace("-", "_")
 
+    @classmethod
+    def inspect(cls, server: str, verbose: bool = False, env: Optional[Dict[str, str]] = None, headers: Optional[Dict[str, str]] = None, args: Optional[List[str]] = None, cache: bool = True) -> dict:
+        """
+        Inspect MCP actions using class-style calls only.
+        
+        Args:
+            server: MCP server identifier (short name, npm package, command, or URL).
+            verbose: If False (default), returns available method names.
+                     If True, returns detailed method descriptions.
+            env: Environment variables (e.g., API keys).
+            headers: HTTP headers for SSE connections.
+            args: Command line arguments for the server.
+            cache: If True, uses cached manifest if available.
+        
+        Returns:
+            dict with server information and available actions
+        
+        Example::
+        
+            print(MCP.inspect("server-filesystem"))  # See filesystem actions
+            print(MCP.inspect("server-filesystem", verbose=True))
+            print(MCP.inspect("server-github", env={"GITHUB_TOKEN": "..."}))  # GitHub actions
+        """
+        temp = cls(server, env=env or {}, headers=headers or {}, args=args or [], cache=cache)
+        return temp.inspect_instance(verbose=verbose)
+
     def __init__(
         self,
         server: str,
@@ -269,7 +295,7 @@ class MCP(BaseConnection):
         # Keep client reference so we can shut it down later
         self._mcp_client = client
 
-    def inspect(self, verbose: bool = False) -> dict:
+    def inspect_instance(self, verbose: bool = False) -> dict:
         """
         List available actions on this MCP server.
         
@@ -284,9 +310,9 @@ class MCP(BaseConnection):
         Example::
         
             mcp = MCP("server-filesystem", args=["."])
-            print(mcp.inspect())  # Pretty JSON dict with method names
+            print(mcp.inspect_instance())  # Pretty JSON dict with method names
             
-            print(mcp.inspect(verbose=True))  # Dict with allowed + methods + descriptions
+            print(mcp.inspect_instance(verbose=True))  # Dict with allowed + methods + descriptions
         """
         from cortex._engine.mcp.compiler import MCPCompiler
         from cortex._engine.mcp.client import MCPClient

@@ -92,6 +92,60 @@ class BaseConnection(_BaseConnection):
     # Set to True for connections that support Google auth methods
     _GOOGLE_AUTH: bool = False
 
+    @classmethod
+    def inspect(cls, verbose: bool = False) -> dict:
+        """
+        Inspect available actions for this tool without instantiation.
+        
+        This class method allows developers to see what actions are available
+        without needing to provide credentials.
+        
+        Args:
+            verbose: If False (default), returns available method names.
+                     If True, returns allowed methods and descriptions.
+        
+        Returns:
+            dict with tool information and available actions
+        
+        Example::
+        
+            print(Gmail.inspect())  # See available Gmail actions
+            print(Sheets.inspect(verbose=True))  # See detailed descriptions
+        """
+        available_actions = list(cls.ALLOWED_ACTIONS or [])
+        
+        if not verbose:
+            return _PrettyInspectDict(
+                {
+                    "tool": cls.TOOL_NAME,
+                    "methods": available_actions,
+                    "total": len(available_actions),
+                }
+            )
+
+        descriptions: Dict[str, str] = {}
+        try:
+            from cortex._engine.tools.tool_registry import TOOL_ACTION_SUMMARIES
+            descriptions = TOOL_ACTION_SUMMARIES.get(cls.TOOL_NAME.lower(), {})
+        except Exception:
+            descriptions = {}
+
+        methods = [
+            {
+                "name": action,
+                "description": descriptions.get(action.upper(), ""),
+            }
+            for action in available_actions
+        ]
+        return _PrettyInspectDict(
+            {
+                "tool": cls.TOOL_NAME,
+                "allowed": "all",
+                "methods": methods,
+                "total": len(available_actions),
+            }
+        )
+
     def __init__(
         self,
         credentials: Dict[str, Any],
@@ -130,9 +184,9 @@ class BaseConnection(_BaseConnection):
     def _normalize_action_name(action: str) -> str:
         return str(action).strip().lower().replace("-", "_")
 
-    def inspect(self, verbose: bool = False) -> dict:
+    def inspect_instance(self, verbose: bool = False) -> dict:
         """
-        Return connection information.
+        Return instance-specific connection information.
         
         Args:
             verbose: If False (default), returns available method names.
@@ -231,7 +285,7 @@ class GoogleBaseConnection(BaseConnection):
             service_account=service_account,
             oauth_credentials=oauth_credentials,
             delegated_user=delegated_user,
-            allow=allow,
+            actions=allow,
         )
 
         # Determine auth type based on what was provided

@@ -30,3 +30,15 @@ class TokenUsage:
     @property
     def total(self) -> int:
         return self.task.total + self.summarizer.total + self.extractor.total
+
+from typing import Optional, Any
+
+@dataclass
+class Response:
+    """Unified response object for agent run execution."""
+    text: str
+    status: bool
+    error: Optional[str] = None
+    cost_usd: Optional[float] = None
+    duration_ms: int = 0
+    trace: Any = None
