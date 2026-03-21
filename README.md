@@ -33,10 +33,11 @@ agent.stop()
 ## Core Concepts
 
 - `Agent`: public entry point (`from delfhos import Agent`)
-- `tools`: built-in tools, MCP tools, and `@tool` custom functions
-- `Chat`: short-term conversation memory (SQLite persisted)
+- `tools`: built-in tools (Gmail, SQL, etc), MCP tools, and `@tool` custom functions
+- `Chat`: short-term conversation memory (SQLite persisted, requires `chat=Chat(...)` for `run_chat()`)
 - `Memory`: long-term semantic memory (SQLite + embeddings)
-- `confirm`: action approval policy (`True`, `False`, or list like `["write", "delete"]`)
+- `allow`: Action whitelist (`allow=["read", "send"]` restricts to specific actions)
+- `confirm`: Approval requirement (`True` = all need approval, `False` = none, `["action"]` = selective)
 
 ## Built-in Tools
 
@@ -47,17 +48,39 @@ from delfhos import Gmail, SQL, Sheets, Drive, Calendar, Docs, WebSearch, MCP
 Examples:
 
 ```python
-gmail = Gmail(oauth_credentials="client_secrets.json", allow=["read", "send"])
-db = SQL(url="postgresql://user:pass@host/mydb", allow=["schema", "query"])
-drive = Drive(oauth_credentials="client_secrets.json", allow=["search", "get"])
+# allow: restrict which actions are available
+# confirm: when approval is required (True/False/list of actions)
+gmail = Gmail(oauth_credentials="client_secrets.json", allow=["read", "send"], confirm=["send"])
+db = SQL(url="postgresql://user:pass@host/mydb", allow=["schema", "query"], confirm=["write"])
+drive = Drive(oauth_credentials="client_secrets.json", confirm=True)
 
 agent = Agent(tools=[gmail, db, drive], llm="gemini-3.1-flash-lite-preview")
 ```
 
-Notes:
-- Use `allow=[...]` to restrict actions.
-- Inspect available methods with `tool.inspect()` or detailed output with `tool.inspect(verbose=True)`.
-- `WebSearch` requires an explicit search model: `WebSearch(llm="gemini-..." )` or `WebSearch(llm="gpt-...")`.
+**`allow` parameter:**
+- Restricts which actions are available on the tool
+- Default: allow all actions
+- Examples:
+  - Gmail: `allow=["read", "send"]` (prevents other actions)
+  - SQL: `allow=["schema", "query"]` (blocks write operations)
+  - Sheets: `allow=["read"]` (read-only)
+
+**`confirm` parameter:**
+- Controls when human approval is required
+- Default: `True` (approve all actions for safety)
+- Values:
+  - `True`: All actions require approval
+  - `False`: No approval needed
+  - List: Only specific actions require approval, e.g., `confirm=["send", "delete"]` or `confirm=["write"]`
+
+**Inspect tool capabilities:**
+- Class method: `Gmail.inspect()` (all available actions)
+- Instance method: `gmail.inspect()` (per-instance connection info)
+- Verbose: `gmail.inspect(verbose=True)` (detailed descriptions)
+
+**WebSearch special note:**
+- Requires an explicit LLM model: `WebSearch(llm="gemini-3.1-flash-lite-preview")` or `WebSearch(llm="gpt-...")`
+- Can be a different model from the main agent LLM
 - For parseable outputs, request format in the query (e.g., "Return ONLY JSON: {\"rate\": number}").
 
 ## Custom Tools
@@ -74,6 +97,28 @@ agent = Agent(
     llm="gemini-3.1-flash-lite-preview",
 )
 ```
+
+## Interactive Chat Session
+
+For synchronous, interactive terminal chat with full conversation history:
+
+```python
+from delfhos import Agent, Chat, Gmail
+
+agent = Agent(
+    tools=[Gmail(oauth_credentials="client_secrets.json")],
+    llm="gemini-3.1-flash-lite-preview",
+    chat=Chat(summarizer_llm="gemini-3.1-flash-lite-preview")  # Required for run_chat()
+)
+
+agent.run_chat()  # Start interactive terminal session
+```
+
+Features:
+- Type each message at the `You >` prompt.
+- Agent responds with full context from conversation history.
+- Commands: `/help`, `/clear`, `/stop`, `/exit`.
+- Requires: `chat=Chat(...)` parameter at agent creation.
 
 ## Memory (Chat + Long-Term)
 
@@ -100,16 +145,65 @@ await memory.save("User prefers monthly billing", desc="final preference")
 
 ## Approval and Safety
 
+**How `allow` and `confirm` interact:**
+
+`allow` = which actions are AVAILABLE  
+`confirm` = which of those available actions need APPROVAL
+
+Examples:
+
 ```python
+# Example 1: Send requires approval, read is free
+gmail = Gmail(oauth_credentials="oauth.json", allow=["read", "send"], confirm=["send"])
+# Agent can: read (no approval), send (approval required)
+# Agent cannot: delete, archive, etc.
+
+# Example 2: Read-only, no approval needed
+sheets = Sheets(oauth_credentials="oauth.json", allow=["read"], confirm=False)
+# Agent can: read (no approval)
+# Agent cannot: write, format, create, etc.
+
+# Example 3: All writes need approval
+db = SQL(url="postgresql://...", allow=["query", "write"], confirm=["write"])
+# Agent can: query (no approval), write (approval required)
+# Agent cannot: schema (if not in allow list)
+
+# Example 4: Default—all available actions need approval
+drive = Drive(oauth_credentials="oauth.json", confirm=True)  # no allow set = all actions available
+# Agent can: all actions, but EACH action requires approval
+```
+
+**Agent-level approval handler:**
+```python
+def my_approval_handler(request):
+    # request has: action, tool, brief, reason
+    return True  # auto-approve all
+
 agent = Agent(
     tools=[...],
-    confirm=["write", "delete"],
     llm="gemini-3.1-flash-lite-preview",
+    on_confirm=my_approval_handler  # Replaces default console selector
 )
 ```
 
-- `confirm` controls which actions require approval.
-- `@tool(confirm=True)` enforces approval for that tool.
+When `on_confirm` is provided:
+- Uses your custom approval handler instead of console prompts
+- Can return `True`/`False`, `(bool, reason)`, or dict with `{"approved": bool, "response": str}`
+- Works with both tool-level `confirm` and agent-level approvals.
+
+## Optional Prefilter
+
+When dealing with many tools, enable tool prefiltering to reduce token costs by ~60%:
+
+```python
+agent = Agent(
+    tools=[...],
+    llm="gemini-3.1-flash-lite-preview",
+    enable_prefilter=True  # Filter relevant tools before code generation
+)
+```
+
+Default: `enable_prefilter=False` (all tools documented in prompts).
 
 ## Model Support
 
@@ -202,6 +296,28 @@ agent = Agent(tools=[fs], llm="gemini-3.1-flash-lite-preview")
 agent.run("List python files and create a short summary file.")
 agent.stop()
 ```
+
+### Inspecting MCP Server Setup
+
+View connection formats and required environment variables:
+
+```python
+from delfhos import MCP
+
+github = MCP("server-github")
+info = github.inspect()
+# Returns:
+# - server_name, short_name, version
+# - connection_setup: args_format, env_format, headers_format, required_env_keys
+# - example commands
+print(info)
+```
+
+Common required env keys:
+- `server-github` → `GITHUB_TOKEN`
+- `server-slack` → `SLACK_BOT_TOKEN`
+- `server-asana` → `ASANA_TOKEN`
+- And 15+ others
 
 ## License
 
