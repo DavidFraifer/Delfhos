@@ -24,17 +24,10 @@ from typing import List, Optional, Union, Dict, Any, Callable
 from cortex._engine.agent import Agent
 from cortex._engine.connection import Connection
 from cortex._engine.types import Response
+from rich.panel import Panel
+from rich.markdown import Markdown
 from delfhos.memory import Chat, Memory
 
-
-def _has_confirm_policy(confirm_policy: Any) -> bool:
-    if isinstance(confirm_policy, bool):
-        return confirm_policy
-    if isinstance(confirm_policy, list):
-        return len(confirm_policy) > 0
-    if isinstance(confirm_policy, str):
-        return confirm_policy.strip().lower() not in ("none", "false", "")
-    return False
 
 
 class Cortex:
@@ -51,21 +44,22 @@ class Cortex:
         agent = Cortex(tools=[Gmail(), Drive()], llm="gemini-3.1-flash-lite-preview")
         agent.start().run("Archive unread emails and summarize to alice@co.com")
 
-    Advanced example with web search:
+    Advanced example with per-tool approval:
         agent = Cortex(
             tools=[
-                WebSearch(llm="gemini-3.1-flash-lite-preview"),  # Web search requires explicit model
-                SQL(url="postgresql://..."),
-                Sheets(...)
+                Gmail(oauth_credentials="oauth.json", allow=["read", "send"], confirm=["send"]),
+                SQL(url="postgresql://...", confirm=["write"]),
+                Sheets(...),
             ],
             light_llm="gemini-3.1-flash-lite-preview",
             heavy_llm="gemini-3.1-pro",
-            chat=Chat(keep=5, summarize=True),
+            code_llm="gemini-3.1-pro",        # explicit model for code generation
+            vision_llm="gemini-3.1-pro-vision",  # explicit model for image/multimodal tasks
+            chat=Chat(keep=5, summarize=True, summarizer_llm="gemini-3.1-flash-lite-preview"),
             system_prompt="You are a data analyst. Be thorough.",
-            confirm=["write", "delete"],
             on_confirm=lambda brief: input(f"Approve {brief}? ").lower() == "y"
         )
-        
+
     WebSearch Tip: Request specific formats in your query for structured results:
         agent.run("Find mortgage rate. Ask WebSearch to return ONLY the percentage.")
         agent.run("Top 3 AI trends. Request: Format as 1. trend, 2. trend, 3. trend")
@@ -77,13 +71,15 @@ class Cortex:
         llm: Single LLM for all ops (simple). Use either llm OR (light_llm + heavy_llm).
         light_llm: Fast LLM for prefiltering (advanced; requires heavy_llm).
         heavy_llm: Stronger LLM for code generation (advanced; requires light_llm).
-        summarizer_llm: Optional model for conversation compression.
-        chat: Chat(keep=10, summarize=False) for session memory.
+        code_llm: Model used for Python code generation. Defaults to heavy_llm.
+        vision_llm: Model used for image analysis and multimodal tasks. Defaults to heavy_llm.
+        chat: Chat(keep=10, summarize=False) for session memory (set Chat.summarizer_llm for compression).
         memory: Persistent memory across sessions (e.g., SQL database).
         system_prompt: Context/role injected into every LLM call.
-        confirm: Approval policy: True (all), ["write", "delete"], or "none".
         on_confirm: Approval callback fn(brief) -> bool. If set, enables human-in-the-loop.
+                    Per-tool approval is configured on each tool: Gmail(confirm=["send"]).
         verbose: If True, print detailed execution traces.
+        enable_prefilter: If True, use LLM to pre-filter relevant tools before code generation (default: False).
         providers: API key overrides {\"google\": \"...\", \"openai\": \"...\", etc}.
     """
 
@@ -95,54 +91,58 @@ class Cortex:
         llm: Optional[str] = None,
         light_llm: Optional[str] = None,
         heavy_llm: Optional[str] = None,
-        summarizer_llm: Optional[str] = None,
+        code_llm: Optional[str] = None,
+        vision_llm: Optional[str] = None,
         system_prompt: Optional[str] = None,
-        confirm: Optional[Union[bool, List[str], str]] = None,
         on_confirm: Optional[Callable] = None,
         providers: Optional[Dict[str, str]] = None,
         verbose: bool = False,
+        enable_prefilter: bool = False,
     ):
         """Initialize an Agent (Cortex) with tools and language models.
-        
+
         Args:
             tools: List of Service tools (Gmail, Drive, SQL, MCP, etc), @tool functions, or Connections.
+                   Per-tool approval: set confirm= on each connection, e.g. Gmail(confirm=["send"]).
+                   Custom tools: use @tool(confirm=True) to always require approval.
             llm: Single LLM for all operations (e.g., "gemini-3.1-flash-lite-preview").
                  Shorthand for: light_llm=llm, heavy_llm=llm.
             light_llm: (Advanced) Fast LLM for prefiltering/lightweight tasks (requires heavy_llm).
             heavy_llm: (Advanced) Powerful LLM for code generation (requires light_llm).
-            chat: Chat(keep=10, summarize=True) — session memory & auto-summarization.
+            code_llm: Model used specifically for Python code generation. Defaults to heavy_llm.
+            vision_llm: Model used for image analysis and multimodal tasks. Defaults to heavy_llm.
+            chat: Chat(keep=10, summarize=True) — session memory & auto-summarization (set Chat.summarizer_llm for compression).
             memory: Persistent memory for facts/context (e.g., persisted embeddings).
             system_prompt: Custom instructions injected into every LLM call.
-            confirm: Approval policy before executing actions:
-                     - True: require approval for everything
-                     - False/"none": no approvals
-                     - ["write", "delete"]: only approve these actions (default)
             on_confirm: Approval callback fn(brief) -> bool for custom approval UI.
             verbose: If True, print detailed execution traces and debugging info.
+            enable_prefilter: If True, use LLM to pre-filter relevant tools before code generation (default: False, disabled).
             providers: Override API keys {\"google\": \"...\", \"openai\": \"...\", etc}.
-        
+
         Example::
-        
+
             # Simple (single LLM)
             agent = Agent(
                 tools=[Gmail(), Drive()],
                 llm="gemini-3.1-flash-lite-preview"
             )
             agent.run("Forward today's reports to alice@co.com")
-            
-            # Advanced (multiple LLMs + memory)
+
+            # Advanced (multiple LLMs + per-tool approval)
             agent = Agent(
-                tools=[WebSearch(), SQL(url="..."), Sheets(...)],
+                tools=[
+                    SQL(url="...", confirm=["write"]),  # confirm before writes
+                    Gmail(oauth_credentials="...", confirm=["send"]),
+                ],
                 light_llm="gemini-3.1-flash-lite-preview",
                 heavy_llm="gemini-3.1-pro",
-                chat=Chat(),  # auto-summarizes
-                confirm=["write", "delete"],  # require approval
+                code_llm="gemini-3.1-pro",        # override for code generation
+                vision_llm="gemini-3.1-pro-vision",  # override for image analysis
+                chat=Chat(summarizer_llm="gemini-3.1-flash-lite-preview"),  # auto-summarizes
                 verbose=True
             )
         """
         resolved_tools = tools or []
-        resolved_confirm = ["write", "delete"] if confirm is None else confirm
-
         if memory is not None and chat is None:
             chat = Chat(keep=8, summarize=True)
 
@@ -151,18 +151,20 @@ class Cortex:
             llm=llm,
             light_llm=light_llm,
             heavy_llm=heavy_llm,
-            summarizer_llm=summarizer_llm,
+            code_generation_llm=code_llm,
+            vision_llm=vision_llm,
             on_confirm=on_confirm,
-            confirm=resolved_confirm,
             system_prompt=system_prompt,
             chat=chat,
             memory=memory,
             providers=providers,
             verbose=verbose,
+            enable_prefilter=enable_prefilter,
             _explicit_llms={
                 "light_llm": light_llm is not None,
                 "heavy_llm": heavy_llm is not None,
-                "summarizer_llm": summarizer_llm is not None
+                "code_generation_llm": code_llm is not None,
+                "vision_llm": vision_llm is not None
             }
         )
 
@@ -218,6 +220,117 @@ class Cortex:
                 return self._build_response(res)
             time.sleep(poll_interval)
         return Response(text="Timeout", status=False, error="Timeout waiting for task")
+
+    def run_chat(self, timeout: float = 120.0) -> None:
+        """
+        Start a synchronous interactive chat loop in the console.
+
+        This method does not accept a task argument. Instead, it opens a
+        terminal chat session where each user message is executed with `run()`
+        and control returns to the prompt after every response.
+
+        Commands:
+            /exit, /quit: End chat session.
+            /help: Show quick help.
+            /stop: Stop the underlying agent process (next message auto-starts it again).
+
+        Args:
+            timeout: Maximum seconds to wait per message (default: 120).
+        
+        Raises:
+            ValueError: If Chat was not provided when creating the Agent.
+        """
+        # Validate that Chat was provided when creating the agent
+        if self._agent.chat is None:
+            raise ValueError(
+                "Agent.run_chat() requires a Chat parameter.\n\n"
+                "Create your agent with Chat enabled:\n\n"
+                "  from delfhos import Agent, Chat\n"
+                "  agent = Agent(\n"
+                "      tools=[...],\n"
+                "      llm='gemini-3.1-flash-lite-preview',\n"
+                "      chat=Chat(summarizer_llm='gemini-3.1-flash-lite-preview')\n"
+                "  )\n"
+                "  agent.run_chat()"
+            )
+        
+        from cortex._engine.utils.console import console as runtime_console
+
+        chat_console = runtime_console.console
+
+        welcome = Panel(
+            "[bold cyan]Welcome to Delfhos[/bold cyan]\n\n"
+            "Type your request and press Enter\n"
+            "[dim]Type /help for commands[/dim]",
+            title="[bold cyan]Interactive Chat[/bold cyan]",
+            border_style="cyan",
+            expand=False,
+            padding=(1, 2),
+        )
+        chat_console.print(welcome)
+        chat_console.print()  # Blank line for spacing
+
+        while True:
+            try:
+                # Stop the background rich progress viewer so it doesn't intercept or flicker user input
+                runtime_console.progress.stop()
+                try:
+                    user_input = input("You > ").strip()
+                finally:
+                    # Restart it so the agent logs display correctly
+                    runtime_console.progress.start()
+            except (EOFError, KeyboardInterrupt):
+                chat_console.print("\n[dim]Chat ended.[/dim]")
+                break
+
+            if not user_input:
+                continue
+
+            lowered = user_input.lower()
+            if lowered in {"/exit", "/quit"}:
+                chat_console.print("[dim]Goodbye.[/dim]\n")
+                break
+            if lowered == "/help":
+                help_panel = Panel(
+                    "[bold cyan]/help[/bold cyan]   Show this help\n"
+                    "[bold cyan]/stop[/bold cyan]   Stop agent (will restart on next message)\n"
+                    "[bold cyan]/exit[/bold cyan]   Exit chat\n"
+                    "[bold cyan]/clear[/bold cyan]  Clear screen",
+                    title="[bold]Commands[/bold]",
+                    border_style="blue",
+                    padding=(1, 2),
+                )
+                chat_console.print(help_panel)
+                chat_console.print()  # Spacing
+                continue
+            if lowered == "/clear":
+                chat_console.clear()
+                chat_console.print(welcome)
+                chat_console.print()
+                continue
+            if lowered == "/stop":
+                self.stop()
+                chat_console.print("[yellow]Agent stopped.[/yellow] [dim]Send a new message to resume.[/dim]\n")
+                continue
+
+            response = self.run(user_input, timeout=timeout)
+            
+            # Note: Result is already printed by orchestrator.task_summary() above,
+            # so we only need to handle errors here
+            if not response.status:
+                err = response.error or "Unknown error"
+                chat_console.print(
+                    Panel(
+                        f"[red]{err}[/red]",
+                        title="[bold red]✗ Error[/bold red]",
+                        border_style="red",
+                        expand=False,
+                        padding=(1, 2),
+                    )
+                )
+            
+            chat_console.print()  # Blank line for spacing between responses
+
     async def arun(self, task: str, timeout: float = 60.0) -> Response:
         """
         Submit a task asynchronously and wait for its completion.

@@ -11,15 +11,15 @@ from .types import Message
 class Chat:
     """
     Session memory for an Agent — keeps recent conversation history and auto-summarizes.
-    
+
     The agent appends messages to this Chat. Once the message count exceeds `keep`,
     the oldest messages are summarized asynchronously and removed.
-    
+
     Example:
-        chat = Chat()  # Auto-summarizes old messages, keeps last 10
+        chat = Chat(summarizer_llm="gemini-3.1-flash-lite-preview")  # Auto-summarizes old messages, keeps last 10
         agent = Agent(tools=[Gmail()], chat=chat, llm="gemini-3.1-flash-lite-preview")
         # Agent remembers last 10 messages + a summary of older ones
-    
+
     Args:
         keep: Max messages to retain before summarizing (default: 10). 0 = summarize all.
         summarize: If True (default), compress old messages into a summary. If False, just truncate.
@@ -28,6 +28,8 @@ class Chat:
         path: SQLite file path for persisted chat state (used only when persist=True).
               If omitted, defaults to ~/delfhos/chat/<namespace>.db.
         namespace: Namespace key to isolate multiple chats in the same DB.
+        summarizer_llm: LLM model used for chat compression (e.g., "gemini-3.1-flash-lite-preview").
+                        If not provided, must be set before the agent attempts compression.
     """
     def __init__(
         self,
@@ -36,11 +38,13 @@ class Chat:
         persist: bool = False,
         path: Optional[str] = None,
         namespace: str = "default",
+        summarizer_llm: Optional[str] = None,
     ):
         self.keep = keep
         self.summarize = summarize
         self.persist = persist
         self.namespace = namespace
+        self.summarizer_llm = summarizer_llm
         self.path = os.path.expanduser(path) if path else self._default_path_for_namespace(namespace)
         self._messages: List[Message] = []
         self._summary: str = ""

@@ -68,11 +68,11 @@ class Connection:
         allow: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         connection_id: Optional[str] = None,
-        confirm: Union[bool, List[str], str] = False
+        confirm: Union[bool, List[str], None] = True
     ):
         """
         Initialize a Connection
-        
+
         Args:
             tool_name: Name of the tool/service (e.g., "gmail", "drive", "sheets")
             connection_name: User-defined name for this connection (e.g., "work_email", "finance_drive")
@@ -81,7 +81,8 @@ class Connection:
             allowed: List of allowed actions (e.g., ["read", "send"]). None = all allowed
             metadata: Additional connection metadata (service URL, region, etc.)
             connection_id: Optional custom ID, auto-generated if not provided
-            confirm: Mode for user confirmation ('write', 'all', 'delete', entirely boolean)
+            confirm: List of action names that require human approval before execution
+                     (e.g., ["send", "delete"]). None = no confirmation required.
         """
         # Core identifiers - use full UUID for consistency with database
         self.connection_id = connection_id or str(uuid.uuid4())

@@ -14,9 +14,11 @@ from ..tools.tool_registry import (
     build_filtered_api_docs,
     get_available_actions_for_connections,
     parse_prefilter_response,
+    filter_selected_actions,
     build_connection_context_for_prompt,
 )
 from ..memory.AgentMemory import AgentMemory
+from delfhos.errors import ApprovalRejectedError
 from ..internal.llm import llm_completion_async
 from .python_executor import parse_python_code
 
@@ -61,14 +63,14 @@ class Orchestrator:
         "awaiting_approval": "Awaiting approval",
     }
     
-    def __init__(self, light_llm: str, heavy_llm: str, logger: CORTEXLogger, agent_id: str = "unknown", 
+    def __init__(self, light_llm: str, heavy_llm: str, logger: CORTEXLogger, agent_id: str = "unknown",
                  on_confirm=None,
-                 confirm: Optional[Union[bool, List[str], str]] = None, system_prompt: Optional[str] = None,
+                 approval_enabled: bool = False, system_prompt: Optional[str] = None,
                  prefilter_llm: Optional[str] = None, code_generation_llm: Optional[str] = None,
                  vision_llm: Optional[str] = None, token_usage=None,
                  memory=None, trace_mode: Union[str, bool] = "full", trace_callback=None, llm_config: Optional[str] = None,
-                 verbose: str = "low"):
-        approval_enabled = bool(on_confirm is not None or _has_confirm_policy(confirm))
+                 verbose: str = "low", enable_prefilter: bool = False):
+        approval_enabled = on_confirm is not None or approval_enabled
 
         # Core configuration
         self.trace_mode = trace_mode
@@ -79,6 +81,7 @@ class Orchestrator:
         self.heavy_llm = heavy_llm
         self.llm_config = llm_config  # Store LLM configuration string for display in summary
         self.verbose = verbose  # Store verbose logging mode ("low" or "high")
+        self.enable_prefilter = enable_prefilter  # Whether to use prefilter for tool selection
         
         # Specific model overrides
         self.prefilter_llm = prefilter_llm or self.light_llm
@@ -87,7 +90,7 @@ class Orchestrator:
         
         self.agent_id = agent_id
         self.enable_human_approval = approval_enabled
-        self.confirm_policy = confirm
+        self.confirm_policy = None  # Per-tool; resolved from each connection's confirm list
         self.system_prompt = system_prompt  # Agent instruction injected in code-generation prompt
         # Backward compatibility for runtime namespace (`ctx`) expected by PythonExecutor.
         # Keep legacy shape as dict to avoid AttributeError and preserve old behavior.
@@ -298,6 +301,10 @@ class Orchestrator:
             )
         except Exception:
             pass
+        
+        # Raise error if approval was rejected
+        if not approved:
+            raise ApprovalRejectedError(operation=message)
         
         return approved
 
@@ -710,9 +717,24 @@ class Orchestrator:
                 # Auto-retry on execution failure: re-generate code with error context
                 if not result.get("success") and result.get("error"):
                     error_msg = result["error"]
-                    # Only retry on code bugs (TypeError, KeyError, etc.), not on tool/auth failures
+                    # Retry on code bugs and disallowed action attempts.
                     retryable_errors = ("TypeError", "KeyError", "NameError", "AttributeError", "IndexError", "ValueError", "RuntimeError", "SyntaxError")
-                    if any(err in error_msg for err in retryable_errors):
+                    disallowed_action_error = ("ERR-TOL-007" in error_msg) or ("Action not allowed" in error_msg)
+                    should_retry = disallowed_action_error or any(err in error_msg for err in retryable_errors)
+                    if should_retry:
+                        warning_prefix = ""
+                        if disallowed_action_error:
+                            warning_prefix = (
+                                "WARNING: Generated code attempted a disallowed action. "
+                                "Execution was blocked; regenerating with stricter permission constraints."
+                            )
+                            console.warning(
+                                "Blocked disallowed action",
+                                warning_prefix,
+                                task_id=task_id,
+                                agent_id=self.agent_id,
+                            )
+
                         console.debug("Auto-retry", f"Retrying after error: {error_msg[:200]}", 
                                     task_id=task_id, agent_id=self.agent_id)
                         await self.track_tool_timing_async(task_id, "llm_code_generation", None, self.code_generation_llm, description=self._ui_text("retrying"), is_starting=True)
@@ -736,6 +758,21 @@ class Orchestrator:
                         if partial_output:
                             output_section = f"\n\nPARTIAL OUTPUT (already printed to user):\n{partial_output[:500]}"
                         
+                        retry_instructions = (
+                            "INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the remaining work. "
+                            "CRITICAL: If the error occurred inside a loop, you MUST rewrite and execute the ENTIRE loop from scratch "
+                            "(using the preserved data like fetched lists/results). Do NOT try to resume a loop from the middle. "
+                            "Steps already completed BEFORE the failure (sheets created, files uploaded, queries executed, etc.) "
+                            "should NOT be repeated — use their results if needed. Output Python code ONLY."
+                        )
+                        if disallowed_action_error:
+                            retry_instructions = (
+                                "INSTRUCTIONS: The previous attempt called at least one DISALLOWED action and was blocked. "
+                                "Regenerate code that uses only permitted actions from the tool APIs shown in prompt context. "
+                                "Never call blocked actions again. If a required action is not permitted, print a clear message "
+                                "requesting permission change instead of attempting it. Output Python code ONLY."
+                            )
+
                         retry_prompt = f"""TASK: "{payload}"
 
 PREVIOUS CODE THAT FAILED:
@@ -749,7 +786,7 @@ ERROR:
 
 CRITICAL STATE PRESERVATION: All variables defined in the PREVIOUS CODE before it crashed are ALREADY preserved in memory. You CAN and MUST use them directly. Do NOT query the database again or recreate variables.
 
-INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the remaining work. CRITICAL: If the error occurred inside a loop, you MUST rewrite and execute the ENTIRE loop from scratch (using the preserved data like fetched lists/results). Do NOT try to resume a loop from the middle. Steps already completed BEFORE the failure (sheets created, files uploaded, queries executed, etc.) should NOT be repeated — use their results if needed. Output Python code ONLY."""
+{retry_instructions}"""
                         
                         try:
                             retry_llm_start = time.time()
@@ -798,6 +835,10 @@ INSTRUCTIONS: Fix the error and generate ONLY the code needed to complete the re
                                     combined_output = "--- Auto-Retry Executed ---\n" + new_output.lstrip()
                                 else:
                                     combined_output = original_output
+
+                                if warning_prefix:
+                                    warning_banner = f"WARNING: {warning_prefix}\n\n"
+                                    combined_output = warning_banner + (combined_output or "")
                                 
                                 result = retry_result
                                 result["output"] = combined_output
@@ -1303,23 +1344,14 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
         # Get available tools/actions from connections
         available_actions = get_available_actions_for_connections(connections, custom_tools=self.tools.tools)
         
-        # Build prefilter prompt with connection names/descriptions
-        # Include compacted memory context so prefilter remains token-efficient.
-        prefilter_task = message
-        if memory_context:
-            compact_memory = self._compact_prefilter_memory_context(memory_context)
-            if compact_memory:
-                prefilter_task = f"{message}\n\n[Relevant memory facts]\n{compact_memory}"
-        prefilter_prompt = build_prefilter_prompt(prefilter_task, available_actions, connections=connections, custom_descriptions=self.tool_descriptions)
-        
-        # ========== OPTIMISTIC PARALLEL SCHEMA FETCH ==========
-        # If SQL connections exist, start fetching schema IN PARALLEL with prefilter
-        # This saves ~1.5s on SQL tasks (schema fetch runs while prefilter is thinking)
+        # ========== OPTIONAL PREFILTERING STEP ==========
+        # If prefilter is disabled, skip filtering and use all available tools
+        # Check for SQL tools early, as we may start schema fetch either way
         has_sql_connections = "sql" in self.tools.tools
         schema_task = None
         
         async def _fetch_sql_schema_optimistic():
-            """Fetch SQL schema for all SQL connections. Runs concurrently with prefilter."""
+            """Fetch SQL schema for all SQL connections. Runs concurrently with prefilter or code gen."""
             schema_start = time.time()
             sql_conns = [
                 conn for conn in self.tools.connections.values()
@@ -1372,197 +1404,252 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
             schema_duration = time.time() - schema_start
             return "\n\n".join(schema_parts) if schema_parts else None
         
-        # Start schema fetch concurrently if SQL connections exist
-        if has_sql_connections:
-            schema_task = asyncio.create_task(_fetch_sql_schema_optimistic())
-        
-        # Use light LLM for cheap prefiltering
-        connection_map = {}  # tool_name -> [connection_name, ...]
-        try:
-            # Track UI step for filtering
-            await self.track_tool_timing_async(task_id, "prefilter", None, self.prefilter_llm, description=self._ui_text("analyzing_connections"), is_starting=True)
+        if not self.enable_prefilter:
+            # Prefilter disabled - use all available tools directly
+            # Convert available_actions dict to list of "tool:action" strings
+            all_actions = []
+            for tool_name, actions in available_actions.items():
+                for action in actions:
+                    all_actions.append(f"{tool_name}:{action}")
             
-            prefilter_start = time.time()
-            prefilter_result = await llm_completion_async(
-                model=self.prefilter_llm, # Use configured prefilter llm
-                prompt=prefilter_prompt,
-                temperature=0.0,
-                max_tokens=1000  # Enough for direct answers or comma-separated tool list
-            )
-            prefilter_duration = time.time() - prefilter_start
+            selected_actions = all_actions  # Use all available actions
+            connection_map = {}  # Will be populated from connections
             
-            # Normalize the result first to get the response string
-            prefilter_response, prefilter_tokens = normalize_llm_result(prefilter_result)
+            # Build connection context from all available connections
+            for conn in (relevant_connections or list(self.tools.connections.values())):
+                tool_name = getattr(conn, "tool_name", "").lower()
+                if tool_name:
+                    if tool_name not in connection_map:
+                        connection_map[tool_name] = []
+                    connection_map[tool_name].append(getattr(conn, "connection_name", ""))
             
-            # ========== DIRECT ANSWER SHORTCUT ==========
-            # If the prefilter returns "ANSWER: <text>", answer directly without code gen
-            stripped_response = prefilter_response.strip()
-            if stripped_response.upper().startswith("ANSWER:"):
-                answer_text = stripped_response[7:].strip()
+            # Start schema fetch if SQL tools are available
+            if has_sql_connections:
+                schema_task = asyncio.create_task(_fetch_sql_schema_optimistic())
+            
+            # Build full API docs with all available tools (not filtered)
+            python_api_docs = build_filtered_api_docs(all_actions, custom_descriptions=self.tool_descriptions)
+            python_examples = ""
+            
+            console.info("Code generation", "Starting (prefilter disabled - using all tools)", task_id=task_id, agent_id=self.agent_id)
+        else:
+            # Prefilter enabled - use LLM to filter relevant tools
+            # Build prefilter prompt with connection names/descriptions
+            # Include compacted memory context so prefilter remains token-efficient.
+            prefilter_task = message
+            if memory_context:
+                compact_memory = self._compact_prefilter_memory_context(memory_context)
+                if compact_memory:
+                    prefilter_task = f"{message}\n\n[Relevant memory facts]\n{compact_memory}"
+            prefilter_prompt = build_prefilter_prompt(prefilter_task, available_actions, connections=connections, custom_descriptions=self.tool_descriptions)
+            
+            # ========== OPTIMISTIC PARALLEL SCHEMA FETCH ==========
+            # If SQL connections exist, start fetching schema IN PARALLEL with prefilter
+            # This saves ~1.5s on SQL tasks (schema fetch runs while prefilter is thinking)
+            if has_sql_connections:
+                schema_task = asyncio.create_task(_fetch_sql_schema_optimistic())
+            
+            # Use light LLM for cheap prefiltering
+            connection_map = {}  # tool_name -> [connection_name, ...]
+            try:
+                # Track UI step for filtering
+                await self.track_tool_timing_async(task_id, "prefilter", None, self.prefilter_llm, description=self._ui_text("analyzing_connections"), is_starting=True)
                 
-                # Cancel schema task if running
-                if schema_task and not schema_task.done():
-                    schema_task.cancel()
-                
-                # Track completion
-                await self.track_tool_timing_async(
-                    task_id, "prefilter", prefilter_duration, self.prefilter_llm,
-                    description="Direct answer (no tools needed)", is_starting=False,
-                    metadata={"direct_answer": True}
+                prefilter_start = time.time()
+                prefilter_result = await llm_completion_async(
+                    model=self.prefilter_llm, # Use configured prefilter llm
+                    prompt=prefilter_prompt,
+                    temperature=0.0,
+                    max_tokens=1000  # Enough for direct answers or comma-separated tool list
                 )
+                prefilter_duration = time.time() - prefilter_start
+                
+                # Normalize the result first to get the response string
+                prefilter_response, prefilter_tokens = normalize_llm_result(prefilter_result)
+                
+                # ========== DIRECT ANSWER SHORTCUT ==========
+                # If the prefilter returns "ANSWER: <text>", answer directly without code gen
+                stripped_response = prefilter_response.strip()
+                if stripped_response.upper().startswith("ANSWER:"):
+                    answer_text = stripped_response[7:].strip()
+                    
+                    # Cancel schema task if running
+                    if schema_task and not schema_task.done():
+                        schema_task.cancel()
+                    
+                    # Track completion
+                    await self.track_tool_timing_async(
+                        task_id, "prefilter", prefilter_duration, self.prefilter_llm,
+                        description="Direct answer (no tools needed)", is_starting=False,
+                        metadata={"direct_answer": True}
+                    )
+                    # Log prefilter tokens
+                    self._safe_add_tokens(task_id, prefilter_tokens, self.prefilter_llm, "prefilter", duration=prefilter_duration)
+                    
+                    console.debug("Prefilter direct answer", 
+                                 f"Answered directly without code generation ({prefilter_duration*1000:.0f}ms)", 
+                                 task_id=task_id, agent_id=self.agent_id)
+                    
+                    # Return a simple print() that outputs the answer
+                    escaped_answer = answer_text.replace('\\', '\\\\').replace('"""', '\\"\\"\\"')
+                    return f'print("""{escaped_answer}""")'
+                
+                # Parse selected actions AND connection mapping
+                selected_actions, connection_map = parse_prefilter_response(prefilter_response, connections)
+
+                # Enforce allow restrictions strictly before code generation docs are built.
+                # If prefilter proposes disallowed actions, drop them and warn.
+                selected_actions, blocked_actions = filter_selected_actions(selected_actions, available_actions)
+                if blocked_actions:
+                    console.warning(
+                        "Prefilter proposed disallowed actions",
+                        (
+                            "Blocked actions were removed before code generation: "
+                            f"{', '.join(sorted(blocked_actions))}"
+                        ),
+                        task_id=task_id,
+                        agent_id=self.agent_id,
+                    )
+                
+                # Show available actions in verbose mode
+                if self.verbose == "high":
+                    from rich.panel import Panel
+                    from rich.table import Table
+                    from collections import defaultdict
+                    
+                    # Group actions by tool
+                    actions_by_tool = defaultdict(list)
+                    if isinstance(available_actions, dict):
+                        for tool, acts_set in available_actions.items():
+                            for act in acts_set:
+                                if act not in actions_by_tool[tool]:
+                                    actions_by_tool[tool].append(act)
+                    else:
+                        # Fallback if it's a list (legacy)
+                        for action in available_actions:
+                            parts = action.split(":")
+                            tool = parts[0] if parts else "unknown"
+                            act = ":".join(parts[1:]) if len(parts) > 1 else tool
+                            if act not in actions_by_tool[tool]:
+                                actions_by_tool[tool].append(act)
+                    
+                    # Identify internal framework tools
+                    internal_tool_names = {"files", "llm", "lzmafilter", "sql", "gmail", "sheets", "drive", "calendar", "docs", "websearch", "memory"}
+                    
+                    # Add memory tool if configured
+                    if self.memory:
+                        actions_by_tool["memory"] = {"save"}
+                    
+                    # Create table with tools grouped by type
+                    actions_table = Table(title="Available Actions for Agent", show_header=True, header_style="bold cyan")
+                    actions_table.add_column("Tool", style="cyan", width=20)
+                    actions_table.add_column("Actions", style="green")
+                    actions_table.add_column("Type", style="dim yellow", width=12)
+                    
+                    # Display user-provided tools FIRST (higher priority for agent)
+                    user_tools_added = False
+                    for tool_name in sorted(actions_by_tool.keys()):
+                        if tool_name not in internal_tool_names:
+                            if not user_tools_added:
+                                user_tools_added = True
+                            
+                            acts = actions_by_tool[tool_name]
+                            actions_str = ", ".join(sorted(acts))
+                            
+                            # Mark selected tools
+                            is_selected = any(a.startswith(tool_name + ":") or a == tool_name or a == f"[{tool_name}]" for a in selected_actions)
+                            status_style = "bold green" if is_selected else "dim"
+                            
+                            actions_table.add_row(
+                                f"[{status_style}]{tool_name}[/{status_style}]",
+                                f"[{status_style}]{actions_str}[/{status_style}]",
+                                f"[bold magenta]User[/bold magenta]"
+                            )
+                    
+                    # Add separator
+                    if user_tools_added:
+                        actions_table.add_row("[dim]─[/dim]", "[dim]─[/dim]", "[dim]─[/dim]")
+                    
+                    # Display internal tools (sandbox/framework only)
+                    for tool_name in sorted(actions_by_tool.keys()):
+                        if tool_name in internal_tool_names:
+                            acts = actions_by_tool[tool_name]
+                            actions_str = ", ".join(sorted(acts))
+                            
+                            # Mark selected tools
+                            is_selected = any(a.startswith(tool_name + ":") or a == tool_name or a == f"[{tool_name}]" for a in selected_actions)
+                            status_style = "bold green" if is_selected else "dim"
+                            actions_table.add_row(
+                                f"[{status_style}]{tool_name}[/{status_style}]",
+                                f"[{status_style}]{actions_str}[/{status_style}]",
+                                f"[dim white]Internal[/dim white]"
+                            )
+                    
+                    # Add legend/explanation at the bottom
+                    actions_table.caption = (
+                        "[bold]Legend:[/bold] "
+                        "[bold magenta]User[/bold magenta] = Tools you provided (Native, MCP, Custom Tools) | "
+                        "[dim white]Internal[/dim white] = Sandbox-only tools (files, llm)"
+                    )
+                    
+                    actions_panel = Panel(actions_table, border_style="cyan", expand=False)
+                    console.console.print(actions_panel)
+                    console.console.print()  # Blank line
+                
+                # Trace updating
+                if self.current_trace:
+                    from datetime import datetime
+                    pf_end_dt = datetime.now()
+                    pf_start_dt = datetime.fromtimestamp(prefilter_start)
+                    tools_avail_count = len(available_actions)
+                    base_selected = {action.split(":")[0] for action in selected_actions}
+                    tools_rej = [a for a in available_actions if a not in base_selected]
+                    self.current_trace.prefilter = PrefilterTrace(
+                        started_at=pf_start_dt,
+                        duration_ms=int(prefilter_duration * 1000),
+                        model_used=self.prefilter_llm,
+                        tools_available=tools_avail_count,
+                        tools_selected=list(base_selected),
+                        tools_rejected=tools_rej,
+                        tokens_input=prefilter_tokens.get("input_tokens", prefilter_tokens.get("prompt_tokens", 0)),
+                        tokens_output=prefilter_tokens.get("output_tokens", prefilter_tokens.get("completion_tokens", 0)),
+                        ran_parallel_with="sql_schema_fetch" if schema_task else None
+                    )
+                    self.current_trace.add_event("prefilter_complete", f"{len(selected_actions)} tools selected", t=pf_end_dt)
+
+                # Track completion with selected tools in metadata
+                await self.track_tool_timing_async(
+                    task_id, 
+                    "prefilter", 
+                    prefilter_duration, 
+                    self.prefilter_llm,
+                    description=self._ui_text("analyzing_connections"), 
+                    is_starting=False,
+                    metadata={"selected_tools": selected_actions, "connection_map": connection_map}
+                )
+                
                 # Log prefilter tokens
                 self._safe_add_tokens(task_id, prefilter_tokens, self.prefilter_llm, "prefilter", duration=prefilter_duration)
                 
-                console.debug("Prefilter direct answer", 
-                             f"Answered directly without code generation ({prefilter_duration*1000:.0f}ms)", 
-                             task_id=task_id, agent_id=self.agent_id)
+                # Extract tool names without :EXECUTE suffix for cleaner summary
+                selected_tools = set()
+                for action in selected_actions:
+                    tool_name = action.split(':')[0] if ':' in action else action
+                    selected_tools.add(tool_name)
                 
-                # Return a simple print() that outputs the answer
-                escaped_answer = answer_text.replace('\\', '\\\\').replace('"""', '\\"\\"\\"')
-                return f'print("""{escaped_answer}""")'
-            
-            # Parse selected actions AND connection mapping
-            selected_actions, connection_map = parse_prefilter_response(prefilter_response, connections)
-            
-            # Show available actions in verbose mode
-            if self.verbose == "high":
-                from rich.panel import Panel
-                from rich.table import Table
-                from collections import defaultdict
+                # Log prefiltering completion with tool count
+                tool_count = len(selected_tools)
+                tool_label = "tool" if tool_count == 1 else "tools"
+                console.info("Prefiltering", f"— {tool_count} {tool_label} selected", task_id=task_id, agent_id=self.agent_id)
                 
-                # Group actions by tool
-                actions_by_tool = defaultdict(list)
-                if isinstance(available_actions, dict):
-                    for tool, acts_set in available_actions.items():
-                        for act in acts_set:
-                            if act not in actions_by_tool[tool]:
-                                actions_by_tool[tool].append(act)
-                else:
-                    # Fallback if it's a list (legacy)
-                    for action in available_actions:
-                        parts = action.split(":")
-                        tool = parts[0] if parts else "unknown"
-                        act = ":".join(parts[1:]) if len(parts) > 1 else tool
-                        if act not in actions_by_tool[tool]:
-                            actions_by_tool[tool].append(act)
+                # Build compressed API docs for only selected actions
+                python_api_docs = build_filtered_api_docs(selected_actions, custom_descriptions=self.tool_descriptions)
                 
-                # Identify internal framework tools
-                internal_tool_names = {"files", "llm", "lzmafilter", "sql", "gmail", "sheets", "drive", "calendar", "docs", "websearch", "memory"}
+                # Build minimal examples for selected tools
+                python_examples = ""  # Examples are included in compressed docs
                 
-                # Add memory tool if configured
-                if self.memory:
-                    actions_by_tool["memory"] = {"save"}
-                
-                # Create table with tools grouped by type
-                actions_table = Table(title="Available Actions for Agent", show_header=True, header_style="bold cyan")
-                actions_table.add_column("Tool", style="cyan", width=20)
-                actions_table.add_column("Actions", style="green")
-                actions_table.add_column("Type", style="dim yellow", width=12)
-                
-                # Display user-provided tools FIRST (higher priority for agent)
-                user_tools_added = False
-                for tool_name in sorted(actions_by_tool.keys()):
-                    if tool_name not in internal_tool_names:
-                        if not user_tools_added:
-                            user_tools_added = True
-                        
-                        acts = actions_by_tool[tool_name]
-                        actions_str = ", ".join(sorted(acts))
-                        
-                        # Mark selected tools
-                        is_selected = any(a.startswith(tool_name + ":") or a == tool_name or a == f"[{tool_name}]" for a in selected_actions)
-                        status_style = "bold green" if is_selected else "dim"
-                        
-                        actions_table.add_row(
-                            f"[{status_style}]{tool_name}[/{status_style}]",
-                            f"[{status_style}]{actions_str}[/{status_style}]",
-                            f"[bold magenta]User[/bold magenta]"
-                        )
-                
-                # Add separator
-                if user_tools_added:
-                    actions_table.add_row("[dim]─[/dim]", "[dim]─[/dim]", "[dim]─[/dim]")
-                
-                # Display internal tools (sandbox/framework only)
-                for tool_name in sorted(actions_by_tool.keys()):
-                    if tool_name in internal_tool_names:
-                        acts = actions_by_tool[tool_name]
-                        actions_str = ", ".join(sorted(acts))
-                        
-                        # Mark selected tools
-                        is_selected = any(a.startswith(tool_name + ":") or a == tool_name or a == f"[{tool_name}]" for a in selected_actions)
-                        status_style = "bold green" if is_selected else "dim"
-                        actions_table.add_row(
-                            f"[{status_style}]{tool_name}[/{status_style}]",
-                            f"[{status_style}]{actions_str}[/{status_style}]",
-                            f"[dim white]Internal[/dim white]"
-                        )
-                
-                # Add legend/explanation at the bottom
-                actions_table.caption = (
-                    "[bold]Legend:[/bold] "
-                    "[bold magenta]User[/bold magenta] = Tools you provided (Native, MCP, Custom Tools) | "
-                    "[dim white]Internal[/dim white] = Sandbox-only tools (files, llm)"
-                )
-                
-                actions_panel = Panel(actions_table, border_style="cyan", expand=False)
-                console.console.print(actions_panel)
-                console.console.print()  # Blank line
-            
-            # Trace updating
-            if self.current_trace:
-                from datetime import datetime
-                pf_end_dt = datetime.now()
-                pf_start_dt = datetime.fromtimestamp(prefilter_start)
-                tools_avail_count = len(available_actions)
-                base_selected = {action.split(":")[0] for action in selected_actions}
-                tools_rej = [a for a in available_actions if a not in base_selected]
-                self.current_trace.prefilter = PrefilterTrace(
-                    started_at=pf_start_dt,
-                    duration_ms=int(prefilter_duration * 1000),
-                    model_used=self.prefilter_llm,
-                    tools_available=tools_avail_count,
-                    tools_selected=list(base_selected),
-                    tools_rejected=tools_rej,
-                    tokens_input=prefilter_tokens.get("input_tokens", prefilter_tokens.get("prompt_tokens", 0)),
-                    tokens_output=prefilter_tokens.get("output_tokens", prefilter_tokens.get("completion_tokens", 0)),
-                    ran_parallel_with="sql_schema_fetch" if schema_task else None
-                )
-                self.current_trace.add_event("prefilter_complete", f"{len(selected_actions)} tools selected", t=pf_end_dt)
-
-            # Track completion with selected tools in metadata
-            await self.track_tool_timing_async(
-                task_id, 
-                "prefilter", 
-                prefilter_duration, 
-                self.prefilter_llm,
-                description=self._ui_text("analyzing_connections"), 
-                is_starting=False,
-                metadata={"selected_tools": selected_actions, "connection_map": connection_map}
-            )
-            
-            # Log prefilter tokens
-            self._safe_add_tokens(task_id, prefilter_tokens, self.prefilter_llm, "prefilter", duration=prefilter_duration)
-            
-            # Extract tool names without :EXECUTE suffix for cleaner summary
-            selected_tools = set()
-            for action in selected_actions:
-                tool_name = action.split(':')[0] if ':' in action else action
-                selected_tools.add(tool_name)
-            
-            # Log prefiltering completion with tool count
-            tool_count = len(selected_tools)
-            tool_label = "tool" if tool_count == 1 else "tools"
-            console.info("Prefiltering", f"— {tool_count} {tool_label} selected", task_id=task_id, agent_id=self.agent_id)
-            
-            # Build compressed API docs for only selected actions
-            python_api_docs = build_filtered_api_docs(selected_actions, custom_descriptions=self.tool_descriptions)
-            
-            # Build minimal examples for selected tools
-            python_examples = ""  # Examples are included in compressed docs
-            
-        except Exception as e:
-            console.error("Prefilter failed", str(e), 
+            except Exception as e:
+                console.error("Prefilter failed", str(e), 
                            task_id=task_id, agent_id=self.agent_id)
             raise
         
@@ -1612,6 +1699,7 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
         # Build connection context section for the prompt
         connection_context_section = build_connection_context_for_prompt(connection_map, connections)
 
+        from datetime import datetime, timezone
         current_dt = datetime.now(timezone.utc).astimezone()
         current_date_str = current_dt.strftime("%Y-%m-%d %H:%M %Z")
 

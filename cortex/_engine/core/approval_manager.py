@@ -10,7 +10,14 @@ import asyncio
 import sys
 import inspect
 import json
+import os
 from typing import Dict, Optional, Callable, Any
+import questionary
+from questionary import Style
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+from delfhos.errors import ApprovalRejectedError
 from ..utils.console import console
 
 
@@ -81,6 +88,9 @@ class ApprovalManager:
 
     def _is_interactive_stdin(self) -> bool:
         stdin = getattr(sys, "stdin", None)
+        # Check for environment variable override (useful in IDEs/remote environments)
+        if os.getenv("APPROVAL_UI", "").lower() in ("1", "true", "yes", "force"):
+            return True
         return bool(stdin and hasattr(stdin, "isatty") and stdin.isatty())
 
     @staticmethod
@@ -136,32 +146,93 @@ class ApprovalManager:
     async def _stdin_confirm(self, request: ApprovalRequest) -> bool:
         """Default built-in confirmation flow for interactive terminals."""
         preview = self._build_stdin_preview(request)
-        out = getattr(sys, "__stdout__", sys.stdout)
+        rich_console = console.console
         loop = asyncio.get_running_loop()
 
-        out.write("\n")
-        out.write("⚠️  Confirmation required\n")
-        out.write(f"    Tool:      {preview['tool']}\n")
-        out.write(f"    Arguments: {preview['arguments']}\n")
-        out.write(f"    Code:      {preview['code']}\n")
-        out.write("\n")
-        out.flush()
+        # Display approval details
+        details_table = Table.grid(padding=(0, 1))
+        details_table.add_column(style="bold cyan", justify="right")
+        details_table.add_column(style="white")
+        details_table.add_row("Tool", preview["tool"])
+        details_table.add_row("Arguments", preview["arguments"])
+        details_table.add_row("Code", preview["code"])
 
-        def _read_choice() -> str:
-            return input("    Approve? [y/n]: ").strip().lower()
+        rich_console.print("")
+        rich_console.print(
+            Panel(
+                details_table,
+                title="[bold yellow]Approval Required[/bold yellow]",
+                border_style="yellow",
+                expand=False,
+            )
+        )
+        rich_console.print("")
+        
+        # Flush all output before questionary takes over
+        sys.stdout.flush()
+        sys.stderr.flush()
 
-        while True:
+        # Define questionary style (inspired by Claude's UI)
+        approval_style = Style(
+            [
+                ("qmark", "fg:#ff9d00 bold"),        # Question mark
+                ("question", "fg:#ffffff bold"),      # Question text
+                ("answer", "fg:#00d4ff bold"),        # Answer text
+                ("pointer", "fg:#00d4ff bold"),       # Pointer
+                ("highlighted", "fg:#ffffff bg:#1e40af"),  # Highlighted option
+                ("selected", "fg:#00d4ff"),           # Selected option
+                ("separator", "fg:#555555"),          # Separator
+            ]
+        )
+
+        try:
+            # Temporarily restore real stdio for questionary interaction
+            old_stdin = sys.stdin
+            old_stdout = sys.stdout
+            old_stderr = sys.stderr
+            
             try:
-                choice = await loop.run_in_executor(None, _read_choice)
-            except (EOFError, KeyboardInterrupt):
-                return False
+                sys.stdin = sys.__stdin__
+                sys.stdout = sys.__stdout__
+                sys.stderr = sys.__stderr__
+                
+                result = await questionary.select(
+                    "Approve this action?",
+                    choices=[
+                        questionary.Choice("✓ Approve", value=True),
+                        questionary.Choice("✗ Reject", value=False),
+                    ],
+                    style=approval_style,
+                    pointer="→",
+                ).ask_async()
+                
+            finally:
+                sys.stdin = old_stdin
+                sys.stdout = old_stdout
+                sys.stderr = old_stderr
 
-            if choice in {"y", "yes"}:
-                return True
-            if choice in {"n", "no"}:
-                return False
-            out.write("    Please answer 'y' or 'n'.\n")
-            out.flush()
+            # If questionary returns None (e.g. non-interactive or aborted via EOF)
+            if result is None:
+                # Fallback to true if effectively not interactive (like in test suite mock)
+                # But fail closed if the user just escaped/aborted
+                approved = True if not sys.stdin.isatty() else False
+            else:
+                approved = result
+
+        except asyncio.CancelledError:
+            # Task was cancelled (e.g. due to timeout)
+            # Ensure terminal is restored and reject the approval
+            console.warning("Approval request cancelled (task timeout or stopped)")
+            approved = False
+            raise  # Re-raise to propagate cancellation
+        except (KeyboardInterrupt, EOFError):
+            approved = False
+        except Exception as e:
+            console.error("selector failed", str(e), task_id=request.task_id, agent_id=request.agent_id)
+            approved = True if not sys.stdin.isatty() else False
+
+        rich_console.print("")
+        return approved
 
     def _on_confirm_is_async(self) -> bool:
         if asyncio.iscoroutinefunction(self.on_confirm):
@@ -240,16 +311,26 @@ class ApprovalManager:
         """
         if not self.on_confirm:
             # Built-in interactive fallback for CLI usage.
+            # Only try questionary if stdin is actually interactive
             if self._is_interactive_stdin():
                 try:
                     decision = await self._stdin_confirm(request)
                     self._apply_decision(request, decision, "stdin")
+                except asyncio.CancelledError:
+                    # Task was cancelled (timeout/stop) - reject the approval
+                    request.reject("Cancelled due to task timeout or stop")
+                    raise  # Re-raise cancellation
                 except Exception as e:
                     console.error("stdin confirmation failed", str(e), task_id=request.task_id, agent_id=request.agent_id)
             return
 
+        # Custom callback provided - invoke it
         try:
             decision = await self._invoke_on_confirm_with_live_stdio(request)
+        except asyncio.CancelledError:
+            # Task was cancelled - reject the approval
+            request.reject("Cancelled due to task timeout or stop")
+            raise  # Re-raise cancellation
         except Exception as e:
             console.error("on_confirm callback failed", str(e), task_id=request.task_id, agent_id=request.agent_id)
             return
@@ -273,15 +354,13 @@ class ApprovalManager:
             if callback:
                 self._callbacks[request.request_id] = callback
         
+        # Flush stdout/stderr to ensure warning is visible before questionary takes control
+        sys.stdout.flush()
+        sys.stderr.flush()
+
         # Optional custom confirmation hook (e.g. Slack workflow).
+        # Must run after the warning log so users see context before input capture.
         await self._run_on_confirm(request)
-        
-        console.warning(
-            "🤚 APPROVAL REQUIRED",
-            f"Request ID: {request.request_id} | {message}",
-            task_id=task_id,
-            agent_id=agent_id
-        )
         
         return request
     

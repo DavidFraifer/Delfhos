@@ -43,6 +43,7 @@ google-api-python-client==2.154.0
 stripe>=5.0.0,<8.0.0
 PyYAML==6.0.2
 websockets==15.0.1
+questionary>=2.1.0
 
 uvicorn[standard]
 fastapi

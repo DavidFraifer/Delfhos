@@ -50,6 +50,7 @@ class SQLConnection(BaseConnection):
         db_type: "postgresql", "mysql", or "mariadb" (default: "postgresql").
         allow: Restrict actions, e.g., ["query"] blocks writes (default: allow all).
                Supported: "schema" (introspection), "query" (SELECT), "write" (INSERT/UPDATE/DELETE).
+        confirm: Require human approval before executing listed actions, e.g. ["write"].
         name: Custom label (default: "sql").
         metadata: Extra info dict for tracking/logging.
     """
@@ -68,6 +69,7 @@ class SQLConnection(BaseConnection):
         password: Optional[str] = None,
         db_type: str = "postgresql",
         allow: Optional[Union[str, List[str]]] = None,
+        confirm: Union[bool, List[str], None] = True,
         name: str = "sql",
         metadata: Optional[Dict[str, Any]] = None,
     ):
@@ -100,6 +102,7 @@ class SQLConnection(BaseConnection):
         super().__init__(
             credentials=credentials,
             allow=allow,
+            confirm=confirm,
             name=name,
             auth_type=AuthType.BASIC_AUTH,
             metadata=metadata,

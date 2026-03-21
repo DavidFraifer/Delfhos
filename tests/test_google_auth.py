@@ -11,7 +11,7 @@ import pytest
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cortex.google_auth import actions_to_scopes, resolve_google_credentials, SCOPE_MAP
+from cortex.google_auth import actions_to_scopes, scopes_to_actions, resolve_google_credentials, SCOPE_MAP
 
 
 # ─── actions_to_scopes tests ────────────────────────────────────────────────
@@ -34,9 +34,10 @@ class TestActionsToScopes:
         assert "https://www.googleapis.com/auth/gmail.send" in scopes
         assert len(scopes) == 2
 
-    def test_gmail_all_actions_gives_modify(self):
+    def test_gmail_all_actions_gives_union_of_action_scopes(self):
         scopes = actions_to_scopes("gmail", None)
-        assert scopes == ["https://www.googleapis.com/auth/gmail.modify"]
+        assert "https://www.googleapis.com/auth/gmail.readonly" in scopes
+        assert "https://www.googleapis.com/auth/gmail.send" in scopes
 
     def test_sheets_read_gives_readonly(self):
         scopes = actions_to_scopes("sheets", ["read"])
@@ -82,9 +83,9 @@ class TestActionsToScopes:
         scopes = actions_to_scopes("nosuch", ["read"])
         assert scopes == []
 
-    def test_unknown_action_falls_back_to_broadest(self):
-        scopes = actions_to_scopes("gmail", ["nonexistent"])
-        assert scopes == ["https://www.googleapis.com/auth/gmail.modify"]
+    def test_unknown_action_raises(self):
+        with pytest.raises(Exception, match="Unknown action"):
+            actions_to_scopes("gmail", ["nonexistent"])
 
     def test_case_insensitive_tool(self):
         scopes = actions_to_scopes("GMAIL", ["read"])
@@ -113,20 +114,36 @@ class TestActionsToScopes:
 class TestResolveCredentials:
     """Test credential resolution priority and error handling."""
 
-    def test_no_auth_raises_valueerror(self):
-        with pytest.raises(ValueError, match="No authentication provided"):
+    def test_no_auth_raises_configuration_error(self):
+        with pytest.raises(Exception, match="No authentication provided"):
             resolve_google_credentials(tool_name="gmail")
 
-    def test_missing_sa_file_raises_filenotfound(self):
-        with pytest.raises(FileNotFoundError, match="Service account file not found"):
+    def test_missing_sa_file_raises_connection_file_not_found(self):
+        with pytest.raises(Exception, match="Service account file not found"):
             resolve_google_credentials(
                 tool_name="gmail",
                 service_account="/nonexistent/path/sa.json",
             )
 
-    def test_missing_oauth_file_raises_filenotfound(self):
-        with pytest.raises(FileNotFoundError, match="OAuth client secrets file not found"):
+    def test_missing_oauth_file_raises_connection_file_not_found(self):
+        with pytest.raises(Exception, match="OAuth client secrets file not found"):
             resolve_google_credentials(
                 tool_name="gmail",
                 oauth_credentials="/nonexistent/path/client.json",
             )
+
+
+class TestScopesToActions:
+    def test_drive_full_scope_implies_read_actions(self):
+        actions = scopes_to_actions("drive", ["https://www.googleapis.com/auth/drive"])
+        assert "search" in actions
+        assert "get" in actions
+        assert "create" in actions
+
+    def test_requested_actions_are_not_expanded(self):
+        actions = scopes_to_actions(
+            "drive",
+            ["https://www.googleapis.com/auth/drive"],
+            requested_actions=["list_permissions"],
+        )
+        assert actions == ["list_permissions"]

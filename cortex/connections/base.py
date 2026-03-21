@@ -150,6 +150,7 @@ class BaseConnection(_BaseConnection):
         self,
         credentials: Dict[str, Any],
         allow: Optional[Union[str, List[str]]] = None,
+        confirm: Union[bool, List[str], None] = True,
         name: Optional[str] = None,
         auth_type: AuthType = AuthType.OAUTH2,
         metadata: Optional[Dict[str, Any]] = None,
@@ -159,6 +160,8 @@ class BaseConnection(_BaseConnection):
             credentials:  Service-specific auth credentials dict.
             allow:        List of allowed actions, e.g. ["read", "send"].
                           None means all actions are permitted.
+            confirm:      List of action names requiring human approval before execution,
+                          e.g. ["send", "delete"]. None = no confirmation required.
             name:         Human-readable label for this connection, e.g. "work_gmail".
                           Defaults to the tool name.
             auth_type:    Authentication mechanism (default: OAUTH2).
@@ -177,6 +180,7 @@ class BaseConnection(_BaseConnection):
             auth_type=auth_type,
             credentials=credentials,
             allow=allow,
+            confirm=confirm,
             metadata=metadata or {},
         )
 
@@ -266,6 +270,7 @@ class GoogleBaseConnection(BaseConnection):
         oauth_credentials: Optional[str] = None,
         delegated_user: Optional[str] = None,
         allow: Optional[Union[str, List[str]]] = None,
+        confirm: Union[bool, List[str], None] = True,
         name: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ):
@@ -275,17 +280,44 @@ class GoogleBaseConnection(BaseConnection):
             oauth_credentials: Path to client_secrets.json (for personal accounts).
             delegated_user:    Email to impersonate via domain-wide delegation (SA only).
             allow:             Allowed actions, e.g. ["read", "send"]. None = all.
+            confirm:           List of action names requiring approval, e.g. ["send", "delete"].
             name:              Human-readable label for this connection.
             metadata:          Extra info dict.
         """
         from cortex.google_auth import resolve_google_credentials, scopes_to_actions
+
+        requested_actions: Optional[List[str]]
+        if allow is None:
+            requested_actions = None
+        elif isinstance(allow, str):
+            requested_actions = [self._normalize_action_name(allow)]
+        else:
+            requested_actions = [self._normalize_action_name(a) for a in allow]
+
+        # Keep allowed actions aligned with this connection's declared capability set.
+        if requested_actions is not None and self.ALLOWED_ACTIONS is not None:
+            supported = {self._normalize_action_name(a) for a in self.ALLOWED_ACTIONS}
+            unknown = sorted({a for a in requested_actions if a not in supported})
+            if unknown:
+                from delfhos.errors import ConnectionConfigurationError
+
+                raise ConnectionConfigurationError(
+                    tool_name=self.TOOL_NAME,
+                    detail=(
+                        f"Unknown allowed action(s): {unknown}. "
+                        f"Supported actions: {sorted(supported)}"
+                    ),
+                )
+
+            # Dedupe while preserving user-specified order.
+            requested_actions = list(dict.fromkeys(requested_actions))
 
         resolved = resolve_google_credentials(
             tool_name=self.TOOL_NAME,
             service_account=service_account,
             oauth_credentials=oauth_credentials,
             delegated_user=delegated_user,
-            actions=allow,
+            actions=requested_actions,
         )
 
         # Determine auth type based on what was provided
@@ -300,14 +332,21 @@ class GoogleBaseConnection(BaseConnection):
         # real granted scopes rather than trusting the user-supplied `actions` list.
         if auth_type == AuthType.OAUTH2:
             granted_scopes = resolved.get("scopes", [])
-            effective_actions = scopes_to_actions(self.TOOL_NAME, granted_scopes) or None
+            effective_actions = scopes_to_actions(
+                self.TOOL_NAME,
+                granted_scopes,
+                requested_actions=requested_actions,
+            )
+            if requested_actions is None and not effective_actions:
+                effective_actions = None
         else:
             # Service accounts: trust the requested actions directly
-            effective_actions = allow
+            effective_actions = requested_actions
 
         super().__init__(
             credentials=resolved,
             allow=effective_actions,
+            confirm=confirm,
             name=name or self.TOOL_NAME,
             auth_type=auth_type,
             metadata=metadata,

@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, ".")
 
-from delfhos import Calendar, Docs, Drive, Gmail, SQL, Sheets, WebSearch
+from delfhos import Calendar, Docs, Drive, Gmail, MCP, SQL, Sheets, WebSearch
 from delfhos.sandbox import MockDatabase, MockEmail
 from cortex._engine.mcp import executor as mcp_executor
 from cortex._engine.tools.tool_registry import map_frontend_action_to_registry_action, TOOL_ACTION_SUMMARIES

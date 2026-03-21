@@ -1,2 +1,4 @@
 include delfhos/py.typed
+include cortex/py.typed
 recursive-include delfhos *.pyi
+recursive-include cortex *.pyi

@@ -124,3 +124,10 @@ class LLMExecutionError(DelfhosConfigError):
         "If using a compatible local endpoint, also verify '{base_url_env}' when applicable. "
         "Then retry the request."
     )
+
+
+class ApprovalRejectedError(DelfhosConfigError):
+    """Raised when a human rejects an approval request."""
+    code = "ERR-APPROVAL-001"
+    message_template = "Operation '{operation}' was rejected by human approval."
+    resolution = "Review the operation parameters. If the operation is safe, request approval again with {'APPROVAL_UI=1'} environment variable to force interactive approval."

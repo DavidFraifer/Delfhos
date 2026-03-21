@@ -42,6 +42,7 @@ class WebSearchConnection(BaseConnection):
              Supported: Gemini and OpenAI/GPT models.
         api_key: Optional API key. If not provided, uses env var or falls back to free mode.
         allow: Restrict actions to specific ones (e.g., ["search"]; default: allow all).
+        confirm: Require human approval before executing listed actions, e.g. ["search"].
         name: Custom label (default: "websearch").
         metadata: Extra context dict (useful for logging/tracking).
     """
@@ -54,21 +55,23 @@ class WebSearchConnection(BaseConnection):
         llm: str,
         api_key: Optional[str] = None,
         allow: Optional[Union[str, List[str]]] = None,
+        confirm: Union[bool, List[str], None] = True,
         name: str = "websearch",
         metadata: Optional[Dict[str, Any]] = None,
     ):
         if not llm or not isinstance(llm, str):
             raise ValueError("WebSearch requires an 'llm' parameter with a valid model name (e.g., 'gemini-3.1-flash-lite-preview' or 'gpt-4')")
-        
+
         credentials = {"api_key": api_key} if api_key else {}
         # Store the llm as part of metadata to pass it through to WebSearchLibrary
         if metadata is None:
             metadata = {}
         metadata["llm"] = llm
-        
+
         super().__init__(
             credentials=credentials,
             allow=allow,
+            confirm=confirm,
             name=name,
             auth_type=AuthType.API_KEY if api_key else AuthType.NONE,
             metadata=metadata,

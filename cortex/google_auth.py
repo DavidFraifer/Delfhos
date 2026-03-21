@@ -17,7 +17,7 @@ import json
 import os
 from delfhos.errors import ConnectionConfigurationError, ConnectionFileNotFoundError, OptionalDependencyError
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 
 # ─── Action → Scope mapping ──────────────────────────────────────────────────
@@ -37,6 +37,12 @@ SCOPE_MAP: Dict[str, Dict[str, List[str]]] = {
                    "https://www.googleapis.com/auth/drive"],
         "create": ["https://www.googleapis.com/auth/spreadsheets",
                    "https://www.googleapis.com/auth/drive"],
+        "format": ["https://www.googleapis.com/auth/spreadsheets",
+                   "https://www.googleapis.com/auth/drive"],
+        "chart":  ["https://www.googleapis.com/auth/spreadsheets",
+                   "https://www.googleapis.com/auth/drive"],
+        "batch":  ["https://www.googleapis.com/auth/spreadsheets",
+                   "https://www.googleapis.com/auth/drive"],
         "*":      ["https://www.googleapis.com/auth/spreadsheets",
                    "https://www.googleapis.com/auth/drive"],
     },
@@ -46,6 +52,7 @@ SCOPE_MAP: Dict[str, Dict[str, List[str]]] = {
         "create": ["https://www.googleapis.com/auth/drive"],
         "update": ["https://www.googleapis.com/auth/drive"],
         "delete": ["https://www.googleapis.com/auth/drive"],
+        "list_permissions": ["https://www.googleapis.com/auth/drive.readonly"],
         "share":  ["https://www.googleapis.com/auth/drive"],
         "unshare":["https://www.googleapis.com/auth/drive"],
         "*":      ["https://www.googleapis.com/auth/drive"],
@@ -72,6 +79,25 @@ SCOPE_MAP: Dict[str, Dict[str, List[str]]] = {
     },
 }
 
+# Some broader scopes implicitly cover narrower ones for authorization checks.
+_SCOPE_IMPLICATIONS: Dict[str, Set[str]] = {
+    "https://www.googleapis.com/auth/drive": {
+        "https://www.googleapis.com/auth/drive.readonly",
+    },
+    "https://www.googleapis.com/auth/spreadsheets": {
+        "https://www.googleapis.com/auth/spreadsheets.readonly",
+    },
+    "https://www.googleapis.com/auth/calendar": {
+        "https://www.googleapis.com/auth/calendar.readonly",
+    },
+    "https://www.googleapis.com/auth/documents": {
+        "https://www.googleapis.com/auth/documents.readonly",
+    },
+    "https://www.googleapis.com/auth/gmail.modify": {
+        "https://www.googleapis.com/auth/gmail.readonly",
+    },
+}
+
 # Default directory for cached OAuth tokens
 DEFAULT_TOKEN_DIR = Path.home() / ".cortex" / "tokens"
 
@@ -92,23 +118,47 @@ def actions_to_scopes(tool_name: str, actions: Optional[List[str]] = None) -> Li
         return []
 
     if actions is None:
-        # All actions → broadest scope
-        return list(tool_scopes.get("*", []))
+        # All actions → union of all concrete action scopes.
+        scopes: set = set()
+        for action_name, action_scopes in tool_scopes.items():
+            if action_name == "*":
+                continue
+            scopes.update(action_scopes)
+        if scopes:
+            return sorted(scopes)
+        return sorted(tool_scopes.get("*", []))
 
     scopes: set = set()
     for action in actions:
         action_lower = action.lower()
         action_scope_list = tool_scopes.get(action_lower)
-        if action_scope_list:
-            scopes.update(action_scope_list)
-        else:
-            # Unknown action → fall back to broadest scope for safety
-            scopes.update(tool_scopes.get("*", []))
+        if not action_scope_list:
+            valid_actions = sorted(k for k in tool_scopes.keys() if k != "*")
+            raise ConnectionConfigurationError(
+                tool_name=tool_name,
+                detail=(
+                    f"Unknown action '{action}' for Google tool '{tool_name}'. "
+                    f"Valid actions: {valid_actions}"
+                ),
+            )
+        scopes.update(action_scope_list)
 
     return sorted(scopes)
 
 
-def scopes_to_actions(tool_name: str, granted_scopes: Iterable[str]) -> List[str]:
+def _expand_granted_scopes(granted_scopes: Iterable[str]) -> Set[str]:
+    """Expand granted scopes with known broader->narrower implications."""
+    expanded = set(granted_scopes)
+    for scope in list(expanded):
+        expanded.update(_SCOPE_IMPLICATIONS.get(scope, set()))
+    return expanded
+
+
+def scopes_to_actions(
+    tool_name: str,
+    granted_scopes: Iterable[str],
+    requested_actions: Optional[List[str]] = None,
+) -> List[str]:
     """
     Convert granted OAuth scopes back to user-facing action names.
 
@@ -124,10 +174,15 @@ def scopes_to_actions(tool_name: str, granted_scopes: Iterable[str]) -> List[str
         Sorted list of action names that are fully covered by the granted scopes.
     """
     tool_scopes = SCOPE_MAP.get(tool_name.lower(), {})
-    granted_set = set(granted_scopes)
+    granted_set = _expand_granted_scopes(granted_scopes)
+    requested_set: Optional[Set[str]] = None
+    if requested_actions is not None:
+        requested_set = {str(a).strip().lower() for a in requested_actions}
     allowed: List[str] = []
     for action, required in tool_scopes.items():
         if action == "*":
+            continue
+        if requested_set is not None and action not in requested_set:
             continue
         if set(required).issubset(granted_set):
             allowed.append(action)

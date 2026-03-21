@@ -35,6 +35,7 @@ class DocsConnection(GoogleBaseConnection):
     Args:
         delegated_user: Email to impersonate (service account + delegation only).
         allow: Restrict actions, e.g., ["read"] blocks editing (default: allow all).
+        confirm: Require human approval before executing listed actions, e.g. ["create", "delete"].
         name: Custom label (default: "docs").
         metadata: Extra info dict for tracking/logging.
     """
@@ -48,6 +49,7 @@ class DocsConnection(GoogleBaseConnection):
         oauth_credentials: Optional[str] = None,
         delegated_user: Optional[str] = None,
         allow: Optional[Union[str, List[str]]] = None,
+        confirm: Union[bool, List[str], None] = True,
         name: str = "docs",
         metadata: Optional[Dict[str, Any]] = None,
     ):
@@ -56,6 +58,7 @@ class DocsConnection(GoogleBaseConnection):
             oauth_credentials=oauth_credentials,
             delegated_user=delegated_user,
             allow=allow,
+            confirm=confirm,
             name=name,
             metadata=metadata,
         )

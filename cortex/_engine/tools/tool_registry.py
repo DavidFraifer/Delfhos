@@ -3,7 +3,7 @@ Tool Registry System
 Provides tool capability definitions and Python API documentation for agent code generation
 """
 
-from typing import Dict, List, Optional, Any, Set
+from typing import Dict, List, Optional, Any, Set, Tuple
 
 
 class ToolActionSpec:
@@ -701,6 +701,38 @@ results = await asyncio.gather(*tasks)""",
 }
 
 
+def _get_connection_available_actions(conn: Any, available_tools: Dict[str, Set[str]]) -> Set[str]:
+    """Resolve action set for a specific connection, respecting its allow restrictions."""
+    tool_name = getattr(conn, 'tool_name', 'unknown').lower()
+    fallback_actions = set(available_tools.get(tool_name, set()))
+
+    allow = getattr(conn, 'allow', None)
+    if not allow:
+        return fallback_actions
+
+    # `allow` may be list/set/tuple or a single string.
+    raw_actions: List[str]
+    if isinstance(allow, (set, tuple, list)):
+        raw_actions = [str(a) for a in allow]
+    else:
+        raw_actions = [str(allow)]
+
+    mapped_actions: Set[str] = set()
+    for frontend_action in raw_actions:
+        mapped = map_frontend_action_to_registry_action(tool_name, frontend_action)
+        if mapped:
+            mapped_actions.add(mapped)
+
+    # For dynamic tools (for example MCP), keep known allowed actions as fallback
+    # if mapping table cannot resolve them.
+    if not mapped_actions:
+        mapped_actions = {str(a).strip().upper().replace("-", "_").replace(" ", "_") for a in raw_actions if str(a).strip()}
+
+    if fallback_actions:
+        return mapped_actions.intersection(fallback_actions)
+    return mapped_actions
+
+
 def build_prefilter_prompt(task: str, available_tools: Dict[str, Set[str]], connections: List[Any] = None, custom_descriptions: Dict[str, str] = None) -> str:
     """
     Build ultra-minimal prompt for prefilter LLM to select needed tools+actions.
@@ -733,8 +765,8 @@ def build_prefilter_prompt(task: str, available_tools: Dict[str, Set[str]], conn
             if hasattr(conn, 'metadata') and isinstance(conn.metadata, dict):
                 conn_desc = conn.metadata.get('description', '')
             
-            # Get allowed actions for this connection
-            actions = available_tools.get(tool_name, set())
+            # Get allowed actions for this specific connection.
+            actions = _get_connection_available_actions(conn, available_tools)
             if actions:
                 # For MCP tools, show lowercase method names with parentheses (READ_FILE → read_file()) for clarity
                 method_names = sorted([f"{a.lower()}()" for a in actions])
@@ -941,6 +973,40 @@ def build_filtered_api_docs(selected_actions: List[str], custom_descriptions: Di
         result += "\n\n# Examples:\n" + "\n\n".join(e for e in examples if e)
     
     return result
+
+
+def filter_selected_actions(
+    selected_actions: List[str],
+    available_actions: Dict[str, Set[str]],
+) -> Tuple[List[str], List[str]]:
+    """Keep only tool:action pairs that are actually allowed for this run.
+
+    Returns:
+        (allowed_selected_actions, blocked_selected_actions)
+    """
+    allowed: List[str] = []
+    blocked: List[str] = []
+
+    for item in selected_actions:
+        parsed = _parse_prefilter_part(item)
+        if parsed is None:
+            blocked.append(item)
+            continue
+
+        tool_name, action_name = parsed
+        tool_key = tool_name.lower().strip()
+        action_key = action_name.upper().strip()
+        allowed_for_tool = available_actions.get(tool_key, set())
+
+        if action_key in allowed_for_tool:
+            allowed.append(f"{tool_key}:{action_key}")
+        else:
+            blocked.append(f"{tool_key}:{action_key}")
+
+    # Preserve order while removing duplicates.
+    allowed = list(dict.fromkeys(allowed))
+    blocked = list(dict.fromkeys(blocked))
+    return allowed, blocked
 
 
 def get_available_actions_for_connections(connections: List[Any], custom_tools: Dict[str, Any] = None) -> Dict[str, Set[str]]:

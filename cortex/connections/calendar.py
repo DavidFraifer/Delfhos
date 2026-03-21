@@ -31,11 +31,12 @@ class CalendarConnection(GoogleBaseConnection):
     Args:
         delegated_user: Email to impersonate (service account + delegation only).
         allow: Restrict actions, e.g., ["list"] blocks creating events (default: allow all).
+        confirm: Require human approval before executing listed actions, e.g. ["create", "delete"].
         name: Custom label (default: "calendar").
         metadata: Extra info dict for tracking/logging.
     """
     TOOL_NAME = "calendar"
-    ALLOWED_ACTIONS = ["list", "create", "update", "delete"]
+    ALLOWED_ACTIONS = ["list", "get", "create", "update", "delete", "respond"]
 
     def __init__(
         self,
@@ -44,6 +45,7 @@ class CalendarConnection(GoogleBaseConnection):
         oauth_credentials: Optional[str] = None,
         delegated_user: Optional[str] = None,
         allow: Optional[Union[str, List[str]]] = None,
+        confirm: Union[bool, List[str], None] = True,
         name: str = "calendar",
         metadata: Optional[Dict[str, Any]] = None,
     ):
@@ -52,6 +54,7 @@ class CalendarConnection(GoogleBaseConnection):
             oauth_credentials=oauth_credentials,
             delegated_user=delegated_user,
             allow=allow,
+            confirm=confirm,
             name=name,
             metadata=metadata,
         )

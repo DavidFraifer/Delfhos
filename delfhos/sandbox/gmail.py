@@ -57,10 +57,11 @@ class MockEmail(BaseConnection):
         """Inspect available mock email actions without creating an instance."""
         return super().inspect(verbose=verbose)
     
-    def __init__(self, name: str = "gmail", allow=None):
+    def __init__(self, name: str = "gmail", allow=None, confirm=True):
         super().__init__(
             credentials={"mock": True},
-            allow=allow,  # None means allow all actions
+            allow=allow,
+            confirm=confirm,
             name=name,
             auth_type=AuthType.NONE
         )

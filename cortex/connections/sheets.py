@@ -36,6 +36,7 @@ class SheetsConnection(GoogleBaseConnection):
         delegated_user: Email to impersonate (service account + delegation only).
         allow: Restrict actions, e.g., ["read"] blocks writing (default: allow all).
                 Supported: "read", "write", "create", "format", "chart", "batch".
+        confirm: Require human approval before executing listed actions, e.g. ["write", "create"].
         name: Custom label (default: "sheets").
         metadata: Extra info dict for tracking/logging.
     """
@@ -50,6 +51,7 @@ class SheetsConnection(GoogleBaseConnection):
         oauth_credentials: Optional[str] = None,
         delegated_user: Optional[str] = None,
         allow: Optional[Union[str, List[str]]] = None,
+        confirm: Union[bool, List[str], None] = True,
         name: str = "sheets",
         metadata: Optional[Dict[str, Any]] = None,
     ):
@@ -58,6 +60,7 @@ class SheetsConnection(GoogleBaseConnection):
             oauth_credentials=oauth_credentials,
             delegated_user=delegated_user,
             allow=allow,
+            confirm=confirm,
             name=name,
             metadata=metadata,
         )

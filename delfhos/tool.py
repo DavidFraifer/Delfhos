@@ -328,7 +328,7 @@ class Tool:
     parameters: Optional[Dict[str, Any]] = None
     return_type: Optional[str] = None
     handle_error: Union[bool, str, Callable, None] = True
-    confirm: bool = False
+    confirm: bool = True
 
     def __init__(
         self,
@@ -337,7 +337,7 @@ class Tool:
         parameters: Optional[Dict[str, Any]] = None,
         func: Optional[Callable] = None,
         handle_error: Union[bool, str, Callable, None] = True,
-        confirm: bool = False,
+        confirm: bool = True,
         _from_decorator: bool = False,
         _internal_use: bool = False,
     ):
@@ -555,7 +555,7 @@ def tool(
     description: Optional[str] = None,
     handle_error: Union[bool, str, Callable, None] = True,
     return_errors: Optional[bool] = None,
-    confirm: bool = False,
+    confirm: bool = True,
 ) -> Union[Tool, Callable[[Callable], Tool]]:
     """Convert a function into an agent-executable tool with automatic schema extraction.
 

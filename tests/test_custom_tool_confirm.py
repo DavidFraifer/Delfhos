@@ -19,12 +19,12 @@ class TestCustomToolConfirm(unittest.TestCase):
 
         self.assertTrue(remove_item.confirm)
 
-    def test_decorator_defaults_do_not_require_confirm(self):
+    def test_decorator_defaults_do_require_confirm(self):
         @tool
         def read_item(item_id: str) -> str:
             return item_id
 
-        self.assertFalse(read_item.confirm)
+        self.assertTrue(read_item.confirm)
 
     def test_return_errors_alias_maps_to_tool_error_result(self):
         @tool(return_errors=True)

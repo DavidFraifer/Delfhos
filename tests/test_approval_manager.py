@@ -6,6 +6,28 @@ from cortex._engine.core.approval_manager import ApprovalManager
 
 
 class TestApprovalManager(unittest.TestCase):
+    def test_warning_printed_before_confirmation_flow(self):
+        manager = ApprovalManager()
+        call_order = []
+
+        async def fake_run_on_confirm(_request):
+            call_order.append("confirm")
+
+        manager._run_on_confirm = fake_run_on_confirm
+
+        with patch("cortex._engine.core.approval_manager.console.warning", side_effect=lambda *args, **kwargs: call_order.append("warning")):
+            asyncio.run(
+                manager.create_request_async(
+                    task_id="task-order",
+                    agent_id="agent-1",
+                    message="Order check",
+                )
+            )
+
+        self.assertGreaterEqual(len(call_order), 2)
+        self.assertEqual(call_order[0], "warning")
+        self.assertEqual(call_order[1], "confirm")
+
     def test_on_confirm_async_callable_object_auto_approves(self):
         class AsyncApprover:
             async def __call__(self, _request):

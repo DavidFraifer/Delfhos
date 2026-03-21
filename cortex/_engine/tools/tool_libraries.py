@@ -133,9 +133,6 @@ async def _request_unified_approval(
         context=context_json,
         ui_metadata=metadata,
     )
-    if not approved:
-        target = f"{tool_name}.{action_name}" if action_name else tool_name
-        raise ToolExecutionError(tool_name=target, detail=f"User rejected {target} operation.")
     return True
 
 

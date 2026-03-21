@@ -72,15 +72,16 @@ class MockDatabase(SQLConnection):
         """Inspect available mock SQL actions without creating an instance."""
         return super().inspect(verbose=verbose)
     
-    def __init__(self, name: str = "db", allow=None):
+    def __init__(self, name: str = "db", allow=None, confirm=True):
         # We don't need real credentials, but the base class expects something
         super().__init__(
-            host="sandbox-memory-db", 
-            database="sandbox", 
-            user="sandbox", 
+            host="sandbox-memory-db",
+            database="sandbox",
+            user="sandbox",
             password="pwd",
             name=name,
-            allow=allow  # None means allow all actions
+            allow=allow,
+            confirm=confirm,
         )
         # Mark this as a sandbox connection so the internal tool knows to intercept
         self.is_sandbox = True

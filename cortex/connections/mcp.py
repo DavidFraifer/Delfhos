@@ -14,6 +14,18 @@ from cortex._engine.connection import AuthType
 from .base import BaseConnection, _PrettyInspectDict
 
 
+class _InspectDescriptor:
+    """Descriptor allowing .inspect() to work on both MCP class and instances."""
+    
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            # Called on class: MCP.inspect(server="...")
+            return objtype._class_inspect
+        else:
+            # Called on instance: mcp_instance.inspect()
+            return lambda verbose=False: obj._do_inspect(verbose=verbose)
+
+
 class MCP(BaseConnection):
     """
     Connect to any Model Context Protocol (MCP) server and use it as a native Delfhos tool.
@@ -36,21 +48,50 @@ class MCP(BaseConnection):
         headers: HTTP headers for SSE connections (e.g., {"Authorization": "Bearer ..."})
         name: Custom label for this connection (default: auto-derived from server name).
         allow: Restrict which server actions are exposed to the agent (e.g., ["search", "read"]).
+        confirm: Require human approval before executing listed actions (e.g., ["create_issue", "delete_file"]).
+                 Use the same action names shown by MCP.inspect().
         cache: If True, reuse ~/delfhos/mcp_cache/ to skip introspection on next run.
     """
     
     # TOOL_NAME is overridden dynamically per instance
     TOOL_NAME = "mcp"
     ALLOWED_ACTIONS: Optional[List[str]] = None
+    _KNOWN_REQUIRED_ENV_KEYS = {
+        "server-github": ["GITHUB_TOKEN"],
+        "github": ["GITHUB_TOKEN"],
+        "server-gitlab": ["GITLAB_TOKEN"],
+        "gitlab": ["GITLAB_TOKEN"],
+        "server-notion": ["NOTION_API_KEY"],
+        "notion": ["NOTION_API_KEY"],
+        "server-slack": ["SLACK_BOT_TOKEN"],
+        "slack": ["SLACK_BOT_TOKEN"],
+        "server-linear": ["LINEAR_API_KEY"],
+        "linear": ["LINEAR_API_KEY"],
+        "server-jira": ["JIRA_API_TOKEN"],
+        "jira": ["JIRA_API_TOKEN"],
+        "server-google-drive": ["GOOGLE_API_KEY"],
+        "server-openai": ["OPENAI_API_KEY"],
+        "openai": ["OPENAI_API_KEY"],
+        "server-anthropic": ["ANTHROPIC_API_KEY"],
+        "anthropic": ["ANTHROPIC_API_KEY"],
+    }
 
     @staticmethod
     def _normalize_action(value: str) -> str:
         return str(value).strip().lower().replace("-", "_")
 
+    def _detect_required_env_keys(self) -> List[str]:
+        """Best-effort detection of required env keys for known MCP servers."""
+        identity = f"{self.raw_server} {self.command_or_url} {self.mcp_tool_name}".lower()
+        for marker, keys in self._KNOWN_REQUIRED_ENV_KEYS.items():
+            if marker in identity:
+                return list(keys)
+        return []
+
     @classmethod
-    def inspect(cls, server: str, verbose: bool = False, env: Optional[Dict[str, str]] = None, headers: Optional[Dict[str, str]] = None, args: Optional[List[str]] = None, cache: bool = True) -> dict:
+    def _class_inspect(cls, server: str, verbose: bool = False, env: Optional[Dict[str, str]] = None, headers: Optional[Dict[str, str]] = None, args: Optional[List[str]] = None, cache: bool = True) -> dict:
         """
-        Inspect MCP actions using class-style calls only.
+        Inspect MCP actions using class-style calls.
         
         Args:
             server: MCP server identifier (short name, npm package, command, or URL).
@@ -66,12 +107,14 @@ class MCP(BaseConnection):
         
         Example::
         
-            print(MCP.inspect("server-filesystem"))  # See filesystem actions
-            print(MCP.inspect("server-filesystem", verbose=True))
-            print(MCP.inspect("server-github", env={"GITHUB_TOKEN": "..."}))  # GitHub actions
+            print(MCP.inspect(server="server-filesystem"))  # See filesystem actions
+            print(MCP.inspect(server="server-filesystem", verbose=True))
+            print(MCP.inspect(server="server-github", env={"GITHUB_TOKEN": "..."}))  # GitHub actions
         """
         temp = cls(server, env=env or {}, headers=headers or {}, args=args or [], cache=cache)
-        return temp.inspect_instance(verbose=verbose)
+        return temp._do_inspect(verbose=verbose)
+    
+    inspect = _InspectDescriptor()
 
     def __init__(
         self,
@@ -82,6 +125,7 @@ class MCP(BaseConnection):
         headers: Optional[Dict[str, str]] = None,
         name: Optional[str] = None,
         allow: Optional[Union[str, List[str]]] = None,
+        confirm: Union[bool, List[str], None] = True,
         cache: bool = True,
     ):
         """
@@ -91,7 +135,8 @@ class MCP(BaseConnection):
             env: Environment variables (e.g., API keys).
             headers: HTTP headers for SSE connections.
             name: Custom name for this connection in Delfhos (defaults to auto-derived).
-            actions: (Not typically used for MCP) List of allowed action names.
+            allow: List of allowed action names exposed to the agent.
+            confirm: List of action names requiring human approval (use names from MCP.inspect()).
             cache: If True, uses ~/delfhos/mcp_cache/ to skip introspection on next run.
         """
         self.raw_server = server
@@ -111,6 +156,7 @@ class MCP(BaseConnection):
         super().__init__(
             credentials={"env": self.env, "headers": self.headers},
             allow=allow,
+            confirm=confirm,
             name=self.mcp_tool_name,
             auth_type=AuthType.NONE,  # Handled via env/headers transparently
         )
@@ -295,24 +341,11 @@ class MCP(BaseConnection):
         # Keep client reference so we can shut it down later
         self._mcp_client = client
 
-    def inspect_instance(self, verbose: bool = False) -> dict:
+    def _do_inspect(self, verbose: bool = False) -> dict:
         """
-        List available actions on this MCP server.
+        Private helper for inspecting this MCP server instance.
         
-        Args:
-            verbose: If False (default), returns a dict with every available method name.
-                     If True, returns a detailed dict including allowed methods,
-                     every method, and descriptions.
-        
-        Returns:
-            dict in both modes.
-        
-        Example::
-        
-            mcp = MCP("server-filesystem", args=["."])
-            print(mcp.inspect_instance())  # Pretty JSON dict with method names
-            
-            print(mcp.inspect_instance(verbose=True))  # Dict with allowed + methods + descriptions
+        Use mcp.inspect() instead (available on both class and instance).
         """
         from cortex._engine.mcp.compiler import MCPCompiler
         from cortex._engine.mcp.client import MCPClient
@@ -339,6 +372,26 @@ class MCP(BaseConnection):
         for tool in manifest.get("tools", []):
             mcp_name = tool.get("mcp_name", "")
             available_actions.append(mcp_name)
+
+        connection_setup = {
+            "server_input": {
+                "value": self.raw_server,
+                "resolved": self.command_or_url,
+            },
+            "required_env_keys": self._detect_required_env_keys(),
+            "args_format": ["<arg1>", "<arg2>", "--flag=value"],
+            "env_format": {"ENV_VAR_NAME": "value"},
+            "headers_format": {"Header-Name": "value", "Authorization": "Bearer <TOKEN>"},
+            "authentication": {
+                "type": "env_or_headers",
+                "description": "MCP auth is passed via env vars or HTTP headers depending on server requirements.",
+            },
+            "used_in_this_connection": {
+                "args": list(self.args),
+                "env": dict(self.env),
+                "headers": dict(self.headers),
+            },
+        }
         
         if not verbose:
             return _PrettyInspectDict(
@@ -347,6 +400,7 @@ class MCP(BaseConnection):
                     "methods": available_actions,
                     "total": len(available_actions),
                     "auth_type": self.auth_type.value if hasattr(self, 'auth_type') else None,
+                    "connection_setup": connection_setup,
                 }
             )
 
@@ -367,6 +421,23 @@ class MCP(BaseConnection):
                 "methods": methods,
                 "total": len(available_actions),
                 "auth_type": self.auth_type.value if hasattr(self, 'auth_type') else None,
+                "connection_setup": {
+                    **connection_setup,
+                    "examples": [
+                        {
+                            "use_case": "Local filesystem MCP",
+                            "python": 'MCP("server-filesystem", args=["."])',
+                        },
+                        {
+                            "use_case": "GitHub MCP with token in env",
+                            "python": 'MCP("server-github", env={"GITHUB_TOKEN": "ghp_..."})',
+                        },
+                        {
+                            "use_case": "Remote SSE MCP with bearer token",
+                            "python": 'MCP("https://example.com/sse", headers={"Authorization": "Bearer <TOKEN>"})',
+                        },
+                    ],
+                },
             }
         )
 

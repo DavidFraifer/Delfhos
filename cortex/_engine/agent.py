@@ -58,9 +58,12 @@ class Agent:
         agent = Agent(tools=[Gmail(), Drive()], llm="gemini-3.1-flash-lite-preview")
         agent.start().run("Send yesterday's reports to alice@co.com")
     
-    Example (advanced with multiple LLMs):
+    Example (advanced with multiple LLMs and per-tool approval):
         agent = Agent(
-            tools=[WebSearch(), SQL(host="localhost", database="main")],
+            tools=[
+                Gmail(oauth_credentials="secrets.json", allow=["read", "send"], confirm=["send"]),
+                SQL(host="localhost", database="main", confirm=["write"]),
+            ],
             light_llm="gemini-3.1-flash-lite-preview",  # for prefiltering
             heavy_llm="gemini-3.1-pro",  # for code generation
             chat=Chat(keep=5, summarize=True),
@@ -70,22 +73,24 @@ class Agent:
     
     Args:
         tools: List of tool names (str), async functions, or Connection instances.
+               Set confirm= on each Connection/Tool to require approval for specific actions.
         llm: Single LLM for all operations (e.g., "gemini-3.1-flash-lite-preview").
              Shorthand for: light_llm=llm, heavy_llm=llm.
         light_llm: (Advanced) LLM for prefiltering/lightweight tasks (required if not using llm).
         heavy_llm: (Advanced) LLM for code generation (required if not using llm).
+        code_generation_llm: Model used specifically for Python code generation. Defaults to heavy_llm.
+        vision_llm: Model used for image analysis and multimodal tasks. Defaults to heavy_llm.
         chat: Chat(keep=10, summarize=False) — session memory & summarization.
         memory: Optional persistent memory (e.g., SQL database).
         system_prompt: Context injected into every LLM call.
-        confirm: Tools/actions requiring approval before execution ("write", "delete", etc).
+        on_confirm: Approval callback fn(request_id, message) for custom approval handling.
         verbose: If True, print detailed execution traces.
         providers: API key overrides {"google": "...", "openai": "..."}, etc.
     """
     def __init__(self, tools: List[Union[str, Callable, Connection]], llm: Optional[str] = None, light_llm: Optional[str] = None, heavy_llm: Optional[str] = None,
                  agent_id: Optional[str] = None, auto_stop_timeout: Optional[int] = None,
-                 on_confirm: Optional[Callable] = None, confirm: Optional[Union[bool, List[str], str]] = None,
+                 on_confirm: Optional[Callable] = None,
                  system_prompt: Optional[str] = None,
-                 summarizer_llm: Optional[str] = None,
                  prefilter_llm: Optional[str] = None,
                  code_generation_llm: Optional[str] = None,
                  vision_llm: Optional[str] = None,
@@ -93,21 +98,25 @@ class Agent:
                  memory: Optional[Memory] = None,
                  providers: Optional[Dict[str, str]] = None,
                  verbose: bool = False,
+                 enable_prefilter: bool = False,
                  _explicit_llms: Optional[Dict[str, bool]] = None):
         """Initialize an Agent with tools and language models.
         
         Args:
             tools: List of Connection objects, @tool functions, or string names.
+                   Per-tool approval: set confirm= on each tool (e.g., Gmail(confirm=["send"])).
             llm: Single LLM model for all operations (e.g., "gemini-3.1-flash-lite-preview").
             light_llm: Fast LLM for filtering/analysis (use with heavy_llm).
             heavy_llm: Powerful LLM for code generation (use with light_llm).
+            code_generation_llm: Model used specifically for Python code generation. Defaults to heavy_llm.
+            vision_llm: Model used for image analysis and multimodal tasks. Defaults to heavy_llm.
             agent_id: Custom agent identifier (auto-generated if omitted).
             auto_stop_timeout: Auto-stop after N seconds of inactivity (None = never auto-stop).
             on_confirm: Callback fn(request_id, message) for custom approval handling.
-            confirm: Approve-before-executing for actions: True (all), False (none), or list ["read", "write"].
             system_prompt: Custom system instructions for code generation.
-            chat: Chat instance for session memory with auto-summarization.
+            chat: Chat instance for session memory with auto-summarization (set Chat.summarizer_llm for compression).
             memory: Memory instance for persistent semantic storage.
+            enable_prefilter: If True, use LLM to pre-filter relevant tools before code generation (default: False, disabled).
             verbose: If True, print execution traces and debugging info.
             providers: Dict of API provider overrides (internal use).
         
@@ -166,8 +175,6 @@ class Agent:
                        "  2. BOTH 'light_llm' AND 'heavy_llm' parameters"
             })
         
-        resolved_confirm = ["write", "delete"] if confirm is None else confirm
-        
         # Track which LLMs were explicitly provided by the user (not just defaulted)
         # If _explicit_llms is provided (from Cortex wrapper), use that; otherwise infer from Parameters
         if _explicit_llms:
@@ -176,7 +183,6 @@ class Agent:
                 "llm": _explicit_llms.get("llm", llm is not None),
                 "light_llm": _explicit_llms.get("light_llm", light_llm is not None),
                 "heavy_llm": _explicit_llms.get("heavy_llm", heavy_llm is not None),
-                "summarizer_llm": _explicit_llms.get("summarizer_llm", summarizer_llm is not None),
                 "prefilter_llm": prefilter_llm is not None,
                 "code_generation_llm": code_generation_llm is not None,
                 "vision_llm": vision_llm is not None
@@ -187,7 +193,6 @@ class Agent:
                 "llm": llm is not None,
                 "light_llm": light_llm is not None,
                 "heavy_llm": heavy_llm is not None,
-                "summarizer_llm": summarizer_llm is not None,
                 "prefilter_llm": prefilter_llm is not None,
                 "code_generation_llm": code_generation_llm is not None,
                 "vision_llm": vision_llm is not None
@@ -195,7 +200,6 @@ class Agent:
 
         approval_enabled = bool(
             on_confirm is not None
-            or _has_confirm_policy(resolved_confirm)
             or _tools_have_confirm_policies(tools)
         )
         
@@ -203,7 +207,6 @@ class Agent:
         self.agent_id = agent_id or str(uuid.uuid4())
         self.enable_human_approval = approval_enabled
         self.on_confirm = on_confirm
-        self.confirm_policy = resolved_confirm
         self.verbose = verbose
         self.trace_mode = "full" if verbose else "minimal"
         self._last_trace = None
@@ -212,7 +215,6 @@ class Agent:
         models_to_validate = [
             (resolved_light_llm, "light_llm"),
             (resolved_heavy_llm, "heavy_llm"),
-            (summarizer_llm, "summarizer_llm"),
             (prefilter_llm, "prefilter_llm"),
             (code_generation_llm, "code_generation_llm"),
             (vision_llm, "vision_llm")
@@ -228,9 +230,8 @@ class Agent:
         self.llm = llm  # Store original choice (could be None if using light_llm/heavy_llm)
         self.light_llm = resolved_light_llm
         self.heavy_llm = resolved_heavy_llm
-        
+
         # Specific model configurations - use appropriate defaults based on what user chose
-        self.summarizer_llm = summarizer_llm or self.light_llm
         self.prefilter_llm = prefilter_llm or self.light_llm
         self.code_generation_llm = code_generation_llm or self.heavy_llm
         self.vision_llm = vision_llm or self.heavy_llm
@@ -239,12 +240,12 @@ class Agent:
         self.usage = TokenUsage()
         
         self.orchestrator = Orchestrator(
-            logger=self.logger, 
+            logger=self.logger,
             light_llm=self.light_llm,
             heavy_llm=self.heavy_llm,
-            agent_id=self.agent_id, 
+            agent_id=self.agent_id,
             on_confirm=on_confirm,
-            confirm=resolved_confirm,
+            approval_enabled=approval_enabled,
             system_prompt=system_prompt,
             prefilter_llm=self.prefilter_llm,
             code_generation_llm=self.code_generation_llm,
@@ -254,7 +255,8 @@ class Agent:
             trace_mode=self.trace_mode,
             trace_callback=self._update_trace,
             llm_config=self.get_llm_config_string(),
-            verbose="high" if self.verbose else "low"
+            verbose="high" if self.verbose else "low",
+            enable_prefilter=enable_prefilter
         )
         self.running = False
         self.last_called = None  # Track when the agent was last used
@@ -280,6 +282,15 @@ class Agent:
 
     def _update_trace(self, trace: Trace):
         self._last_trace = trace
+
+    def _get_summarizer_llm(self) -> str:
+        """Get the LLM to use for chat summarization.
+
+        Returns the LLM from chat.summarizer_llm if set, otherwise defaults to light_llm.
+        """
+        if self.chat and self.chat.summarizer_llm:
+            return self.chat.summarizer_llm
+        return self.light_llm
     
     def _warmup_clients(self):
         """Eagerly build Google API clients for all connections.
@@ -393,25 +404,28 @@ class Agent:
         
         # Case 2: User chose light_llm and heavy_llm, no specialized overrides
         if explicit["light_llm"] and explicit["heavy_llm"]:
-            specialized = [k for k in ["code_generation_llm", "vision_llm", "summarizer_llm", "prefilter_llm"]
+            specialized = [k for k in ["code_generation_llm", "vision_llm", "prefilter_llm"]
                           if explicit.get(k)]
-            
-            if not specialized:
+
+            # Check if chat has custom summarizer_llm
+            chat_has_custom_summarizer = self.chat and self.chat.summarizer_llm and self.chat.summarizer_llm != self.light_llm
+
+            if not specialized and not chat_has_custom_summarizer:
                 # No specialized overrides, show just light and heavy
                 return f"light_llm: {self.light_llm}, heavy_llm: {self.heavy_llm}"
-            
+
             # User has specialized overrides - show all explicitly provided
             llm_parts = [f"light_llm: {self.light_llm}", f"heavy_llm: {self.heavy_llm}"]
-            
+
             if explicit["code_generation_llm"] and self.code_generation_llm != self.heavy_llm:
                 llm_parts.append(f"code_generation_llm: {self.code_generation_llm}")
             if explicit["vision_llm"] and self.vision_llm != self.heavy_llm:
                 llm_parts.append(f"vision_llm: {self.vision_llm}")
-            if explicit["summarizer_llm"] and self.summarizer_llm != self.light_llm:
-                llm_parts.append(f"summarizer_llm: {self.summarizer_llm}")
+            if chat_has_custom_summarizer:
+                llm_parts.append(f"summarizer_llm: {self.chat.summarizer_llm}")
             if explicit["prefilter_llm"] and self.prefilter_llm != self.light_llm:
                 llm_parts.append(f"prefilter_llm: {self.prefilter_llm}")
-            
+
             return ", ".join(llm_parts)
         
         # Fallback (shouldn't reach here due to validation)
@@ -573,25 +587,26 @@ class Agent:
         try:
             import time
             start_comp = time.time()
+            summarizer = self._get_summarizer_llm()
             result, token_info = await llm_completion_async(
                 prompt=prompt,
-                model=self.summarizer_llm,
+                model=summarizer,
                 max_tokens=300,
                 temperature=0.3
             )
             dur_comp = int((time.time() - start_comp) * 1000)
-            
+
             if token_info and "total_tokens" in token_info:
                 self.usage.summarizer.add(token_info)
                 if self.logger and task_id:
-                    self.logger.add_tokens(task_id, token_info, model=self.summarizer_llm, function_name="mid_session_compress")
-            
+                    self.logger.add_tokens(task_id, token_info, model=summarizer, function_name="mid_session_compress")
+
             if self._last_trace:
                 from .trace import ChatCompressionTrace
                 from datetime import datetime
                 self._last_trace.chat_compression = ChatCompressionTrace(
                     triggered_at=datetime.fromtimestamp(start_comp),
-                    model_used=self.summarizer_llm,
+                    model_used=summarizer,
                     messages_before=compressed_count,
                     messages_after=1,
                     summary_generated=result.strip(),
@@ -862,7 +877,7 @@ Never return null, "none", or plain text."""
                 "llm": self.llm,
                 "light_llm": self.light_llm,
                 "heavy_llm": self.heavy_llm,
-                "summarizer_llm": self.summarizer_llm
+                "summarizer_llm": self._get_summarizer_llm()
             },
             "logging_enabled": self.logger is not None
         }
