@@ -94,7 +94,7 @@ class Connection:
         self._credentials = credentials
         
         # Permissions
-        self.allow = set(allow) if allow else None  # None = all allowed
+        self.allow = set(allow) if allow is not None else None  # None = all allowed
         self.confirm = confirm
         
         # Metadata

@@ -84,6 +84,10 @@ class Memory:
         """Alias for ``search()`` that returns newline-joined content strings."""
         ...
 
+    def add(self, content: str) -> None:
+        """Manually add information to memory from the outside (string or .txt/.md file path)."""
+        ...
+        
     def save(self, content: str) -> None:
         """Store facts in long-term semantic memory.
 

@@ -456,15 +456,21 @@ class Tool:
         Returns a dictionary containing metadata about the tool.
         useful for inspecting available tools and their arguments.
         """
+        params = self.parameters or {}
         return {
-            "name": self.name,
+            "name": self.tool_name,
             "description": self.description,
             "parameters": [
-                {"name": name, "type": p.type, "description": p.description, "required": p.required}
-                for name, p in self.parameters.items()
+                {
+                    "name": name, 
+                    "type": p.get("type"), 
+                    "description": p.get("desc"), 
+                    "required": p.get("required", True)
+                }
+                for name, p in params.items()
             ],
-            "is_async": self.is_async,
-            "has_kwargs": self.has_kwargs
+            "is_async": getattr(self, "_is_async", False),
+            "has_kwargs": getattr(self, "has_kwargs", False)
         }
 
     def run(self, *args, **kwargs) -> Any:

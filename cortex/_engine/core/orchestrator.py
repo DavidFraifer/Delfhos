@@ -29,6 +29,8 @@ from datetime import datetime, timedelta, timezone
 
 
 def _has_confirm_policy(confirm_policy: Any) -> bool:
+    if confirm_policy is None:
+        return True
     if isinstance(confirm_policy, bool):
         return confirm_policy
     if isinstance(confirm_policy, list):
@@ -1714,47 +1716,28 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
             if not memory_guidelines:
                 memory_guidelines = "Store stable user preferences, durable facts, and final decisions."
             memory_tool_section = (
-                "\n\nMEMORY TOOL (enabled):\n"
-                "- You can persist durable facts with: `await memory.save(\"fact\", desc=\"why\")`.\n"
-                "- Save only high-value long-term facts, not transient details.\n"
-                f"- Follow these memory guidelines strictly: {memory_guidelines}\n"
-                "- Prefer concise atomic facts (one fact per save call)."
+                "\n\nMEMORY:\n"
+                f"- `await memory.save(\"fact\", desc=\"why\")` (Markdown. Atomic facts.)\n"
+                f"- Follow: {memory_guidelines}"
             )
 
         python_prompt = f"""Task: "{message}"{sql_schema_section}{connection_context_section}{agent_context_section}{memory_context_section}
 Date: {current_date_str}
 
-BEFORE CODING: Check if task is vague (missing file, email, dates, names). DO NOT guess. Output ONLY a print() asking clarification.
-If search yields 0 results, print query used & ask for better keywords.
-Example vague task "Search invoice":
-```python
-print("Need more details to find invoice:\\n- Sender name/email\\n- approximate date\\n- Keywords\\n- Location")
-```
-Proceed with tools ONLY when info is sufficient.
+BEFORE CODING: If task is vague (missing names/dates/files), output ONLY a print() asking clarification. E.g.: `print("Need keywords to find invoice")`
 
 {python_api_docs}{memory_tool_section}
 
 RULES:
-- ONLY Python code, NO comments/explanations/docstrings. Minimal code. All tools async (await).
-- NEVER pass connection_name to tools—auto-detected.
-- CRITICAL ASYNC: Runs in ALREADY RUNNING event loop. DO NOT use asyncio.run(). Define `async def main():...` & `await main()`.
-- RULE: INTERNAL `files` tool ONLY reads sandbox-uploaded files. DO NOT use `files` to access user desktop/system/local files. Use tools like `filesystem` instead if needed.
-- VISIBILITY: User CANNOT see local files. Only print() is visible. Use Drive/Docs/Sheets for sharing files.
-- CRITICAL LANGUAGE: Match user's language for ALL text: print(), titles, desc="...", search queries, prompts, document content.
-- FORMATTING: Markdown. **bold** titles, lists, format_table(data, title="...") for data. Always print final answer.
-- COST: Prefer imperative code over LLM for simple tasks. LLM ONLY for reasoning/analysis.
-- RESPONSE DEPENDENCY: If your final wording depends on info from a tool call that has not run yet, run the tool first, then call llm.* with that result to craft the response.
-- PARALLEL: Use asyncio.gather() for independent ops. results=await asyncio.gather(*[tool.method(...)]) ✅
+- ONLY Python code. Minimal code. Async (await). NO asyncio.run(); define `async def main():...` & `await main()`.
+- NEVER pass connection_name (auto-detected).
+- `files` tool ONLY reads Sandbox uploads. For local files, use MCP if available.
+- User visibility: ONLY print() is visible. Print final answers. Use Markdown, `format_table()`. Match user language.
+- Order: Wait for tool output before generating text dependent on it.
+- `asyncio.gather(*tasks)` for parallel ops. Prefer imperative code over LLM for simple tasks.
 - Libs: asyncio, json, re, datetime, time, math, statistics. NO pandas.
-- SHEETS: Use sheets.create(title, data=...) to initialize with data in ONE call for faster execution. Avoid separate create() then write().
-- WEBSEARCH: LLM-powered tool. Always request machine-readable format in query when value will be reused (JSON or single scalar).
-- WEBSEARCH STRICT RULES:
-    - If a numeric/date/value is needed for calculations, ask websearch to return ONLY that value or strict JSON with exact keys.
-    - Parse websearch output and use parsed value; NEVER hardcode guessed fallback facts (rates, prices, stats, dates) unless user explicitly requests an estimate.
-    - Preferred pattern: "Return ONLY JSON: {{\"interest_rate_percent\": number, \"source\": string, \"as_of\": string}}" then parse with json.loads(...).
-    - If parsing fails, do not invent values; print a clear message with the raw result and request refinement/retry.
-    - Example scalar: "Current 30-year mortgage rate USA? Return ONLY the number".
-    - Example JSON: "Current 30-year mortgage rate USA. Return ONLY JSON with interest_rate_percent".{examples_section}
+- WEBSEARCH: If value needed, ask "Return ONLY JSON: {{k:v}}" -> `json.loads()`. NEVER hardcode/guess facts if parsing fails, print raw and abort.
+{examples_section}
 
 OUTPUT: Python code ONLY. NO comments. Only print() is visible, use markdown."""
         

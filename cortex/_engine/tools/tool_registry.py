@@ -574,130 +574,36 @@ TOOL_ACTION_SUMMARIES = {
 
 # Compressed API docs per tool+action (~80% smaller than full docs)
 COMPRESSED_API_DOCS = {
-    "gmail:READ": """# gmail.read() - Search and read emails (always includes attachments)
-emails = await gmail.read(max_results=10, query="is:unread", desc="...")
-# Returns: List[Dict] - [{id, subject, from_email, to, date, body, snippet, attachments: [{attachment_id, filename, mime_type, size}]}]
-# Query examples: "from:boss@co.com", "subject:urgent", "newer_than:2026-01-01", "has:attachment"
-# if not emails: print("No emails found for query '...'. Can you provide search keywords?")
-# Download attachments: file_paths = await gmail.download_attachments(email, desc="...")
-# RULE: DO NOT print full email content—a UI card shows it automatically. Print a brief confirmation only.""",
-
-    "gmail:SEND": """# gmail.send() - Send emails
-await gmail.send(to="user@example.com", subject="...", body="...", cc="...", bcc="...", attachments=["path/file.pdf"], desc="...")
-# Returns: dict with success message""",
-
-    "sheets:READ": """# sheets.read() → List[List[Any]] (2D array, first row usually headers)
-data = await sheets.read(sheet_id, range="Sheet1!A1:C10", desc="...")
-# Returns: List[List[Any]] - [[row1_val1, row1_val2], [row2_val1, ...]]""",
-
-    "sheets:WRITE": """# sheets.write() - Write data to spreadsheet (auto-detects format)
-await sheets.write(sheet_id, [["Header1", "Header2"], ["val1", "val2"]], sheet="Sheet1", cell="A1", desc="...")
-# data accepts: List[List], List[Dict] (auto-converts with headers), or CSV string""",
-
-    "sheets:CREATE": """# sheets.create() - Create new Google Sheets (NOT drive:CREATE)
-sheet_id = await sheets.create("Report Title", data=data, desc="...") 
-# OPTIMIZATION: Use 'data' param to initialize with data in ONE call for 2x speed.
-# Returns: str - Spreadsheet ID
-# SQL→Sheets: data = await sql.query(..., as_csv=True); await sheets.create("Report", data=data)""",
-
-    "sql:SCHEMA": """# sql.schema() - Get database structure
-schema = await sql.schema(desc="...")
-# Returns: str - Complete database schema""",
-
-    "sql:QUERY": """# sql.query() → List[Dict] with column names as keys
-results = await sql.query("SELECT id, name FROM users WHERE active = true", desc="...")
-# Returns: List[Dict] - [{\"id\": 1, \"name\": \"John\"}, ...]
-csv_data = await sql.query("SELECT * FROM tasks", as_csv=True, desc="...")  # For Sheets export
-# RULES: Use EXACT column names from schema (do NOT invent/translate). PostgreSQL only. Never call sql.schema(). sql.query(as_csv=True) returns CSV str—use ONLY for sheets.write().""",
-
-    "sql:WRITE": """# sql.execute() - Write operations (auto-approval required)
-result = await sql.execute("UPDATE users SET status = 'active' WHERE id = 1", desc="...")
-result = await sql.execute("INSERT INTO users (name) VALUES ('John')", desc="...")""",
-
-    "drive:SEARCH": """# drive.search() → file_id (str) or None
-file_id = await drive.search(name="Report", mime_type="spreadsheet", desc="...")
-# Returns: file_id (str) or None
-# if not file_id: print("Could not find file '...'. Can you provide exact keywords?")""",
-
-    "drive:UPLOAD": """# drive.upload() - Upload file to Drive
-file_id = await drive.upload("uploads/task_id/file.xlsx", name="Report", folder_id="optional", desc="...")
-# First arg is POSITIONAL: file path string OR raw bytes. Returns: file_id (str)
-# CHARTS: matplotlib available. Pattern: plt.savefig(buf, format="png"); buf.seek(0); link = await drive.upload(buf.getvalue(), name="chart.png"); print(link). ALWAYS use io.BytesIO(), NEVER save to disk.""",
-
-    "drive:GET": """# drive.get() - Download/read file
-content = await drive.get(file_id, desc="...")""",
-
-    "docs:CREATE": """# docs.create() - Create Google Doc (VISIBLE to user)
-doc_id = await docs.create("Report Title", content="markdown text", desc="...")
-# Returns: str - Document ID. Content is optional markdown string.""",
-
-    "docs:READ": """# docs.read() - Read document
-content = await docs.read(doc_id, desc="...")
-# Returns: str - Document content""",
-
-    "docs:UPDATE": """# docs.update() - Append text to document
-await docs.update(doc_id, "New paragraph text", desc="...")""",
-
-    "calendar:LIST": """# calendar.list() → List[{id, summary, start: {dateTime, timeZone}, end: {dateTime, timeZone}, attendees, location}]
-# IMPORTANT: start/end are objects. Access datetime via event['start']['dateTime'] and event['end']['dateTime']
-events = await calendar.list(start="2025-01-01T00:00:00Z", end="2025-01-31T23:59:59Z", desc="...")
-for event in events:
-    start_iso = event['start']['dateTime']  # "2025-01-15T10:00:00Z" (ISO string)
-    end_iso = event['end']['dateTime']
-    summary = event['summary']
-# Returns: List[Dict] with event details""",
-
-    "calendar:CREATE": """# calendar.create() - Create event
-await calendar.create(summary="Meeting", start="2025-01-15T10:00:00Z", end="2025-01-15T11:00:00Z", description="...", desc="...")""",
-
-    "calendar:UPDATE": """# calendar.update() - Update event
-await calendar.update(event_id, summary="New Title", start="...", end="...", desc="...")""",
-
-    "calendar:DELETE": """# calendar.delete() - Delete event
-await calendar.delete(event_id, desc="...")""",
-
-    "websearch:SEARCH": """# websearch.search() → str (comprehensive text summary)
-summary = await websearch.search("Python best practices", max_results=5, desc="...")
-# Returns: str - A multi-paragraph summary with facts, names, dates, and links from the web.""",
-
-    "llm:CALL": """# llm.call() - Universal AI tool for ANY task
-res = await llm.call("Summarize: " + str(data), max_tokens=2000, desc="...")
-# File analysis (ALWAYS pass inside file_data=[file_var], prompt must be first positional arg!)
-vision = await llm.call("Describe", file_data=[file_var])
-# JSON Extract (Auto-parses json):
-data = await llm.call("Extract amount. Return purely JSON: " + '{"amount": 100}')""",
-    "files:READ": """# files.read() - Read UPLOADED task files ONLY (not user filesystem)
-# ⚠️ IMPORTANT: If MCP filesystem tool is available, use that for local/user files instead
-data = await files.read("data.csv", desc="...")  # CSV -> List[Dict] (uploaded files only)
-img = await files.read("chart.png", for_llm=True, desc="...")  # Image for LLM vision (uploaded files only)""",
-
-    "files:SAVE": """# files.save() - Save output files (CRITICAL: HIDDEN from user. Use docs/sheets/print to share)
-await files.save("output.csv", [{"name": "A", "val": 1}], desc="...")  # List[Dict] -> CSV
-await files.save("data.xlsx", data, desc="...")  # List[Dict] -> Excel
-# Use ONLY filename (no paths). Auto-converts: list[dict]→CSV/Excel, dict→JSON. Do NOT import pandas.""",
-
-    "files:LIST": """# files.list() - List uploaded files
-files_list = await files.list()
-# Returns: List[Dict] - [{filename, file_type, size_bytes, path}, ...]""",
-
-
+    "gmail:READ": "gmail.read(max_results=10, query='is:unread') -> List[{id, subject, from_email, to, date, body, snippet, attachments: [{attachment_id, filename, mime_type, size}]}] // Queries: 'from:boss', 'has:attachment'. Download: await gmail.download_attachments(email). ⚠️ Print brief confirm only.",
+    "gmail:SEND": "await gmail.send(to='...', subject='...', body='...', cc='...', bcc='...', attachments=['path/file.pdf']) -> dict",
+    "sheets:READ": "sheets.read(sheet_id, range='Sheet1!A1:C10') -> List[List[Any]] // 2D array, row 1 headers",
+    "sheets:WRITE": "await sheets.write(sheet_id, data, sheet='Sheet1', cell='A1') // data: List[List], List[Dict], or CSV str",
+    "sheets:CREATE": "await sheets.create('Title', data=data) -> str // FAST: init with data in 1 call",
+    "sql:SCHEMA": "await sql.schema() -> str // Get DB schema. DO NOT translate table/col names",
+    "sql:QUERY": "await sql.query('SELECT...', as_csv=False) -> List[Dict] // as_csv=True for Sheets. Use ONLY exact schema names.",
+    "sql:WRITE": "await sql.execute('UPDATE...')",
+    "drive:SEARCH": "await drive.search(name='Report', mime_type='spreadsheet') -> str|None",
+    "drive:UPLOAD": "await drive.upload('path.xlsx' OR bytes, name='Report', folder_id='...') -> str // For plots: plt.savefig(buf, format='png'); buf.seek(0); await drive.upload(buf.getvalue(),...)",
+    "drive:GET": "await drive.get(file_id) -> bytes",
+    "docs:CREATE": "await docs.create('Title', content='markdown') -> str",
+    "docs:READ": "await docs.read(doc_id) -> str",
+    "docs:UPDATE": "await docs.update(doc_id, 'Appended text')",
+    "calendar:LIST": "await calendar.list(start='1970-01-01T00:00:00Z', end='...T..Z') -> List[{id, summary, start: {dateTime}, end: {dateTime}}] // Access var['start']['dateTime']",
+    "calendar:CREATE": "await calendar.create(summary='Meet', start='...T..Z', end='...T..Z', description='...')",
+    "calendar:UPDATE": "await calendar.update(event_id, summary='New', start='...', end='...')",
+    "calendar:DELETE": "await calendar.delete(event_id)",
+    "websearch:SEARCH": "await websearch.search('query', max_results=5) -> str // Returns text summary with links",
+    "llm:CALL": "await llm.call('Summarize: ' + str(data), max_tokens=2000) -> str // File analysis: await llm.call('Desc', file_data=[var]). JSON extract: await llm.call('Extract JSON: {...}')",
+    "files:READ": "await files.read('data.csv') // UPLOADED task files ONLY. CSV->List[Dict]. Image for LLM: files.read('img.png', for_llm=True). local files -> use MCP",
+    "files:SAVE": "await files.save('out.csv', [{'A':1}]) // HIDDEN from user! Save directly to list[dict]->CSV/Excel, dict->JSON. Use Docs/print to share to user.",
+    "files:LIST": "await files.list() -> List[{filename, file_type, size_bytes, path}]",
 }
 
 # Minimal examples per action (only essential patterns)
 COMPRESSED_EXAMPLES = {
-    "gmail:READ": """# gmail.read() → List[{id, subject, from_email, body, date, attachments: [{attachment_id, filename, mime_type, size}]}]
-emails = await gmail.read(max_results=10, query="has:attachment", desc="Finding")
-for email in emails:
-    if email.get('attachments'):
-        paths = await gmail.download_attachments(email, desc="Downloading")""",
-
-    "sheets:WRITE": """csv_data = await sql.query("SELECT * FROM table", as_csv=True, desc="Getting")
-sheet_id = await sheets.create("Report", data=csv_data, desc="Creating & Loading")""",
-
-    "parallel": """# PARALLELIZATION - Use asyncio.gather() for independent operations
-import asyncio
-tasks = [llm.call("Analyze: " + email['body']) for email in emails]
-results = await asyncio.gather(*tasks)""",
+    "gmail:READ": "emails = await gmail.read(query='has:attachment')\nfor e in emails: if e.get('attachments'): await gmail.download_attachments(e)",
+    "sheets:WRITE": "csv = await sql.query('SELECT *', as_csv=True)\nawait sheets.create('Rpt', data=csv)",
+    "parallel": "import asyncio\nresults = await asyncio.gather(*[llm.call(x) for x in items])",
 }
 
 
@@ -707,7 +613,7 @@ def _get_connection_available_actions(conn: Any, available_tools: Dict[str, Set[
     fallback_actions = set(available_tools.get(tool_name, set()))
 
     allow = getattr(conn, 'allow', None)
-    if not allow:
+    if allow is None:
         return fallback_actions
 
     # `allow` may be list/set/tuple or a single string.

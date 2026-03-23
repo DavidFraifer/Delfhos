@@ -1772,7 +1772,7 @@ class MemoryLibrary(ToolLibraryBase):
     Memory Library - Persistent memory writes for durable facts/preferences.
 
     `memory.save(...)` is always available in generated code:
-    - If memory backend is configured: persists facts.
+    - If memory backend is configured: persists facts. Ensure facts are formatted in markdown.
     - If not configured: no-op with a single useful warning.
     """
 

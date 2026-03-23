@@ -331,6 +331,39 @@ class Memory:
                     (mem_id, self._vec_to_blob(vec)),
                 )
 
+    def add(self, content: str):
+        """
+        Manually add information to memory from the outside.
+        
+        Args:
+            content: A direct text string to store, or a path to a .txt or .md file.
+                     If it's a file path, its text will be read and saved to memory.
+        """
+        import os
+        
+        content = str(content).strip()
+        if not content:
+            return
+
+        # Check if it's a path to a supported file
+        if os.path.isfile(content) and (content.lower().endswith('.txt') or content.lower().endswith('.md')):
+            try:
+                with open(content, 'r', encoding='utf-8') as f:
+                    file_text = f.read()
+                    if file_text.strip():
+                        self.save(file_text)
+                    else:
+                        from cortex._engine.utils.console import console
+                        if console:
+                            console.warning("Memory", f"File is empty: {content}")
+            except Exception as e:
+                from cortex._engine.utils.console import console
+                if console:
+                    console.warning("Memory", f"Failed to read file {content}: {e}")
+        else:
+            # Direct text string
+            self.save(content)
+
     def backfill_embeddings(self):
         """Generate embeddings for memories missing them (e.g., after DB migration).
         

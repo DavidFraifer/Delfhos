@@ -21,6 +21,8 @@ def _utcnow() -> datetime:
 
 
 def _has_confirm_policy(confirm_policy: Any) -> bool:
+    if confirm_policy is None:
+        return True
     if isinstance(confirm_policy, bool):
         return confirm_policy
     if isinstance(confirm_policy, list):
@@ -235,6 +237,8 @@ class Agent:
         self.prefilter_llm = prefilter_llm or self.light_llm
         self.code_generation_llm = code_generation_llm or self.heavy_llm
         self.vision_llm = vision_llm or self.heavy_llm
+        self.chat = chat
+        self.memory = memory
         
         self.logger = CORTEXLogger() 
         self.usage = TokenUsage()
@@ -267,9 +271,6 @@ class Agent:
         self.last_activity = self.created_at
         self.inactivity_timer = None
         self.timer_lock = threading.Lock()
-        
-        self.chat = chat
-        self.memory = memory
 
         # Wire chat so every completed task's output is captured as an assistant turn
         if self.chat is not None:
