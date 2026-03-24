@@ -98,6 +98,7 @@ class Cortex:
         providers: Optional[Dict[str, str]] = None,
         verbose: bool = False,
         enable_prefilter: bool = False,
+        retry_count: int = 1,
     ):
         """Initialize an Agent (Cortex) with tools and language models.
 
@@ -117,7 +118,8 @@ class Cortex:
             on_confirm: Approval callback fn(brief) -> bool for custom approval UI.
             verbose: If True, print detailed execution traces and debugging info.
             enable_prefilter: If True, use LLM to pre-filter relevant tools before code generation (default: False, disabled).
-            providers: Override API keys {\"google\": \"...\", \"openai\": \"...\", etc}.
+            retry_count: Number of times to auto-retry execution on failure (default: 1).
+            providers: Override API keys {"google": "...", "openai": "...", etc}.
 
         Example::
 
@@ -160,6 +162,7 @@ class Cortex:
             providers=providers,
             verbose=verbose,
             enable_prefilter=enable_prefilter,
+            retry_count=retry_count,
             _explicit_llms={
                 "light_llm": light_llm is not None,
                 "heavy_llm": heavy_llm is not None,
@@ -394,10 +397,20 @@ class Cortex:
         """Returns the attached Memory instance, if any."""
         return self._agent.memory
 
+
     @property
     def chat(self):
         """Returns the attached Chat instance."""
         return self._agent.chat
+
+    @property
+    def retry_count(self) -> int:
+        """Number of times to auto-retry execution on failure."""
+        return self._agent.retry_count
+
+    @retry_count.setter
+    def retry_count(self, value: int):
+        self._agent.retry_count = value
 
     @property
     def agent_id(self) -> str:

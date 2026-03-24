@@ -101,6 +101,7 @@ class Agent:
                  providers: Optional[Dict[str, str]] = None,
                  verbose: bool = False,
                  enable_prefilter: bool = False,
+                 retry_count: int = 1,
                  _explicit_llms: Optional[Dict[str, bool]] = None):
         """Initialize an Agent with tools and language models.
         
@@ -119,6 +120,7 @@ class Agent:
             chat: Chat instance for session memory with auto-summarization (set Chat.summarizer_llm for compression).
             memory: Memory instance for persistent semantic storage.
             enable_prefilter: If True, use LLM to pre-filter relevant tools before code generation (default: False, disabled).
+            retry_count: Number of times to auto-retry execution on failure (default: 1).
             verbose: If True, print execution traces and debugging info.
             providers: Dict of API provider overrides (internal use).
         
@@ -239,6 +241,7 @@ class Agent:
         self.vision_llm = vision_llm or self.heavy_llm
         self.chat = chat
         self.memory = memory
+        self.retry_count = retry_count
         
         self.logger = CORTEXLogger() 
         self.usage = TokenUsage()
@@ -260,7 +263,8 @@ class Agent:
             trace_callback=self._update_trace,
             llm_config=self.get_llm_config_string(),
             verbose="high" if self.verbose else "low",
-            enable_prefilter=enable_prefilter
+            enable_prefilter=enable_prefilter,
+            retry_count=self.retry_count
         )
         self.running = False
         self.last_called = None  # Track when the agent was last used
@@ -281,8 +285,21 @@ class Agent:
 
         self._tools_configured = False
 
+
     def _update_trace(self, trace: Trace):
         self._last_trace = trace
+
+    @property
+    def retry_count(self) -> int:
+        if hasattr(self, 'orchestrator') and self.orchestrator is not None:
+            return getattr(self.orchestrator, 'retry_count', getattr(self, '_retry_count', 1))
+        return getattr(self, '_retry_count', 1)
+
+    @retry_count.setter
+    def retry_count(self, value: int):
+        self._retry_count = value
+        if hasattr(self, 'orchestrator') and self.orchestrator is not None:
+            self.orchestrator.retry_count = value
 
     def _get_summarizer_llm(self) -> str:
         """Get the LLM to use for chat summarization.

@@ -71,7 +71,7 @@ class Orchestrator:
                  prefilter_llm: Optional[str] = None, code_generation_llm: Optional[str] = None,
                  vision_llm: Optional[str] = None, token_usage=None,
                  memory=None, trace_mode: Union[str, bool] = "full", trace_callback=None, llm_config: Optional[str] = None,
-                 verbose: str = "low", enable_prefilter: bool = False):
+                 verbose: str = "low", enable_prefilter: bool = False, retry_count: int = 1):
         approval_enabled = on_confirm is not None or approval_enabled
 
         # Core configuration
@@ -84,6 +84,7 @@ class Orchestrator:
         self.llm_config = llm_config  # Store LLM configuration string for display in summary
         self.verbose = verbose  # Store verbose logging mode ("low" or "high")
         self.enable_prefilter = enable_prefilter  # Whether to use prefilter for tool selection
+        self.retry_count = retry_count
         
         # Specific model overrides
         self.prefilter_llm = prefilter_llm or self.light_llm
@@ -717,7 +718,9 @@ class Orchestrator:
                     self.current_trace.add_event("exec_complete", "success" if result.get("success") else "error")
                 
                 # Auto-retry on execution failure: re-generate code with error context
-                if not result.get("success") and result.get("error"):
+                for retry_attempt in range(self.retry_count):
+                    if result.get("success") or not result.get("error"):
+                        break
                     error_msg = result["error"]
                     # Retry on code bugs and disallowed action attempts.
                     retryable_errors = ("TypeError", "KeyError", "NameError", "AttributeError", "IndexError", "ValueError", "RuntimeError", "SyntaxError")
