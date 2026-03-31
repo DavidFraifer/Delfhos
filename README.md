@@ -47,7 +47,7 @@ from delfhos.sandbox import MockEmail, MockDatabase
 
 agent = Agent(
     tools=[MockEmail(confirm=False), MockDatabase(confirm=False)],
-    llm="gemini-2.0-flash-lite",
+    llm="gemini-3.1-flash-lite-preview",
 )
 
 agent.run(
@@ -78,7 +78,7 @@ def calculate_discount(price: float, pct: float) -> float:
     """Return price after applying a percentage discount."""
     return price * (1 - pct / 100)
 
-agent = Agent(tools=[calculate_discount], llm="gemini-2.0-flash-lite")
+agent = Agent(tools=[calculate_discount], llm="gemini-3.1-flash-lite-preview")
 agent.run("What is the price of a $120 item with a 15% discount?")
 agent.stop()
 ```
@@ -96,7 +96,7 @@ gmail = Gmail(oauth_credentials="client_secrets.json", allow=["read", "send"], c
 db    = SQL(url="postgresql://user:pass@host/db",       allow=["schema", "query"])
 drive = Drive(oauth_credentials="client_secrets.json",  confirm=True)
 
-agent = Agent(tools=[gmail, db, drive], llm="gemini-2.0-flash-lite")
+agent = Agent(tools=[gmail, db, drive], llm="gemini-3.1-flash-lite-preview")
 agent.run("Check unread emails and log any order mentions to the database.")
 agent.stop()
 ```
@@ -113,8 +113,8 @@ from delfhos import Agent, Chat, Gmail
 
 agent = Agent(
     tools=[Gmail(oauth_credentials="client_secrets.json")],
-    llm="gemini-2.0-flash-lite",
-    chat=Chat(summarizer_llm="gemini-2.0-flash-lite"),
+    llm="gemini-3.1-flash-lite-preview",
+    chat=Chat(summarizer_llm="gemini-3.1-flash-lite-preview"),
 )
 
 agent.run_chat()  # starts a terminal session — type /help for commands
@@ -129,7 +129,7 @@ from delfhos import Agent, Chat, Memory
 
 agent = Agent(
     tools=[...],
-    llm="gemini-2.0-flash-lite",
+    llm="gemini-3.1-flash-lite-preview",
     chat=Chat(keep=8, summarize=True, namespace="my_agent"),    # short-term
     memory=Memory(namespace="my_agent"),                         # long-term semantic
 )
@@ -143,7 +143,7 @@ agent = Agent(
 from delfhos import Agent, MCP
 
 fs = MCP("server-filesystem", args=["."], allow=["read_file", "write_file"])
-agent = Agent(tools=[fs], llm="gemini-2.0-flash-lite")
+agent = Agent(tools=[fs], llm="gemini-3.1-flash-lite-preview")
 agent.run("List all Python files and write a one-line summary for each.")
 agent.stop()
 ```
@@ -175,12 +175,12 @@ agent = Agent(tools=[...], llm="gemini-2.0-flash-lite")
 agent = Agent(tools=[...], llm="gemini-2.0-flash")
 
 # OpenAI
-agent = Agent(tools=[...], llm="gpt-4o-mini")
+agent = Agent(tools=[...], llm="gpt-5)
 agent = Agent(tools=[...], llm="gpt-4o")
 
 # Anthropic
-agent = Agent(tools=[...], llm="claude-3-5-haiku-latest")
-agent = Agent(tools=[...], llm="claude-3-5-sonnet-latest")
+agent = Agent(tools=[...], llm="claude-4-5-haiku")
+agent = Agent(tools=[...], llm="claude-4-6-sonnet")
 ```
 
 Use `light_llm` + `heavy_llm` to split fast prefiltering from heavier code generation:
@@ -188,8 +188,8 @@ Use `light_llm` + `heavy_llm` to split fast prefiltering from heavier code gener
 ```python
 agent = Agent(
     tools=[...],
-    light_llm="gemini-2.0-flash-lite",   # fast, cheap — for tool selection
-    heavy_llm="gemini-2.0-flash",         # stronger — for code generation
+    light_llm="gemini-3.1-flash-lite-preview",   # fast, cheap — for tool selection
+    heavy_llm="claude-4-6-sonnet",         # stronger — for code generation
 )
 ```
 
@@ -200,7 +200,7 @@ agent = Agent(
 The agent cleans up automatically when used as a context manager:
 
 ```python
-with Agent(tools=[...], llm="gemini-2.0-flash-lite") as agent:
+with Agent(tools=[...], llm="gemini-3.1-flash-lite-preview") as agent:
     agent.run("Summarise last week's sales and email it to the team.")
 ```
 
