@@ -10,16 +10,16 @@ MOCK_EMAILS = [
         "id": "msg_1001",
         "threadId": "thr_1001",
         "labelIds": ["INBOX", "UNREAD"],
-        "snippet": "Hi there, could you please check on ticket TCK-8843 for Alice? The invoice seems to be overdue.",
+        "snippet": "Hi there, I am following up on my support ticket TCK8843. The invoice seems to be overdue.",
         "payload": {
             "headers": [
-                {"name": "From", "value": "manager@acmecorp.com"},
+                {"name": "From", "value": "alice@example.com"},
                 {"name": "To", "value": "you@delfhos.sandbox"},
-                {"name": "Subject", "value": "Follow up on Acme Corp invoice"},
+                {"name": "Subject", "value": "Follow up on my invoice - ticket TCK8843"},
                 {"name": "Date", "value": "Wed, 10 Mar 2026 10:30:00 -0400"}
             ],
             "body": {
-                "data": "SGkgdGhlcmUsCgpDb3VsZCB5b3UgcGxlYXNlIGNoZWNrIG9uIHRpY2tldCBUQ0stODg0MyBmb3IgQWxpY2U/IFRoZSBpbnZvaWNlIHNlZW1zIHRvIGJlIG92ZXJkdWUuCgpUaGFua3MsCk1hbmFnZXI=" 
+                "data": "SGkgdGhlcmUsCgpJIGFtIGZvbGxvd2luZyB1cCBvbiBteSBzdXBwb3J0IHRpY2tldCBUQ0s4ODQzLiBUaGUgaW52b2ljZSBzZWVtcyB0byBiZSBvdmVyZHVlLgoKVGhhbmtzLApBbGljZQ=="
             }
         }
     },

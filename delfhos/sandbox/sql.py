@@ -49,7 +49,7 @@ def _init_mock_db(conn):
     cursor.executemany('INSERT INTO orders VALUES (?,?,?,?)', orders)
 
     tickets = [
-        ('TCK-8843', 1, 'Invoice Overdue from Acme Corp?', 'open'),
+        ('TCK8843', 1, 'Invoice Overdue from Acme Corp?', 'open'),
         ('TCK-9921', 2, 'Cannot login', 'closed'),
         ('TCK-9950', 3, 'Upgrade request', 'open')
     ]

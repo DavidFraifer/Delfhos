@@ -1,6 +1,23 @@
 # Delfhos
 
-Delfhos is a Python SDK for building AI agents that use real tools (Gmail, SQL, Drive, MCP, custom functions) with clean orchestration and safe execution.
+Python SDK for building AI agents that use real tools — Gmail, SQL, Drive, Sheets, MCP servers, and your own functions — with safe, human-in-the-loop execution.
+
+> Full documentation at **[delfhos.com/docs](https://delfhos.com/docs)**
+
+---
+
+## How it works
+
+You describe a task in plain English. Delfhos:
+
+1. **Picks** the relevant tools from the ones you configured
+2. **Writes** Python code to accomplish the task
+3. **Executes** that code in a sandbox against your real services
+4. **Retries** automatically if something fails
+
+You stay in control: restrict which actions each tool can take, and require approval before any write, send, or delete.
+
+---
 
 ## Install
 
@@ -8,316 +25,188 @@ Delfhos is a Python SDK for building AI agents that use real tools (Gmail, SQL, 
 pip install delfhos
 ```
 
-From source:
+## API Key
+
+Delfhos supports Gemini, OpenAI, and Anthropic models. Export the key for the provider you want to use:
 
 ```bash
-git clone https://github.com/DavidFraifer/delfhos
-cd delfhos
-pip install -e .
+export GOOGLE_API_KEY="..."    # Gemini
+export OPENAI_API_KEY="..."    # OpenAI
+export ANTHROPIC_API_KEY="..."  # Claude
 ```
 
-## Quick Start
+---
+
+## Try it instantly (no credentials needed)
+
+The sandbox tools come pre-loaded with dummy data so you can run your first agent right now:
 
 ```python
-from delfhos import Agent, WebSearch
+from delfhos import Agent
+from delfhos.sandbox import MockEmail, MockDatabase
 
 agent = Agent(
-    tools=[WebSearch(llm="gpt-5.4-mini")],
-    llm="gemini-3.1-flash-lite-preview",
+    tools=[MockEmail(confirm=False), MockDatabase(confirm=False)],
+    llm="gemini-2.0-flash-lite",
 )
 
-agent.run("What are the top 3 AI trends this week? Keep it short.")
+agent.run(
+    "Read my unread emails. If any mention a support ticket, "
+    "look it up in the database and summarise the customer name, "
+    "open tickets, and total order value."
+)
 agent.stop()
 ```
 
-## Core Concepts
+Or just run the included example:
 
-- `Agent`: public entry point (`from delfhos import Agent`)
-- `tools`: built-in tools (Gmail, SQL, etc), MCP tools, and `@tool` custom functions
-- `Chat`: short-term conversation memory (SQLite persisted, requires `chat=Chat(...)` for `run_chat()`)
-- `Memory`: long-term semantic memory (SQLite + embeddings)
-- `allow`: Action whitelist (`allow=["read", "send"]` restricts to specific actions)
-- `confirm`: Approval requirement (`True` = all need approval, `False` = none, `["action"]` = selective)
-
-## Built-in Tools
-
-```python
-from delfhos import Gmail, SQL, Sheets, Drive, Calendar, Docs, WebSearch, MCP
+```bash
+python examples/hello_delfhos.py
 ```
 
-Examples:
+---
 
-```python
-# allow: restrict which actions are available
-# confirm: when approval is required (True/False/list of actions)
-gmail = Gmail(oauth_credentials="client_secrets.json", allow=["read", "send"], confirm=["send"])
-db = SQL(url="postgresql://user:pass@host/mydb", allow=["schema", "query"], confirm=["write"])
-drive = Drive(oauth_credentials="client_secrets.json", confirm=True)
+## Custom tools
 
-agent = Agent(tools=[gmail, db, drive], llm="gemini-3.1-flash-lite-preview")
-```
-
-**`allow` parameter:**
-- Restricts which actions are available on the tool
-- Default: allow all actions
-- Examples:
-  - Gmail: `allow=["read", "send"]` (prevents other actions)
-  - SQL: `allow=["schema", "query"]` (blocks write operations)
-  - Sheets: `allow=["read"]` (read-only)
-
-**`confirm` parameter:**
-- Controls when human approval is required
-- Default: `True` (approve all actions for safety)
-- Values:
-  - `True`: All actions require approval
-  - `False`: No approval needed
-  - List: Only specific actions require approval, e.g., `confirm=["send", "delete"]` or `confirm=["write"]`
-
-**Inspect tool capabilities:**
-- Class method: `Gmail.inspect()` (all available actions)
-- Instance method: `gmail.inspect()` (per-instance connection info)
-- Verbose: `gmail.inspect(verbose=True)` (detailed descriptions)
-
-**WebSearch special note:**
-- Requires an explicit LLM model: `WebSearch(llm="gemini-3.1-flash-lite-preview")` or `WebSearch(llm="gpt-...")`
-- Can be a different model from the main agent LLM
-- For parseable outputs, request format in the query (e.g., "Return ONLY JSON: {\"rate\": number}").
-
-## Custom Tools
+Decorate any Python function with `@tool` and the agent can call it:
 
 ```python
 from delfhos import Agent, tool
 
 @tool
-async def calculate_total(price: float, tax: float) -> float:
-    return price * (1 + tax)
+def calculate_discount(price: float, pct: float) -> float:
+    """Return price after applying a percentage discount."""
+    return price * (1 - pct / 100)
 
-agent = Agent(
-    tools=[calculate_total],
-    llm="gemini-3.1-flash-lite-preview",
-)
+agent = Agent(tools=[calculate_discount], llm="gemini-2.0-flash-lite")
+agent.run("What is the price of a $120 item with a 15% discount?")
+agent.stop()
 ```
 
-## Interactive Chat Session
+---
 
-For synchronous, interactive terminal chat with full conversation history:
+## Built-in tools
+
+```python
+from delfhos import Gmail, SQL, Sheets, Drive, Calendar, Docs, WebSearch, MCP
+```
+
+```python
+gmail = Gmail(oauth_credentials="client_secrets.json", allow=["read", "send"], confirm=["send"])
+db    = SQL(url="postgresql://user:pass@host/db",       allow=["schema", "query"])
+drive = Drive(oauth_credentials="client_secrets.json",  confirm=True)
+
+agent = Agent(tools=[gmail, db, drive], llm="gemini-2.0-flash-lite")
+agent.run("Check unread emails and log any order mentions to the database.")
+agent.stop()
+```
+
+**`allow`** — restrict which actions are available on the tool (`["read", "send"]`, `["schema", "query"]`, …).  
+**`confirm`** — when human approval is required: `True` (all), `False` (none), or a list of specific actions.
+
+---
+
+## Interactive chat
 
 ```python
 from delfhos import Agent, Chat, Gmail
 
 agent = Agent(
     tools=[Gmail(oauth_credentials="client_secrets.json")],
-    llm="gemini-3.1-flash-lite-preview",
-    chat=Chat(summarizer_llm="gemini-3.1-flash-lite-preview")  # Required for run_chat()
+    llm="gemini-2.0-flash-lite",
+    chat=Chat(summarizer_llm="gemini-2.0-flash-lite"),
 )
 
-agent.run_chat()  # Start interactive terminal session
+agent.run_chat()  # starts a terminal session — type /help for commands
 ```
 
-Features:
-- Type each message at the `You >` prompt.
-- Agent responds with full context from conversation history.
-- Commands: `/help`, `/clear`, `/stop`, `/exit`.
-- Requires: `chat=Chat(...)` parameter at agent creation.
+---
 
-## Memory (Chat + Long-Term)
+## Memory
 
 ```python
-from delfhos import Agent, Chat, Memory, WebSearch
-
-agent = Agent(
-    tools=[WebSearch(llm="gpt-5.4-mini")],
-    chat=Chat(keep=8, summarize=True, namespace="support_agent"),
-    memory=Memory(namespace="support_agent"),
-    llm="gemini-3.1-flash-lite-preview",
-)
-```
-
-Default storage paths:
-- Chat: `~/delfhos/chat/<namespace>.db`
-- Memory: `~/delfhos/memory/<namespace>.db`
-
-Generated task code can persist durable facts with:
-
-```python
-await memory.save("User prefers monthly billing", desc="final preference")
-```
-
-## Approval and Safety
-
-**How `allow` and `confirm` interact:**
-
-`allow` = which actions are AVAILABLE  
-`confirm` = which of those available actions need APPROVAL
-
-Examples:
-
-```python
-# Example 1: Send requires approval, read is free
-gmail = Gmail(oauth_credentials="oauth.json", allow=["read", "send"], confirm=["send"])
-# Agent can: read (no approval), send (approval required)
-# Agent cannot: delete, archive, etc.
-
-# Example 2: Read-only, no approval needed
-sheets = Sheets(oauth_credentials="oauth.json", allow=["read"], confirm=False)
-# Agent can: read (no approval)
-# Agent cannot: write, format, create, etc.
-
-# Example 3: All writes need approval
-db = SQL(url="postgresql://...", allow=["query", "write"], confirm=["write"])
-# Agent can: query (no approval), write (approval required)
-# Agent cannot: schema (if not in allow list)
-
-# Example 4: Default—all available actions need approval
-drive = Drive(oauth_credentials="oauth.json", confirm=True)  # no allow set = all actions available
-# Agent can: all actions, but EACH action requires approval
-```
-
-**Agent-level approval handler:**
-```python
-def my_approval_handler(request):
-    # request has: action, tool, brief, reason
-    return True  # auto-approve all
+from delfhos import Agent, Chat, Memory
 
 agent = Agent(
     tools=[...],
-    llm="gemini-3.1-flash-lite-preview",
-    on_confirm=my_approval_handler  # Replaces default console selector
+    llm="gemini-2.0-flash-lite",
+    chat=Chat(keep=8, summarize=True, namespace="my_agent"),    # short-term
+    memory=Memory(namespace="my_agent"),                         # long-term semantic
 )
 ```
 
-When `on_confirm` is provided:
-- Uses your custom approval handler instead of console prompts
-- Can return `True`/`False`, `(bool, reason)`, or dict with `{"approved": bool, "response": str}`
-- Works with both tool-level `confirm` and agent-level approvals.
+---
 
-## Optional Prefilter
-
-When dealing with many tools, enable tool prefiltering to reduce token costs by ~60%:
-
-```python
-agent = Agent(
-    tools=[...],
-    llm="gemini-3.1-flash-lite-preview",
-    enable_prefilter=True  # Filter relevant tools before code generation
-)
-```
-
-Default: `enable_prefilter=False` (all tools documented in prompts).
-
-## Model Support
-
-Supported model families:
-- `gemini-*`
-- `gpt-*` (including `o1/o3/o4` style IDs)
-- `claude-*`
-
-Example:
-
-```python
-agent = Agent(tools=[...], llm="gemini-3.1-flash-lite-preview")
-```
-
-## Pricing and Cost (USD)
-
-Delfhos calculates LLM cost in USD from a user-editable pricing file:
-
-- `~/delfhos/pricing.json`
-
-Behavior:
-- The file is auto-created on first run.
-- Final execution summary always shows total USD cost.
-- In verbose mode, each LLM call also shows its individual USD cost.
-- Trace exports include total cost and pricing source path.
-- If a model is missing in `pricing.json`, Delfhos does not calculate USD cost for that model and logs a warning.
-
-You can edit prices or add new models at any time:
-
-```json
-{
-    "_comment": "USD per 1M tokens. Edit rates or add models. Wildcards are supported, e.g. gpt-*.",
-    "models": {
-        "gemini-3.1-flash-lite-preview": {
-            "input_per_million": 0.10,
-            "output_per_million": 0.40
-        },
-        "gpt-4o-mini": {
-            "input_per_million": 0.15,
-            "output_per_million": 0.60
-        },
-        "claude-3-5-sonnet": {
-            "input_per_million": 3.00,
-            "output_per_million": 15.00
-        },
-        "gpt-*": {
-            "input_per_million": 1.00,
-            "output_per_million": 4.00
-        }
-    }
-}
-```
-
-## Error System
-
-Delfhos errors include:
-- stable code
-- readable message
-- fix hint
-
-Example shape:
-
-```text
-❌ [ERR-TOOL-001] Delfhos Error
-----------------------------------------
-Message: Tool 'web_search' failed during execution: network timeout
-----------------------------------------
-💡 Hint: Review the arguments sent to the tool...
-```
-
-Main families include:
-- `ERR-TOOL-*`
-- `ERR-CONN-*`
-- `ERR-ENV-*`
-- `ERR-LLM-*`
-- `ERR-MCP-*`
-
-## Minimal MCP Example
+## MCP servers
 
 ```python
 from delfhos import Agent, MCP
 
-fs = MCP(
-    "server-filesystem",
-    args=["."],
-    allow=["read_file", "write_file"],
-)
-
-agent = Agent(tools=[fs], llm="gemini-3.1-flash-lite-preview")
-agent.run("List python files and create a short summary file.")
+fs = MCP("server-filesystem", args=["."], allow=["read_file", "write_file"])
+agent = Agent(tools=[fs], llm="gemini-2.0-flash-lite")
+agent.run("List all Python files and write a one-line summary for each.")
 agent.stop()
 ```
 
-### Inspecting MCP Server Setup
+---
 
-View connection formats and required environment variables:
+## Response object
+
+`agent.run()` returns a `Response` with the result, status, cost, and trace:
 
 ```python
-from delfhos import MCP
+r = agent.run("How many users signed up this week?")
 
-github = MCP("server-github")
-info = github.inspect()
-# Returns:
-# - server_name, short_name, version
-# - connection_setup: args_format, env_format, headers_format, required_env_keys
-# - example commands
-print(info)
+print(r.text)        # agent's answer
+print(r.status)      # True if task succeeded
+print(r.cost_usd)    # cost in dollars (e.g. 0.0003)
+print(r.duration_ms) # wall-clock time in milliseconds
 ```
 
-Common required env keys:
-- `server-github` → `GITHUB_TOKEN`
-- `server-slack` → `SLACK_BOT_TOKEN`
-- `server-asana` → `ASANA_TOKEN`
-- And 15+ others
+---
+
+## Model support
+
+Pass any model string from Gemini, OpenAI, or Anthropic:
+
+```python
+# Gemini
+agent = Agent(tools=[...], llm="gemini-2.0-flash-lite")
+agent = Agent(tools=[...], llm="gemini-2.0-flash")
+
+# OpenAI
+agent = Agent(tools=[...], llm="gpt-4o-mini")
+agent = Agent(tools=[...], llm="gpt-4o")
+
+# Anthropic
+agent = Agent(tools=[...], llm="claude-3-5-haiku-latest")
+agent = Agent(tools=[...], llm="claude-3-5-sonnet-latest")
+```
+
+Use `light_llm` + `heavy_llm` to split fast prefiltering from heavier code generation:
+
+```python
+agent = Agent(
+    tools=[...],
+    light_llm="gemini-2.0-flash-lite",   # fast, cheap — for tool selection
+    heavy_llm="gemini-2.0-flash",         # stronger — for code generation
+)
+```
+
+---
+
+## Context manager
+
+The agent cleans up automatically when used as a context manager:
+
+```python
+with Agent(tools=[...], llm="gemini-2.0-flash-lite") as agent:
+    agent.run("Summarise last week's sales and email it to the team.")
+```
+
+---
+
+For the full API reference and advanced guides see [DOCS.md](DOCS.md) or **[delfhos.com/docs](https://delfhos.com/docs)**.
 
 ## License
 
