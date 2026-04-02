@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "delfhos"
-version = "0.5.4"
+version = "0.5.5"
 description = "Delfhos — AI agent SDK with typed connections and tool orchestration"
 keywords = ["ai", "agents", "sdk", "automation", "mcp", "gemini"]
 authors = [

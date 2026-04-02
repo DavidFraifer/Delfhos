@@ -343,9 +343,9 @@ class Orchestrator:
                 return
         task_entries.append(entry)
     
-    async def track_tool_timing_async(self, task_id: str, tool_name: str, duration: float, model: str = None, description: str = None, is_starting: bool = False, metadata: Optional[Dict[str, Any]] = None):
+    async def track_tool_timing_async(self, task_id: str, tool_name: str, duration: float, model: str = None, description: str = None, is_starting: bool = False, metadata: Optional[Dict[str, Any]] = None, wait_time: float = 0.0):
         """Async version of track_tool_timing that properly awaits the callback"""
-        timing_entry = self._track_tool_timing_internal(task_id, tool_name, duration, model, description, is_starting, metadata)
+        timing_entry = self._track_tool_timing_internal(task_id, tool_name, duration, model, description, is_starting, metadata, wait_time=wait_time)
         
         # Properly await the callback if set
         if timing_entry and self.tool_timing_callback:
@@ -358,7 +358,7 @@ class Orchestrator:
             except Exception as e:
                 print(f"[TRACK_TIMING_ASYNC] Callback error: {e}")
     
-    def _track_tool_timing_internal(self, task_id: str, tool_name: str, duration: float, model: str = None, description: str = None, is_starting: bool = False, metadata: Optional[Dict[str, Any]] = None):
+    def _track_tool_timing_internal(self, task_id: str, tool_name: str, duration: float, model: str = None, description: str = None, is_starting: bool = False, metadata: Optional[Dict[str, Any]] = None, wait_time: float = 0.0):
         """Internal method that handles timing entry creation/update. Returns the timing entry if callback should be triggered."""
         if task_id not in self.task_tool_timings:
             self.task_tool_timings[task_id] = []
@@ -379,7 +379,7 @@ class Orchestrator:
                     existing_desc = (existing.get('description') or "").strip().lower()
                     
                     # Match: same tool, same description, and no duration (ongoing step)
-                    if (existing_tool == tool_name and 
+                    if (existing_tool == tool_name and
                         existing_desc == normalized_desc and
                         (existing_duration is None or existing_duration == 0)):
                         # Found the starting entry - update it with duration
@@ -390,6 +390,8 @@ class Orchestrator:
                         # Update metadata if provided (e.g., sheet_link, drive_link)
                         if metadata:
                             existing['ui_metadata'] = metadata
+                        if wait_time > 0.0:
+                            existing['wait_time'] = wait_time
                         self._emit_phase_progress(task_id, tool_name, description, is_starting=False, duration=duration)
                         return existing  # Return updated entry for callback
         
@@ -446,6 +448,8 @@ class Orchestrator:
                 timing_entry['description'] = description
             if metadata:
                 timing_entry['ui_metadata'] = metadata
+            if wait_time > 0.0:
+                timing_entry['wait_time'] = wait_time
             self.task_tool_timings[task_id].append(timing_entry)
             self._emit_phase_progress(task_id, tool_name, description, is_starting=False, duration=duration)
             return timing_entry  # Return new entry for callback
@@ -799,7 +803,7 @@ CRITICAL STATE PRESERVATION: All variables defined in the PREVIOUS CODE before i
                                 model=self.code_generation_llm,
                                 prompt=retry_prompt,
                                 temperature=0.0,
-                                max_tokens=1500,
+                                max_tokens=4000,
                                 response_format=None
                             )
                             retry_llm_duration = time.time() - retry_llm_start
@@ -998,7 +1002,8 @@ CRITICAL STATE PRESERVATION: All variables defined in the PREVIOUS CODE before i
                 for entry in completed_tools:
                     tool_name = entry.get('tool', 'unknown')
                     # Avoid duplicate rows when a phase already appears as a detailed LLM call.
-                    if tool_name in duplicated_phase_tools or tool_name in llm_function_names:
+                    # Also skip awaiting_approval — its wait time is already shown inline on the tool row.
+                    if tool_name in duplicated_phase_tools or tool_name in llm_function_names or tool_name == "awaiting_approval":
                         continue
                     timeline_items.append({
                         'type': 'tool',
@@ -1008,6 +1013,7 @@ CRITICAL STATE PRESERVATION: All variables defined in the PREVIOUS CODE before i
                         'description': entry.get('description', ''),
                         'duration': entry.get('duration', 0),
                         'status': entry.get('status', 'unknown'),
+                        'wait_time': entry.get('wait_time', 0),
                     })
                 
                 # Sort by timestamp
@@ -1025,8 +1031,15 @@ CRITICAL STATE PRESERVATION: All variables defined in the PREVIOUS CODE before i
                 for idx, item in enumerate(timeline_items, 1):
                     name = item['name']
                     duration_val = item.get('duration', 0) or 0
-                    duration_str = f"{duration_val:.2f}s" if duration_val > 0 else "-"
-                    
+                    wait_val = item.get('wait_time', 0) or 0
+                    exec_val = max(duration_val - wait_val, 0)
+                    if duration_val <= 0:
+                        duration_str = "-"
+                    elif wait_val > 0.05:
+                        duration_str = f"{exec_val:.2f}s[dim] (+{wait_val:.1f}s wait)[/dim]"
+                    else:
+                        duration_str = f"{duration_val:.2f}s"
+
                     if item['type'] == 'llm':
                         c_val = item['cost_usd']
                         c_str = f"${c_val:.6f}" if c_val is not None else "None"
@@ -1737,7 +1750,7 @@ RULES:
 - `files` tool ONLY reads Sandbox uploads. For local files, use MCP if available.
 - User visibility: ONLY print() is visible. Print final answers. Use Markdown, `format_table()`. Match user language.
 - Order: Wait for tool output before generating text dependent on it.
-- `asyncio.gather(*tasks)` for parallel ops. Prefer imperative code over LLM for simple tasks.
+- Processing N items (emails, rows, files): ALWAYS `asyncio.gather(*[process(x) for x in items])`, NEVER sequential `for` loops with `await`.
 - Libs: asyncio, json, re, datetime, time, math, statistics. NO pandas.
 - WEBSEARCH: If value needed, ask "Return ONLY JSON: {{k:v}}" -> `json.loads()`. NEVER hardcode/guess facts if parsing fails, print raw and abort.
 {examples_section}
@@ -1754,9 +1767,9 @@ OUTPUT: Python code ONLY. NO comments. Only print() is visible, use markdown."""
             
             llm_result = await llm_completion_async(
                 model=self.code_generation_llm,
-                prompt=python_prompt, 
-                temperature=0.0, 
-                max_tokens=1500,
+                prompt=python_prompt,
+                temperature=0.0,
+                max_tokens=4000,
                 response_format=None
             )
             llm_duration = time.time() - llm_start_time
@@ -1784,7 +1797,7 @@ OUTPUT: Python code ONLY. NO comments. Only print() is visible, use markdown."""
             
             # Extract Python code from response
             python_code = parse_python_code(response)
-            
+
             if python_code and python_code.strip():
                 if self.current_trace:
                     from datetime import datetime

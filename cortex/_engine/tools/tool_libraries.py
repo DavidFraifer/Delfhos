@@ -45,12 +45,14 @@ def _resolve_effective_confirm_policy(
     """Resolve confirm policy precedence.
 
     Order:
-    1) tool_confirm=True      -> hard override (always ask)
-    2) agent_confirm policy   -> deployment-time policy
-    3) fallback policy        -> per-connection/per-call fallback
+    1) tool_confirm=True/False -> hard override (always/never ask)
+    2) agent_confirm policy    -> deployment-time policy
+    3) fallback policy         -> per-connection/per-call fallback
     """
     if tool_confirm_policy is True:
         return True, True
+    if tool_confirm_policy is False:
+        return False, True
 
     if agent_confirm_policy is not None:
         return _normalize_confirm_policy(agent_confirm_policy), False
@@ -127,12 +129,16 @@ async def _request_unified_approval(
     if ui_metadata and isinstance(ui_metadata, dict):
         metadata.update(ui_metadata)
 
+    _approval_start = time.time()
     approved = await orchestrator.require_approval(
         task_id=task_id,
         message=message or default_message,
         context=context_json,
         ui_metadata=metadata,
     )
+    _wait_duration = time.time() - _approval_start
+    if tool_tracker and hasattr(tool_tracker, "add_pending_wait"):
+        tool_tracker.add_pending_wait(_wait_duration)
     return True
 
 
@@ -323,6 +329,21 @@ class ToolLibraryBase:
             if isinstance(context, dict) and context.get("action"):
                 action_name = str(context.get("action")).strip().lower().replace("-", "_")
 
+            # Always print tool activity so the user has context during long tasks
+            _verbose = "low"
+            if self.tool_tracker and getattr(self.tool_tracker, "orchestrator", None):
+                _verbose = getattr(self.tool_tracker.orchestrator, "verbose", "low")
+            _tool_msg = f"[{tool_name}] {desc or f'Running {tool_name}'}"
+            if _verbose == "high":
+                _parts = []
+                if action_name:
+                    _parts.append(f"action={action_name}")
+                if connection_name:
+                    _parts.append(f"connection={connection_name}")
+                console.tool(_tool_msg, " | ".join(_parts) if _parts else None, task_id=self.task_id, agent_id=self.agent_id)
+            else:
+                console.tool(_tool_msg, task_id=self.task_id, agent_id=self.agent_id)
+
             result = await self.tool_manager.execute_tool(
                 connection_name,
                 context=context,
@@ -370,13 +391,14 @@ class ToolLibraryBase:
             
             raise
 
-    def _get_confirm_policy(self, connection_name: Optional[str] = None, default: Union[str, bool] = False) -> Union[str, bool]:
+    def _get_confirm_policy(self, connection_name: Optional[str] = None, default: Union[str, bool] = True) -> Union[str, bool]:
         if connection_name and hasattr(self.tool_manager, "connections"):
             conn = self.tool_manager.connections.get(connection_name)
             if conn is not None:
                 policy = getattr(conn, "confirm", None)
                 if policy is not None:
                     return policy
+                return True  # confirm not configured → ask for everything
         return default
 
 
@@ -674,6 +696,17 @@ class SheetsLibrary(ToolLibraryBase):
             params["data"] = data
             params["sheet"] = sheet
 
+        await _request_unified_approval(
+            tool_tracker=self.tool_tracker,
+            task_id=self.task_id,
+            tool_name="sheets",
+            action_name="create",
+            confirm_policy=self._get_confirm_policy(conn_name, default="write"),
+            connection_name=conn_name,
+            message=desc or f"Approve creating spreadsheet: {title}",
+            context_payload={"title": title, "sheet": sheet},
+        )
+
         try:
             result = await self.tool_manager.execute_tool(
                 conn_name,
@@ -789,6 +822,16 @@ class SheetsLibrary(ToolLibraryBase):
         # Auto-detect and normalize data format
         if isinstance(data, str):
             # CSV string — use csv loader
+            await _request_unified_approval(
+                tool_tracker=self.tool_tracker,
+                task_id=self.task_id,
+                tool_name="sheets",
+                action_name="write",
+                confirm_policy=self._get_confirm_policy(conn_name, default="write"),
+                connection_name=conn_name,
+                message=desc or f"Approve writing CSV data to {sheet}!{cell}",
+                context_payload={"spreadsheet_id": spreadsheet_id, "sheet_name": sheet, "start_cell": cell},
+            )
             return await self._execute_tool(conn_name, {
                 "action": "BATCH",
                 "params": {
@@ -1187,11 +1230,22 @@ class DriveLibrary(ToolLibraryBase):
             mime_type = mimetypes.guess_type(file_path)[0] or ""
         
         description = desc or f"Uploading {name} to Drive"
-        
+
+        await _request_unified_approval(
+            tool_tracker=self.tool_tracker,
+            task_id=self.task_id,
+            tool_name="drive",
+            action_name="upload",
+            confirm_policy=self._get_confirm_policy(conn_name),
+            connection_name=conn_name,
+            message=description,
+            context_payload={"name": name, "folder_id": folder_id},
+        )
+
         # Track start
         if self.tool_tracker:
             await self.tool_tracker.track_start(tool_name, description)
-        
+
         try:
             # Build params based on whether we have raw bytes or a file path
             params = {
@@ -1500,13 +1554,24 @@ class DocsLibrary(ToolLibraryBase):
         if self.tool_tracker:
             await self.tool_tracker.track_start("docs", desc or f"Creating doc: {title}")
         
+        await _request_unified_approval(
+            tool_tracker=self.tool_tracker,
+            task_id=self.task_id,
+            tool_name="docs",
+            action_name="create",
+            confirm_policy=self._get_confirm_policy(conn_name),
+            connection_name=conn_name,
+            message=desc or f"Approve creating document: {title}",
+            context_payload={"title": title},
+        )
+
         try:
             # 1. Create the document and update content if supplied
             params = {"title": title}
             if content:
                 ops = self._markdown_to_ops(content, start_index=1)
                 params["operations"] = ops
-                
+
             result = await self.tool_manager.execute_tool(
                 conn_name,
                 context={
@@ -1570,9 +1635,19 @@ class DocsLibrary(ToolLibraryBase):
 
     async def update(self, document_id: str, content: str, desc: str = None) -> None:
         conn_name = self._get_docs_connection()
+        await _request_unified_approval(
+            tool_tracker=self.tool_tracker,
+            task_id=self.task_id,
+            tool_name="docs",
+            action_name="update",
+            confirm_policy=self._get_confirm_policy(conn_name),
+            connection_name=conn_name,
+            message=desc or f"Approve updating document: {document_id}",
+            context_payload={"document_id": document_id},
+        )
         # Use Markdown-aware operations
         ops = self._markdown_to_ops(content, start_index=1)
-        
+
         await self.tool_manager.execute_tool(
             conn_name,
             {
@@ -1582,7 +1657,11 @@ class DocsLibrary(ToolLibraryBase):
                     "operations": ops
                 }
             },
-            desc=desc or f"Updating doc: {document_id}"
+            task_id=self.task_id,
+            light_llm=self.light_llm,
+            heavy_llm=self.heavy_llm,
+            agent_id=self.agent_id,
+            validation_mode=False
         )
 
 
@@ -1640,11 +1719,11 @@ class CalendarLibrary(ToolLibraryBase):
         # Fallback if already a list
         return result if isinstance(result, list) else []
     
-    async def create(self, summary: str, start: str, end: str, 
+    async def create(self, summary: str, start: str, end: str,
                     description: str = "", location: str = "", desc: str = None) -> dict:
         """
         Create a calendar event.
-        
+
         Args:
             summary: Event title
             start: Start time (ISO 8601: "2025-01-15T10:00:00Z")
@@ -1652,6 +1731,16 @@ class CalendarLibrary(ToolLibraryBase):
             desc: Optional description for tracking (e.g., "Creating team meeting")
         """
         conn_name = self._get_calendar_connection()
+        await _request_unified_approval(
+            tool_tracker=self.tool_tracker,
+            task_id=self.task_id,
+            tool_name="calendar",
+            action_name="create",
+            confirm_policy=self._get_confirm_policy(conn_name),
+            connection_name=conn_name,
+            message=desc or f"Approve creating calendar event: {summary}",
+            context_payload={"summary": summary, "start": start, "end": end, "location": location},
+        )
         return await self._execute_tool(conn_name, {
             "action": "CREATE",
             "params": {
@@ -1982,19 +2071,7 @@ class LLMLibrary(ToolLibraryBase):
             
             # Return only the content to the agent, never token info
             if isinstance(response_text, str):
-                cleaned = response_text.strip()
-                
-                # Auto-parse JSON if it's strictly a json structure, removing markdown
-                if ('```json' in cleaned and '```' in cleaned.split('```json', 1)[1]) or (cleaned.startswith('{') and cleaned.endswith('}')) or (cleaned.startswith('[') and cleaned.endswith(']')):
-                    from cortex._engine.utils.llm_utils import clean_json_from_markdown
-                    import json
-                    try:
-                        parsed = clean_json_from_markdown(cleaned)
-                        return json.loads(parsed)
-                    except (json.JSONDecodeError, ValueError):
-                        pass # Fallback to string if strictly not json
-                
-                return cleaned
+                return response_text.strip()
             return result_str
         except Exception as e:
             # Track LLM call failure
@@ -2151,8 +2228,8 @@ def _wrap_for_tracking(tool_name: str, tool_obj: Any, tool_tracker: Any) -> Any:
                 connections = getattr(orchestrator.tools, "connections", {})
                 for conn in connections.values():
                     if getattr(conn, "tool_name", "").lower() == str(tool_name).lower() and conn.is_active():
-                        return conn, getattr(conn, "confirm", False)
-                return None, False
+                        return conn, getattr(conn, "confirm", True)
+                return None, True
                 
             def __getattr__(self, name: str):
                 if name.startswith("_"):
@@ -2214,14 +2291,14 @@ def _wrap_for_tracking(tool_name: str, tool_obj: Any, tool_tracker: Any) -> Any:
                 
             async def __call__(self, *args, **kwargs):
                 ui_metadata = {"_tool_trace_args": _bind_arguments(self._original, args, kwargs)}
-                tool_confirm_policy = getattr(self._original, "confirm", False)
+                tool_confirm_policy = getattr(self._original, "confirm", None)
                 description = getattr(self._original, "description", "")
                 await _request_unified_approval(
                     tool_tracker=tool_tracker,
                     task_id=tool_tracker.task_id,
                     tool_name=tool_name,
                     action_name=None,
-                                        confirm_policy=False,
+                    confirm_policy=True,
                     tool_confirm_policy=tool_confirm_policy,
                     connection_name=tool_name,
                     message=f"Approve custom tool call: {tool_name}",

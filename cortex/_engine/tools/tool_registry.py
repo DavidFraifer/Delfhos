@@ -601,7 +601,7 @@ COMPRESSED_API_DOCS = {
 
 # Minimal examples per action (only essential patterns)
 COMPRESSED_EXAMPLES = {
-    "gmail:READ": "emails = await gmail.read(query='has:attachment')\nfor e in emails: if e.get('attachments'): await gmail.download_attachments(e)",
+    "gmail:READ": "import asyncio\nemails = await gmail.read(query='has:attachment')\nasync def process(e):\n    if e.get('attachments'): await gmail.download_attachments(e)\n    return e\nresults = await asyncio.gather(*[process(e) for e in emails])",
     "sheets:WRITE": "csv = await sql.query('SELECT *', as_csv=True)\nawait sheets.create('Rpt', data=csv)",
     "parallel": "import asyncio\nresults = await asyncio.gather(*[llm.call(x) for x in items])",
 }

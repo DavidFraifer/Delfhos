@@ -223,6 +223,11 @@ class ToolExecutionTracker:
         self.task_id = task_id
         self.active_calls = {}  # call_id -> {tool_name, start_time, description, ui_metadata}
         self.call_counter = 0  # Unique ID for each call (supports parallel execution)
+        self._pending_wait: float = 0.0  # Approval wait time to be recorded on the next track_end
+
+    def add_pending_wait(self, duration: float):
+        """Called by _request_unified_approval to register how long the user took to approve."""
+        self._pending_wait += max(duration, 0.0)
     
     async def track_start(self, tool_name: str, description: str, ui_metadata: Optional[Dict[str, Any]] = None, model: str = None):
         """Track the start of a tool call and emit starting entry to frontend immediately
@@ -307,6 +312,10 @@ class ToolExecutionTracker:
                 "ui_metadata": final_metadata,
             }
         
+        # Consume any pending approval wait time accumulated for this tool call
+        wait_time = self._pending_wait
+        self._pending_wait = 0.0
+
         # Track in orchestrator (this will trigger the callback to frontend)
         # Use async version to properly await the callback during Python execution
         if self.orchestrator:
@@ -319,6 +328,7 @@ class ToolExecutionTracker:
                 description=final_description,
                 is_starting=False,
                 metadata=final_metadata,
+                wait_time=wait_time,
             )
 
 
@@ -742,22 +752,28 @@ def parse_python_code(llm_response: str) -> str:
         c = re.sub(r'asyncio\.run\s*\(\s*(.*?)\s*\)', r'await \1', c)
         return c
 
+    import re as _re
+
+    def _find_fence_end(text: str, after: int) -> int:
+        """Find a closing ``` that sits alone on its own line (the real fence closer)."""
+        m = _re.search(r'(?m)^[ \t]*```[ \t]*$', text[after:])
+        return after + m.start() if m else -1
+
     # Check for markdown code blocks (most reliable extraction)
     if "```python" in response:
         # Extract the LAST ```python ... ``` block (thinking text might have earlier fragments)
         last_start = response.rfind("```python")
         start = last_start + 9
-        end = response.find("```", start)
+        end = _find_fence_end(response, start)
         if end != -1:
             code = response[start:end].strip()
             if _looks_like_python_code(code):
                 return _finalize_code(code)
-    
+
     elif "```" in response:
         # Generic code block - use the last one
         last_start = response.rfind("```")
         # Find the opening ``` before this closing one
-        # Search backwards for the opening block
         search_area = response[:last_start]
         block_start = search_area.rfind("```")
         if block_start != -1:
@@ -766,7 +782,10 @@ def parse_python_code(llm_response: str) -> str:
             newline_pos = response.find("\n", start)
             if newline_pos != -1 and newline_pos < last_start:
                 start = newline_pos + 1
-            code = response[start:last_start].strip()
+            end = _find_fence_end(response, start)
+            if end == -1:
+                end = last_start
+            code = response[start:end].strip()
             if _looks_like_python_code(code):
                 return _finalize_code(code)
     
