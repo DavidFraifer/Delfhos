@@ -10,7 +10,6 @@ WEBSEARCH_LLM = "gemini-3.1-flash-lite-preview"
 
 
 async def _llm_web_search(query: str, task_id: str, model: str, agent_id: str = None) -> tuple[str, dict]:
-    console.tool("Web Search", "LLM-integrated web search", task_id=task_id, agent_id=agent_id)
 
     # Simplified system message for faster and more direct responses
     system_message = """You are a fast and precise research assistant. When searching the web, provide concise, factual information including:
@@ -71,19 +70,13 @@ async def web_search(query: str, task_id=1, _fast_search=True, model: str = None
         raise ToolDefinitionError(detail="Web search requires a query parameter")
     
     query = query.strip()
-    console.info("Web Search", f"Searching for: '{query}'", task_id=task_id, agent_id=agent_id)
-    
     # Lazy validation: validate model supports web search at execution time
     search_llm = model or WEBSEARCH_LLM
     if not validate_search_model(search_llm):
         error_msg = get_search_support_error_message(search_llm)
         raise ToolDefinitionError(detail=error_msg)
-    
-    console.tool("Web Search", "Initiating LLM web search", task_id=task_id, agent_id=agent_id)
+
     summary, token_info = await _llm_web_search(query=query, task_id=task_id, model=search_llm, agent_id=agent_id)
-    
-    total_duration = time.perf_counter() - start_time
-    console.info("Web Search", f"Total web_search execution time: {total_duration:.2f}s", task_id=task_id, agent_id=agent_id)
 
     input_tokens = token_info.get("input_tokens", 0)
     output_tokens = token_info.get("output_tokens", 0)
@@ -99,12 +92,7 @@ async def web_search(query: str, task_id=1, _fast_search=True, model: str = None
         "llm_calls": token_info.get("llm_calls", 1),
     }
 
-    console.info(
-        "Web Search",
-        f"Search completed. Tokens: {merged_tokens['tokens_used']} | Calls: {merged_tokens['llm_calls']}",
-        task_id=task_id,
-        agent_id=agent_id,
-    )
+    console.debug("Web Search", f"{total_tokens} tokens in {time.perf_counter() - start_time:.2f}s", task_id=task_id, agent_id=agent_id)
 
     return summary, merged_tokens
 

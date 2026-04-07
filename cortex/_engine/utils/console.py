@@ -6,7 +6,7 @@ from enum import Enum
 from typing import Optional, Dict
 
 from rich.console import Console, Group
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.panel import Panel
 from rich.table import Table
 from rich.markdown import Markdown
@@ -64,7 +64,7 @@ def extract_error_payload(exc: BaseException) -> tuple[str, str, str]:
 
 class LogLevel(Enum):
     INFO = "INFO"
-    SUCCESS = "SUCCESS" 
+    SUCCESS = "SUCCESS"
     WARNING = "WARNING"
     ERROR = "ERROR"
     DEBUG = "DEBUG"
@@ -74,30 +74,40 @@ class LogLevel(Enum):
 
 def convert_markdown_links_to_rich(text: str) -> str:
     """Convert markdown links [text](url) to Rich clickable links [link=url]text[/link]"""
-    # Pattern: [text](url)
     pattern = r'\[([^\]]+)\]\(([^\)]+)\)'
     replacement = r'[link=\2]\1[/link]'
     return re.sub(pattern, replacement, text)
 
 class ProfessionalConsole:
+    """Minimal, clean console output inspired by modern CLI tools."""
+
+    _SYMBOLS = {
+        LogLevel.INFO: "●",
+        LogLevel.SUCCESS: "✓",
+        LogLevel.WARNING: "!",
+        LogLevel.ERROR: "✗",
+        LogLevel.DEBUG: "·",
+        LogLevel.TASK: "◆",
+        LogLevel.SYSTEM: "◆",
+        LogLevel.TOOL: "▸",
+    }
+
     def __init__(self, enable_colors: bool = True):
         import sys
-        # Always output to the true stderr, bypassing python execution sandbox redirects
         self.console = Console(file=sys.__stderr__)
         self._lock = threading.Lock()
-        self.start_time = time.time()  # Track relative time from session start
-        
+        self.start_time = time.time()
+        self.verbose = False  # Set by orchestrator based on verbose="high"
+
         self.progress = Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            TimeElapsedColumn(),
+            TextColumn("  "),
+            SpinnerColumn(spinner_name="dots", style="bright_cyan", speed=1.2),
+            TextColumn("{task.description}"),
             console=self.console,
             transient=True
         )
         self.active_tasks: Dict[str, int] = {}
-        # We start the progress live viewer 
+        self._loading_tasks: Dict[str, int] = {}
         self.progress.start()
 
     def _get_color(self, level: LogLevel) -> str:
@@ -116,80 +126,98 @@ class ProfessionalConsole:
     def print(self, level: LogLevel, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None):
         with self._lock:
             color = self._get_color(level)
-            elapsed_ms = int((time.time() - self.start_time) * 1000)
-            # Format time: ms for <1000ms, seconds with 2 decimals for >=1000ms
-            if elapsed_ms < 1000:
-                time_str = f"+{elapsed_ms}ms"
-            else:
-                time_str = f"+{elapsed_ms / 1000:.2f}s"
-            prefix = f"[dim]{time_str:>10}[/dim] \\[[bold {color}]{level.value:^7}[/bold {color}]]"
-            
-            text = f"{prefix} {message}"
+            symbol = self._SYMBOLS.get(level, "●")
+
+            parts = []
+
+            # Timestamps only in verbose mode
+            if self.verbose:
+                elapsed_ms = int((time.time() - self.start_time) * 1000)
+                if elapsed_ms < 1000:
+                    time_str = f"+{elapsed_ms}ms"
+                else:
+                    time_str = f"+{elapsed_ms / 1000:.2f}s"
+                parts.append(f"[grey50]{time_str:>10}[/grey50]")
+
+            parts.append(f"  [{color}]{symbol}[/{color}] {message}")
+
             if details:
-                text += f" [dim]{details}[/dim]"
-                
-            self.console.print(text)
+                parts.append(f"  [grey50]{details}[/grey50]")
 
-    def start_progress(self, task_name: str, task_id: str):
-        if task_id not in self.active_tasks:
-            self.active_tasks[task_id] = self.progress.add_task(f"[cyan]Task: {task_id}[/cyan] - {task_name}", total=100)
-            
-    def update_progress(self, task_id: str, description: str = None, advance: float = 0, completed: float = None):
-        if task_id in self.active_tasks:
-            task = self.active_tasks[task_id]
-            kwargs = {}
-            if description: kwargs["description"] = f"[cyan]Task: {task_id}[/cyan] - {description}"
-            if advance: kwargs["advance"] = advance
-            if completed is not None: kwargs["completed"] = completed
-            self.progress.update(task, **kwargs)
-
-    def stop_progress(self, task_id: str):
-        if task_id in self.active_tasks:
-            self.progress.remove_task(self.active_tasks[task_id])
-            del self.active_tasks[task_id]
+            self.console.print("".join(parts))
 
     def stop_all(self):
         self.progress.stop()
 
+    def loading_start(self, label: str, key: str):
+        """Show a simple circle spinner while an operation is running."""
+        if key in self._loading_tasks:
+            return
+        task_id = self.progress.add_task(label, total=None)
+        self._loading_tasks[key] = task_id
+
+    def loading_stop(self, key: str):
+        """Remove a spinner loading line."""
+        if key in self._loading_tasks:
+            self.progress.remove_task(self._loading_tasks.pop(key))
+
+    def loading_stop_all(self):
+        """Stop all active spinners and force a clean display refresh."""
+        for task_id in list(self._loading_tasks.values()):
+            try:
+                self.progress.remove_task(task_id)
+            except Exception:
+                pass
+        self._loading_tasks.clear()
+        # Stop and restart the live renderer to flush any lingering spinner frames
+        try:
+            self.progress.stop()
+            self.progress.start()
+        except Exception:
+            pass
+
     def info(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None):
         if "payload generated" in str(message) or (details and "payload generated" in str(details)):
-            return  # Hide internal payload log
+            return
         self.print(LogLevel.INFO, message, details, task_id, agent_id)
-        
+
     def success(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None):
         self.print(LogLevel.SUCCESS, message, details, task_id, agent_id)
-        
+
     def warning(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None):
         self.print(LogLevel.WARNING, message, details, task_id, agent_id)
-        
+
     def error(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None):
         self.print(LogLevel.ERROR, message, details, task_id, agent_id)
-        
+
     def debug(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None):
         import os
-        # Only show DEBUG in full debug mode, never show framework internals by default
         if os.environ.get("DELFHOS_DEBUG") == "1":
             self.print(LogLevel.DEBUG, message, details, task_id, agent_id)
-        
+
     def task(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None):
         self.print(LogLevel.TASK, message, details, task_id, agent_id)
-        
+
     def system(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None):
         self.print(LogLevel.SYSTEM, message, details, task_id, agent_id)
-        
+
     def tool(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None):
         self.print(LogLevel.TOOL, message, details, task_id, agent_id)
 
     def print_task_box(self, task_message: str):
-        """Display the user's task in a box at the beginning of execution"""
-        # Truncate long messages for display
+        """Display the user's task in a clean, minimal box."""
         display_msg = task_message if len(task_message) < 200 else task_message[:197] + "..."
-        task_panel = Panel(display_msg, title="[bold]Task[/bold]", border_style="blue", expand=False)
-        # Force immediate print with aggressive flushing
+        task_panel = Panel(
+            display_msg,
+            title="[bold]Task[/bold]",
+            border_style="dim",
+            expand=False,
+            padding=(0, 2)
+        )
         with self._lock:
+            self.console.print()
             self.console.print(task_panel)
-            self.console.print()  # Blank line for spacing
-            # Flush all output streams to ensure task box appears first
+            self.console.print()
             import sys
             if hasattr(self.console.file, 'flush'):
                 self.console.file.flush()
@@ -197,57 +225,56 @@ class ProfessionalConsole:
             sys.stderr.flush()
 
     def task_summary(self, task_id: str, duration: float, tokens: dict, status: str, final_message: str = None, computational_time: float = None, wait_time: float = None, agent_id: Optional[str] = None, task_status: str = "success", tools: list = None, llm_config: Optional[str] = None):
-        # Create summary table
-        summary_table = Table(title="Execution Summary", show_header=True, header_style="bold cyan")
-        summary_table.add_column("Attribute", style="bold cyan", width=20)
-        summary_table.add_column("Value", style="green")
-
-        # Status and outcome
+        status_symbol = "✓" if task_status == "success" else "✗"
         status_color = "green" if task_status == "success" else "red"
-        summary_table.add_row("Status", f"[{status_color}]✓ {task_status.upper()}[/{status_color}]")
+        status_word = "Completed" if task_status == "success" else "Failed"
 
-        # Timing
-        if wait_time and wait_time > 0:
-            duration_str = f"{duration:.2f}s (compute: {computational_time:.2f}s, wait: {wait_time:.2f}s)"
-        else:
-            duration_str = f"{duration:.2f}s"
-        summary_table.add_row("Duration", duration_str)
-
-        # Tokens
-        summary_table.add_row("Tokens", f"{tokens.get('tokens_used', 0)} (in: {tokens.get('input_tokens', 0)}, out: {tokens.get('output_tokens', 0)})")
-        # Cost (USD)
+        # Build compact stats
+        stats = []
+        stats.append(f"{duration:.2f}s")
         cost_val = tokens.get('total_cost_usd')
-        cost_str = f"${float(cost_val):.6f}" if cost_val is not None else "None"
-        summary_table.add_row("Cost (USD)", cost_str)
+        if cost_val is not None:
+            stats.append(f"${float(cost_val):.4f}")
 
-        # LLM Configuration
-        if llm_config:
-            summary_table.add_row("LLM", llm_config)
+        compact_line = f"  [{status_color}]{status_symbol}[/{status_color}] [bold]{status_word}[/bold]  [grey50]{'  ·  '.join(stats)}[/grey50]"
+        self.console.print(compact_line)
 
-        # Tools used (exclude framework internals like llm_code_generation)
-        if tools:
-            # Filter out framework internals - only show actual user tools
-            user_tools = [t for t in tools if t != "llm_code_generation"]
-            if user_tools:
-                tools_str = ", ".join(user_tools)
-                summary_table.add_row("Tools Used", tools_str)
+        # Verbose: show detailed breakdown
+        if self.verbose:
+            detail_parts = []
+            tokens_used = tokens.get('tokens_used', 0)
+            input_t = tokens.get('input_tokens', 0)
+            output_t = tokens.get('output_tokens', 0)
+            detail_parts.append(f"{tokens_used} tokens (in: {input_t}, out: {output_t})")
+            if cost_val is not None:
+                detail_parts.append(f"${float(cost_val):.6f}")
+            self.console.print(f"    [dim]{'  ·  '.join(detail_parts)}[/dim]")
 
-        summary_panel = Panel(summary_table, border_style="blue", expand=False)
-        
-        # Create result section if available
+            if wait_time and wait_time > 0 and computational_time:
+                self.console.print(f"    [dim]compute: {computational_time:.2f}s  ·  wait: {wait_time:.2f}s[/dim]")
+
+            if llm_config:
+                self.console.print(f"    [dim]LLM: {llm_config}[/dim]")
+
+            if tools:
+                user_tools = [t for t in tools if t != "llm_code_generation"]
+                if user_tools:
+                    self.console.print(f"    [dim]Tools: {', '.join(user_tools)}[/dim]")
+
+        self.console.print()
+
+        # Result panel
         if final_message:
-            # Convert markdown links to Rich clickable links and render as markdown
             rich_result = convert_markdown_links_to_rich(final_message)
-            # Use uniform white color for all text (no special styling for titles/headings)
             markdown_content = Markdown(rich_result, style="white")
-            result_panel = Panel(markdown_content, title="[bold]Result[/bold]", border_style="green", expand=False)
-            
-            # Display summary and result side-by-side
-            side_by_side = Columns([summary_panel, result_panel])
-            self.console.print(side_by_side)
-        else:
-            # Just show summary if no result message
-            self.console.print(summary_panel)
+            result_panel = Panel(
+                markdown_content,
+                title="[bold]Result[/bold]",
+                border_style="green" if task_status == "success" else "red",
+                expand=False,
+                padding=(0, 2)
+            )
+            self.console.print(result_panel)
 
     def print_exception(self, exc: Exception, title: str = "Task failed"):
         """Print a beautiful error box for a caught exception."""
@@ -256,8 +283,7 @@ class ProfessionalConsole:
         from rich.traceback import Traceback
         from rich.text import Text
         import sys
-        
-        # Make sure we stop any ongoing progress bars before printing
+
         try:
             self.stop_all()
         except Exception:
@@ -265,7 +291,6 @@ class ProfessionalConsole:
 
         code, message, hint = extract_error_payload(exc)
 
-        # Use sys.exc_info() if available to get the full traceback, else just create from exception
         exc_type, exc_value, exc_traceback = sys.exc_info()
         if exc_value is exc:
             tb = Traceback.from_exception(exc_type, exc_value, exc_traceback, show_locals=False)
@@ -278,12 +303,12 @@ class ProfessionalConsole:
             tb,
             Text(""),
             Text(f"Message: {message}", style="white"),
-            Text(f"💡 Hint: {hint}", style="bold yellow")
+            Text(f"Hint: {hint}", style="bold yellow")
         )
 
         panel = Panel(
             group,
-            title=f"[bold red]❌ [{code}] Delfhos Error[/bold red]",
+            title=f"[bold red][{code}] Error[/bold red]",
             border_style="red",
             expand=False
         )
@@ -295,13 +320,11 @@ def _delfhos_excepthook(exc_type, exc_val, tb_obj):
     from rich.console import Group
     from rich.traceback import Traceback
     from rich.text import Text
-    
-    # Don't intercept KeyboardInterrupt
+
     if issubclass(exc_type, KeyboardInterrupt):
         sys.__excepthook__(exc_type, exc_val, tb_obj)
         return
 
-    # Create the beautiful traceback
     tb = Traceback.from_exception(exc_type, exc_val, tb_obj, show_locals=False)
     code, message, hint = extract_error_payload(exc_val)
 
@@ -311,21 +334,20 @@ def _delfhos_excepthook(exc_type, exc_val, tb_obj):
         tb,
         Text(""),
         Text(f"Message: {message}", style="white"),
-        Text(f"💡 Hint: {hint}", style="bold yellow")
+        Text(f"Hint: {hint}", style="bold yellow")
     )
     panel = Panel(
         group,
-        title=f"[bold red]❌ [{code}] Delfhos Error[/bold red]",
+        title=f"[bold red][{code}] Error[/bold red]",
         border_style="red",
         expand=False
     )
 
-    # Make sure we stop any ongoing progress bars before printing
     try:
         console.stop_all()
     except:
         pass
-        
+
     console.console.print(panel)
 
 # Override the global exception hook

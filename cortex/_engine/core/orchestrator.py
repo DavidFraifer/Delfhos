@@ -390,9 +390,10 @@ class Orchestrator:
                         # Update metadata if provided (e.g., sheet_link, drive_link)
                         if metadata:
                             existing['ui_metadata'] = metadata
+                            
                         if wait_time > 0.0:
                             existing['wait_time'] = wait_time
-                        self._emit_phase_progress(task_id, tool_name, description, is_starting=False, duration=duration)
+                        self._emit_phase_progress(task_id, tool_name, description, is_starting=False, duration=duration, metadata=existing.get('ui_metadata'), model=model)
                         return existing  # Return updated entry for callback
         
         # If this is a starting entry or no matching ongoing entry found, create new entry                                                                      
@@ -411,7 +412,7 @@ class Orchestrator:
             if metadata:
                 timing_entry['ui_metadata'] = metadata
             self.task_tool_timings[task_id].append(timing_entry)
-            self._emit_phase_progress(task_id, tool_name, description, is_starting=True, duration=None)
+            self._emit_phase_progress(task_id, tool_name, description, is_starting=True, duration=None, metadata=metadata, model=model)
             return timing_entry  # Return new entry for callback
         else:
             # Completion entry but no matching starting entry found - create new entry
@@ -451,27 +452,103 @@ class Orchestrator:
             if wait_time > 0.0:
                 timing_entry['wait_time'] = wait_time
             self.task_tool_timings[task_id].append(timing_entry)
-            self._emit_phase_progress(task_id, tool_name, description, is_starting=False, duration=duration)
+            self._emit_phase_progress(task_id, tool_name, description, is_starting=False, duration=duration, metadata=metadata, model=model)
             return timing_entry  # Return new entry for callback
 
-    def _emit_phase_progress(self, task_id: str, tool_name: str, description: Optional[str], is_starting: bool, duration: Optional[float]):
-        """Emit concise, user-facing phase updates while task is running."""
-        if tool_name not in self._VISIBLE_PHASES:
+    def _emit_phase_progress(self, task_id: str, tool_name: str, description: Optional[str], is_starting: bool, duration: Optional[float], metadata: Optional[Dict[str, Any]] = None, model: Optional[str] = None):
+        """Emit uniform, user-facing log line for every tool call except code generation."""
+        # Code generation is tracked separately (Planning spinner + its own timing)
+        if tool_name == "llm_code_generation":
+            loading_key = f"{task_id}:llm_code_generation"
+            if is_starting:
+                if loading_key not in self._active_phase_logs:
+                    self._active_phase_logs[loading_key] = True
+                    console.loading_start("[white]Planning[/white]  [bright_yellow]llm[/bright_yellow] [grey50]...[/grey50]", loading_key)
+            else:
+                self._active_phase_logs.pop(loading_key, None)
+                console.loading_stop(loading_key)
+                if duration is not None:
+                    console.tool("[white]Planning[/white]  [bright_yellow]llm[/bright_yellow]", None, task_id=task_id)
             return
 
-        label = description or self._VISIBLE_PHASES[tool_name]
-        key = (task_id, tool_name, (label or "").strip().lower())
+        is_internal = tool_name in self._VISIBLE_PHASES
+        label = description or self._VISIBLE_PHASES.get(tool_name, tool_name)
+
+        # External tools without a description add no value — skip
+        if not is_internal and not description:
+            return
+
+        tool_color = "bright_yellow" if not is_internal else "magenta"
+        formatted_label = f"[white]{label}[/white]  [{tool_color}]{tool_name}[/{tool_color}]"
+
+        # Internal phases are singleton per task; external tools key by description too (parallel-safe)
+        if is_internal:
+            key = (task_id, tool_name)
+            loading_key = f"{task_id}:{tool_name}"
+            spinner_label = formatted_label
+        else:
+            desc_norm = (label or "").strip().lower()
+            key = (task_id, tool_name, desc_norm)
+            loading_key = f"{task_id}:{tool_name}:{desc_norm}"
+            spinner_label = formatted_label
 
         if is_starting:
             if key in self._active_phase_logs:
                 return
             self._active_phase_logs[key] = True
-            console.update_progress(task_id, description=label, advance=10)
+            
+            # Add a subtle, engaging suffix only while it's actively running
+            running_label = f"{spinner_label} [grey50]...[/grey50]"
+            console.loading_start(running_label, loading_key)
             return
 
-        if key in self._active_phase_logs:
-            self._active_phase_logs.pop(key, None)
-        console.update_progress(task_id, description=f"Completed {label}")
+        # ── Completion ──────────────────────────────────────────────────────
+        self._active_phase_logs.pop(key, None)
+        console.loading_stop(loading_key)
+
+        if duration is None:
+            return
+
+        # Extract params from metadata
+        args   = dict((metadata or {}).get("_tool_trace_args") or {})
+        action = (metadata or {}).get("_tool_action") or ""
+        
+        if model and "model" not in args:
+            args["model"] = model
+
+        param_parts = []
+        if action and not is_internal:
+            param_parts.append(f"action={action}")
+
+        noisy_keys = {
+            "prompt", "desc", "ui_metadata", "metadata", "content", "body", "html", "text"
+        }
+        preferred_keys = (
+            "query", "max_results", "model", "max_tokens", "temperature",
+            "sql", "range", "sheet_name", "spreadsheet_id", "to", "subject"
+        )
+
+        compact_items = []
+        for k in preferred_keys:
+            if k in args and k not in noisy_keys:
+                compact_items.append((k, args[k]))
+        for k, v in args.items():
+            if k in noisy_keys or any(k == x for x, _ in compact_items):
+                continue
+            compact_items.append((k, v))
+
+        for k, v in compact_items[:2]:
+            v_str = str(v).replace("\n", " ").strip()
+            if len(v_str) > 42:
+                v_str = v_str[:39] + "…"
+            param_parts.append(f"{k}={v_str}")
+        params_str = "  ".join(param_parts)
+
+        # Uniform message: description first (white), then a colored tool tag.
+        # Duration is omitted — the elapsed timestamp shown before the icon (verbose mode) is sufficient
+        tool_color = "bright_yellow" if not is_internal else "magenta"
+        msg = f"[white]{label}[/white]  [{tool_color}]{tool_name}[/{tool_color}]"
+        console.tool(msg, params_str or None, task_id=task_id)
     
     def track_tool_timing(self, task_id: str, tool_name: str, duration: float, model: str = None, description: str = None, is_starting: bool = False):
         """Track tool execution timing for each task (sync version - uses asyncio.create_task for callback)
@@ -683,8 +760,8 @@ class Orchestrator:
                 if self.verbose == "high":
                     from rich.panel import Panel
                     from rich.syntax import Syntax
-                    code_syntax = Syntax(python_code, "python", theme="monokai", line_numbers=True)
-                    code_panel = Panel(code_syntax, title="[bold yellow]Generated Code[/bold yellow]", border_style="yellow", expand=False)
+                    code_syntax = Syntax(python_code, "python", theme="github-dark", line_numbers=True)
+                    code_panel = Panel(code_syntax, title="[bold]Generated Code[/bold]", border_style="dim", expand=False)
                     console.console.print(code_panel)
                     console.console.print()  # Blank line
                 
@@ -961,6 +1038,7 @@ CRITICAL STATE PRESERVATION: All variables defined in the PREVIOUS CODE before i
             # Show detailed execution timeline in verbose mode
             if self.verbose == "high" and (tool_entries or llm_breakdown):
                 from rich.table import Table
+                import rich.box as rich_box
 
                 def _to_sort_ts(raw_ts):
                     if isinstance(raw_ts, (int, float)):
@@ -971,100 +1049,104 @@ CRITICAL STATE PRESERVATION: All variables defined in the PREVIOUS CODE before i
                         except Exception:
                             return 0.0
                     return 0.0
+
+                duplicated_phase_tools = {'prefilter', 'llm_code_generation', 'llm_connection_filtering', 'llm_rag_retrieval'}
                 
-                # Build combined timeline of LLM calls and tool/phase executions
+                # Exclude duplicate LLM tracking tasks that are already natively logged as explicit tools
+                hidden_llm_breakdown_funcs = {"llm", "web_search", "gmail_dsl_parsing"}
+                llm_function_names = {c.get('function_name', '') for c in llm_breakdown if isinstance(c, dict)} - hidden_llm_breakdown_funcs
+
+                _LLM_LABELS = {
+                    'llm_code_generation':       'Planning',
+                    'prefilter':                 'Prefilter',
+                    'llm_connection_filtering':  'Connection filter',
+                    'llm_rag_retrieval':         'RAG retrieval',
+                }
+
                 timeline_items = []
-                llm_function_names = {
-                    c.get('function_name', 'unknown') for c in llm_breakdown if isinstance(c, dict)
-                }
-                duplicated_phase_tools = {
-                    'prefilter',
-                    'llm_code_generation',
-                    'llm_connection_filtering',
-                    'llm_rag_retrieval',
-                }
-                
-                # Add LLM calls to timeline
+
+                # LLM calls — description comes from the phase label, model goes to Info
                 for call in llm_breakdown:
+                    fn = call.get('function_name', 'unknown')
+                    if fn in hidden_llm_breakdown_funcs:
+                        continue
+                    
+                    label = _LLM_LABELS.get(fn, fn)
+                    model = call.get('model', '')
                     timeline_items.append({
                         'type': 'llm',
-                        'timestamp': call.get('timestamp', 0),
-                        'name': call.get('function_name', 'unknown'),
-                        'model': call.get('model', ''),
-                        'duration': call.get('duration', 0),
-                        'input_tokens': call.get('input_tokens', 0),
-                        'output_tokens': call.get('output_tokens', 0),
-                        'total_tokens': call.get('input_tokens', 0) + call.get('output_tokens', 0),
-                        'cost_usd': call.get('cost_usd'),
+                        'timestamp': _to_sort_ts(call.get('timestamp', 0)),
+                        'tool': 'llm',
+                        'description': label,
+                        'params': f"model={model}" if model else '',
+                        'duration': call.get('duration', 0) or 0,
+                        'wait_time': 0,
+                        'status': 'ok',
                     })
-                
-                # Add tool/phase calls to timeline
+
+                # Tool / phase calls
                 for entry in completed_tools:
-                    tool_name = entry.get('tool', 'unknown')
-                    # Avoid duplicate rows when a phase already appears as a detailed LLM call.
-                    # Also skip awaiting_approval — its wait time is already shown inline on the tool row.
-                    if tool_name in duplicated_phase_tools or tool_name in llm_function_names or tool_name == "awaiting_approval":
+                    tn = entry.get('tool', 'unknown')
+                    if tn in duplicated_phase_tools or tn in llm_function_names or tn == 'awaiting_approval':
                         continue
+                    meta = entry.get('ui_metadata') or {}
+                    args   = meta.get('_tool_trace_args') or {}
+                    action = meta.get('_tool_action') or ''
+                    param_parts = []
+                    if action:
+                        param_parts.append(f"action={action}")
+                    for k, v in list(args.items())[:6]:
+                        v_s = str(v)
+                        if len(v_s) > 80:
+                            v_s = v_s[:77] + '…'
+                        param_parts.append(f"{k}={v_s}")
                     timeline_items.append({
                         'type': 'tool',
-                        'timestamp': entry.get('timestamp', 0),
-                        'name': tool_name,
-                        'model': entry.get('model', ''),
+                        'timestamp': _to_sort_ts(entry.get('timestamp', 0)),
+                        'tool': tn,
                         'description': entry.get('description', ''),
-                        'duration': entry.get('duration', 0),
+                        'params': '  '.join(param_parts),
+                        'duration': entry.get('duration', 0) or 0,
+                        'wait_time': entry.get('wait_time', 0) or 0,
                         'status': entry.get('status', 'unknown'),
-                        'wait_time': entry.get('wait_time', 0),
                     })
-                
-                # Sort by timestamp
-                timeline_items.sort(key=lambda x: _to_sort_ts(x.get('timestamp', 0)))
-                
-                # Build rich table
-                timeline_table = Table(title="[bold cyan]Execution Timeline[/bold cyan]", 
-                                     show_header=True, header_style="bold cyan", expand=False)
-                timeline_table.add_column("#", width=3)
-                timeline_table.add_column("Type", width=8)
-                timeline_table.add_column("Name", width=30)
-                timeline_table.add_column("Duration", width=12)
-                timeline_table.add_column("Tokens/Info", width=25)
-                
-                for idx, item in enumerate(timeline_items, 1):
-                    name = item['name']
-                    duration_val = item.get('duration', 0) or 0
-                    wait_val = item.get('wait_time', 0) or 0
-                    exec_val = max(duration_val - wait_val, 0)
-                    if duration_val <= 0:
-                        duration_str = "-"
-                    elif wait_val > 0.05:
-                        duration_str = f"{exec_val:.2f}s[dim] (+{wait_val:.1f}s wait)[/dim]"
+
+                timeline_items.sort(key=lambda x: x['timestamp'])
+
+                # ── Table ────────────────────────────────────────────────────
+                timeline_table = Table(
+                    title="[bold]Execution Timeline[/bold]",
+                    show_header=True, header_style="bold",
+                    box=rich_box.SIMPLE_HEAD, show_lines=True, expand=True, padding=(0, 1),
+                )
+                timeline_table.add_column("Description", ratio=4)
+                timeline_table.add_column("Tool",        min_width=12, style="bright_yellow", no_wrap=True)
+                timeline_table.add_column("Params",      ratio=5,      style="dim")
+                timeline_table.add_column("Duration",    min_width=8,  no_wrap=True)
+
+                for item in timeline_items:
+                    dur  = item['duration']
+                    if dur <= 0:
+                        dur_str = "[dim]—[/dim]"
                     else:
-                        duration_str = f"{duration_val:.2f}s"
+                        dur_str = f"{dur:.2f}s"
 
                     if item['type'] == 'llm':
-                        c_val = item['cost_usd']
-                        c_str = f"${c_val:.6f}" if c_val is not None else "None"
-                        tokens_str = f"In: {item['input_tokens']}, Out: {item['output_tokens']}, Tot: {item['total_tokens']}, {c_str}"
-                        model_suffix = f" ({item['model']})" if item['model'] else ""
-                        name_display = name + model_suffix
-                        type_style = "[bold magenta]LLM[/bold magenta]"
+                        icon = "[dim]~[/dim]"
+                    elif item['status'] in ('ok', 'success'):
+                        icon = "[green]✓[/green]"
                     else:
-                        status_emoji = "✓" if item['status'] == 'success' else "✗"
-                        desc = f" - {item['description']}" if item['description'] else ""
-                        tokens_str = f"{status_emoji} {item['status']}{desc}"
-                        model_suffix = f" ({item['model']})" if item['model'] else ""
-                        name_display = name + model_suffix
-                        type_style = "[bold green]TOOL[/bold green]"
-                    
+                        icon = "[red]✗[/red]"
+
                     timeline_table.add_row(
-                        str(idx),
-                        type_style,
-                        name_display,
-                        duration_str,
-                        tokens_str
+                        item['description'] or "[dim]—[/dim]",
+                        f"{icon} {item['tool']}",
+                        item['params'] or "[dim]—[/dim]",
+                        dur_str,
                     )
-                
+
                 console.console.print(timeline_table)
-                console.console.print()  # Blank line
+                console.console.print()
             
             # Determine task status and final message
             if result.get("success"):
@@ -1681,7 +1763,6 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
                 selected_tools.add(tool_name.strip())
         tools_summary = ", ".join(sorted(selected_tools)) if selected_tools else "(none)"
         
-        console.info("Code generation", "started", task_id=task_id, agent_id=self.agent_id)
 
         # ========== AWAIT SQL SCHEMA (already fetching in parallel) ==========
         needs_sql = any(a.lower().startswith('sql:') for a in selected_actions)
@@ -1747,12 +1828,16 @@ BEFORE CODING: If task is vague (missing names/dates/files), output ONLY a print
 RULES:
 - ONLY Python code. Minimal code. Async (await). NO asyncio.run(); define `async def main():...` & `await main()`.
 - NEVER pass connection_name (auto-detected).
+- EVERY tool call MUST include `desc="..."` with a short, specific action text.
+- If you call `websearch.search`, `llm.call`, `sql.query`, `gmail.read`, `sheets.write`, etc., include `desc=` explicitly in that same call.
+- `desc` must describe intent (e.g., `desc="Searching AI news April 2026"`), not a generic label.
+- SELF-CHECK BEFORE OUTPUT: if any tool call is missing `desc=`, rewrite the code before returning it.
 - `files` tool ONLY reads Sandbox uploads. For local files, use MCP if available.
 - User visibility: ONLY print() is visible. Print final answers. Use Markdown, `format_table()`. Match user language.
 - Order: Wait for tool output before generating text dependent on it.
 - Processing N items (emails, rows, files): ALWAYS `asyncio.gather(*[process(x) for x in items])`, NEVER sequential `for` loops with `await`.
 - Libs: asyncio, json, re, datetime, time, math, statistics. NO pandas.
-- WEBSEARCH: If value needed, ask "Return ONLY JSON: {{k:v}}" -> `json.loads()`. NEVER hardcode/guess facts if parsing fails, print raw and abort.
+- WEBSEARCH: If value needed, ask "Return ONLY JSON: {{k:v}}" -> use `safe_json_loads(response)` (returns None on empty/invalid). If None, abort and print raw response. NEVER hardcode/guess facts.
 {examples_section}
 
 OUTPUT: Python code ONLY. NO comments. Only print() is visible, use markdown."""
@@ -1773,7 +1858,7 @@ OUTPUT: Python code ONLY. NO comments. Only print() is visible, use markdown."""
                 response_format=None
             )
             llm_duration = time.time() - llm_start_time
-            
+
             # Track completion (this updates the starting entry with duration)
             # Use async version to properly await the callback
             await self.track_tool_timing_async(task_id, "llm_code_generation", llm_duration, self.code_generation_llm, description=self._ui_text("planning"), is_starting=False)

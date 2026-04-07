@@ -1062,8 +1062,9 @@ async def gsheets_tool(
         try:
             creds_payload = connection.get_credentials()
         except Exception as e:
-            console.tool(f"[SHEETS] Warning: Failed to get credentials from connection: {e}", task_id=task_id, agent_id=agent_id)
-            creds_payload = {}
+            pass
+
+        creds_payload = creds_payload or {}
     
     # Validate that we have credentials before proceeding
     if not creds_payload:
@@ -1084,7 +1085,7 @@ async def gsheets_tool(
                 api_manager.ensure_api_enabled('sheets')
         except Exception as e:
             # Non-fatal - continue even if API enabling fails
-            console.tool(f"[SHEETS] Warning: Could not auto-enable Sheets API: {e}", task_id=task_id, agent_id=agent_id)
+            pass
 
     client = GoogleSheetsClient(creds_payload)
 
@@ -1184,7 +1185,7 @@ async def gsheets_tool(
                 )
                 interpreter.run(ops)
         
-        console.tool(f"[SHEETS CREATE] Created spreadsheet: {title} (ID: {spreadsheet_id})", task_id=task_id, agent_id=agent_id)
+
         return {
             "message": f"Spreadsheet '{title}' created successfully",
             "spreadsheet_id": spreadsheet_id,
@@ -1200,7 +1201,7 @@ async def gsheets_tool(
         result = client.read_values(spreadsheet_id, range_name, value_render_option=render_option, date_time_render_option=date_option)
         values = result.get("values", [])
         summary = f"Read {len(values)} row(s) from {range_name}"
-        console.tool(f"[GSHEETS READ] {summary}", task_id=task_id, agent_id=agent_id)
+
         return {
             "message": summary,
             "values": values,
@@ -1224,7 +1225,7 @@ async def gsheets_tool(
         result = interpreter.run(ops)
         summary_lines = "\n".join(f"- {entry}" for entry in result["operations"])
         message = f"Google Sheets batch completed ({len(result['operations'])} ops):\n{summary_lines}"
-        console.tool("[GSHEETS BATCH] Completed batch operations", task_id=task_id, agent_id=agent_id)
+
         return {
             "message": message,
             "operations": result["operations"],

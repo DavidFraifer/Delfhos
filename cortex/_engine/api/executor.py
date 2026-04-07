@@ -1,0 +1,246 @@
+"""
+OpenAPI Runtime Executor
+
+Bridges Delfhos's generated Python code with real HTTP API calls.
+
+When the LLM generates code like:
+    result = await petstore.list_pets(limit=10)
+
+This executor:
+  1. Receives the call via a delfhos.Tool instance
+  2. Maps it to the compiled operation (method, path, params)
+  3. Builds an HTTP request (path params, query params, JSON body)
+  4. Sends it via httpx
+  5. Returns the parsed JSON (or text) response
+"""
+
+import json
+import re
+from typing import Any, Dict, List, Optional, Set
+from delfhos.errors import ToolDefinitionError
+
+
+class APIExecutor:
+    """
+    Thin bridge between delfhos Tool instances and real REST API endpoints.
+
+    Each compiled operation becomes a callable Tool — this class handles
+    building the HTTP request and returning the response.
+    """
+
+    def __init__(
+        self,
+        tool_name: str,
+        compiled_tools: List[Dict[str, Any]],
+        auth_headers: Optional[Dict[str, str]] = None,
+        auth_params: Optional[Dict[str, str]] = None,
+    ):
+        """
+        Args:
+            tool_name:     Delfhos tool name (e.g., "petstore")
+            compiled_tools: List of compiled tool dicts from OpenAPICompiler
+            auth_headers:  Headers injected into every request (e.g., {"Authorization": "Bearer ..."})
+            auth_params:   Query params injected into every request (e.g., {"api_key": "..."})
+        """
+        self.tool_name = tool_name
+        self._tools = {t["func_name"]: t for t in compiled_tools}
+        self._auth_headers = auth_headers or {}
+        self._auth_params = auth_params or {}
+
+    def call(self, func_name: str, **kwargs) -> str:
+        """Execute an API call and return formatted result."""
+        import httpx
+
+        tool_def = self._tools.get(func_name)
+        if not tool_def:
+            available = ", ".join(self._tools.keys())
+            from delfhos.tool import ToolException
+            raise ToolException(
+                f"API '{self.tool_name}' has no endpoint '{func_name}'. "
+                f"Available: {available}"
+            )
+
+        method = tool_def["method"]
+        path_template = tool_def["path"]
+        base_url = tool_def["base_url"]
+        params_spec = tool_def.get("params_spec", [])
+
+        # Classify which kwargs go where
+        path_params = {}
+        query_params = dict(self._auth_params)
+        body_params = {}
+        header_params = dict(self._auth_headers)
+
+        param_locations = {p["name"]: p["in"] for p in params_spec}
+
+        for key, value in kwargs.items():
+            if key == "desc":
+                # Tool description param used by Delfhos approval system, not sent to API
+                continue
+            location = param_locations.get(key, "query")
+            if location == "path":
+                path_params[key] = value
+            elif location == "header":
+                header_params[key] = str(value)
+            elif location == "body":
+                body_params[key] = value
+            else:
+                # Default: query param
+                if value is not None:
+                    query_params[key] = value
+
+        # Build URL with path parameters
+        path = path_template
+        for param_name, param_value in path_params.items():
+            path = path.replace(f"{{{param_name}}}", str(param_value))
+
+        url = f"{base_url}{path}"
+
+        # Build request
+        request_kwargs: Dict[str, Any] = {
+            "method": method,
+            "url": url,
+            "headers": header_params,
+            "timeout": 30,
+            "follow_redirects": True,
+        }
+
+        if query_params:
+            request_kwargs["params"] = query_params
+
+        if body_params and method in ("POST", "PUT", "PATCH"):
+            # If there's a single "body" key, send it directly
+            if len(body_params) == 1 and "body" in body_params:
+                body_val = body_params["body"]
+                if isinstance(body_val, (dict, list)):
+                    request_kwargs["json"] = body_val
+                else:
+                    request_kwargs["content"] = str(body_val)
+                    request_kwargs["headers"]["Content-Type"] = "text/plain"
+            else:
+                request_kwargs["json"] = body_params
+
+        try:
+            with httpx.Client() as client:
+                response = client.request(**request_kwargs)
+                response.raise_for_status()
+                return self._format_response(response)
+        except httpx.HTTPStatusError as exc:
+            from delfhos.tool import ToolException
+            body = exc.response.text[:500]
+            raise ToolException(
+                f"API error {exc.response.status_code} on {method} {url}: {body}"
+            )
+        except httpx.RequestError as exc:
+            from delfhos.tool import ToolException
+            raise ToolException(f"Request failed for {method} {url}: {exc}")
+
+    @staticmethod
+    def _format_response(response) -> str:
+        """Format HTTP response into a string for the agent."""
+        content_type = response.headers.get("content-type", "")
+
+        if "application/json" in content_type:
+            try:
+                data = response.json()
+                return json.dumps(data, indent=2, ensure_ascii=False)
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        text = response.text
+        # Truncate very large responses to avoid blowing up context
+        if len(text) > 50_000:
+            return text[:50_000] + "\n... (truncated)"
+        return text
+
+
+def build_api_tools(
+    executor: APIExecutor,
+    tool_name: str,
+    allow: Optional[Set[str]] = None,
+) -> "APIToolNamespace":
+    """Build a namespace of Tool instances from an APIExecutor.
+
+    Each API operation becomes a ``delfhos.Tool`` with auto-generated
+    parameter schema. Returns an ``APIToolNamespace`` so LLM-generated
+    code can do ``api.list_pets(limit=10)``.
+    """
+    from delfhos.tool import Tool
+    from cortex._engine.api.compiler import OpenAPICompiler
+
+    tools: Dict[str, Tool] = {}
+
+    for func_name, tool_def in executor._tools.items():
+        if allow is not None and func_name not in allow:
+            continue
+
+        description = tool_def.get("description", f"Call {func_name}")
+        params_spec = tool_def.get("params_spec", [])
+
+        # Build parameter dict in Tool format
+        params: Dict[str, Any] = {}
+        for p in params_spec:
+            entry: Dict[str, Any] = {"type": p["type"]}
+            if p.get("description"):
+                entry["desc"] = p["description"]
+            entry["required"] = p.get("required", False)
+            if not entry["required"] and "default" in p:
+                entry["default"] = p["default"]
+            params[p["name"]] = entry
+
+        # Capture func_name in closure
+        def _make_func(name: str):
+            async def _execute(**kwargs):
+                kwargs.pop("desc", None)
+                return executor.call(name, **kwargs)
+            _execute.__name__ = name
+            _execute.__doc__ = description
+            return _execute
+
+        tool = Tool(
+            name=func_name,
+            description=description,
+            parameters=params if params else None,
+            func=_make_func(func_name),
+            _internal_use=True,
+        )
+        tools[func_name] = tool
+
+    return APIToolNamespace(tool_name, tools)
+
+
+class APIToolNamespace:
+    """
+    Lightweight attribute-access wrapper around a dict of Tool instances.
+
+    Makes ``petstore.list_pets(...)`` work in LLM-generated code while
+    keeping each method a real Tool object with validation and api_doc().
+    """
+
+    def __init__(self, name: str, tools: Dict[str, Any]):
+        self.__name__ = name
+        self._tools = tools
+
+    def __call__(self, **kwargs):
+        raise ToolDefinitionError(
+            detail=(
+                f"Use specific methods like {self.__name__}.action_name() "
+                f"instead of calling the tool object directly."
+            ),
+        )
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        tool = self._tools.get(name)
+        if tool is None:
+            available = ", ".join(self._tools.keys())
+            raise AttributeError(
+                f"API '{self.__name__}' has no endpoint '{name}'. "
+                f"Available: {available}"
+            )
+        return tool.execute
+
+    def get_all_api_docs(self) -> str:
+        """Concatenate api_doc() for every tool in this namespace."""
+        return "\n\n".join(t.api_doc() for t in self._tools.values())

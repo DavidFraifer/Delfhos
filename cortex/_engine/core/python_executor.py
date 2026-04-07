@@ -49,6 +49,19 @@ def _safe_json_loads(obj, *args, **kwargs):
     return _original_json_loads(obj, *args, **kwargs)
 
 
+def safe_json_loads(text):
+    """Parse JSON safely — returns None and prints a warning if text is empty or invalid."""
+    import json
+    if not text or not text.strip():
+        print(f"Warning: received empty response, cannot parse JSON.")
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        print(f"Warning: JSON parse failed ({e}). Raw response:\n{text}")
+        return None
+
+
 def format_table(data, title=None, headers=None):
     """
     Format structured data as a Markdown table.
@@ -293,6 +306,7 @@ class ToolExecutionTracker:
         
         # Use provided description, or from call_info, or default
         final_description = description or (call_info.get("description") if call_info else None) or f"Using {tool_name}"
+        final_model = model or (call_info.get("model") if call_info else None)
         
         # Merge the metadata tracking parallel groups with the metadata from the tool end
         final_metadata = {}
@@ -324,7 +338,7 @@ class ToolExecutionTracker:
                 self.task_id,
                 tool_name,
                 duration,
-                model=model,
+                model=final_model,
                 description=final_description,
                 is_starting=False,
                 metadata=final_metadata,
@@ -692,6 +706,7 @@ class PythonExecutor:
             **libraries,  # Tool libraries (sql, sheets, gmail, etc.)
             "task_id": self.task_id,  # Make task_id available for use in code (though files.save() handles paths automatically)
             "format_table": format_table,  # Helper function to format data as Markdown tables
+            "safe_json_loads": safe_json_loads,  # Safe JSON parser (returns None on empty/invalid, prints warning)
             "__name__": "__agent_execution__",  # Define __name__ to prevent NameErrors and skip if __name__ == "__main__" blocks
             "__file__": "agent_script.py",  # Define __file__ for completeness
         })

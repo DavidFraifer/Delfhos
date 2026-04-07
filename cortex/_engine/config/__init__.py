@@ -45,7 +45,7 @@ def configure_api_keys(providers: Optional[Dict[str, str]] = None):
     # Use console only if it's already imported somewhere, otherwise fallback to print
     try:
         from ..utils.console import console
-        console.system("API Configuration", f"Loaded keys for: {', '.join(_api_key_cache.keys())}")
+        console.system("API keys loaded", f"{', '.join(_api_key_cache.keys())}")
     except ImportError:
         print(f"✅ API keys loaded for: {list(_api_key_cache.keys())}")
 

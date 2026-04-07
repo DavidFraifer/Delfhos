@@ -21,7 +21,7 @@ from delfhos.tool import tool, ToolException
 _LAZY_NAMES = {
     "Gmail", "SQL", "Sheets", "Drive", "Calendar", "Docs", "WebSearch",
     "GmailTool", "SQLTool", "SheetsTool", "DriveTool", "CalendarTool", "DocsTool", "WebSearchTool",
-    "MCP",
+    "MCP", "APITool",
 }
 
 
@@ -31,6 +31,10 @@ def __getattr__(name):
             from .mcp import MCP
             globals()["MCP"] = MCP
             return MCP
+        if name == "APITool":
+            from cortex.connections.api import APITool
+            globals()["APITool"] = APITool
+            return APITool
         # Forward to native module (which itself is lazy)
         from . import native
         klass = getattr(native, name)
@@ -56,6 +60,7 @@ __all__ = [
     "Docs",
     "WebSearch",
     "MCP",
+    "APITool",
     # Service tools (long names)
     "GmailTool",
     "SQLTool",

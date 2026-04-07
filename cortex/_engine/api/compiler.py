@@ -1,0 +1,557 @@
+"""
+OpenAPI Schema Compiler
+
+Transforms OpenAPI 3.x specifications into native Delfhos format:
+  - ToolCapability + ToolActionSpec for the prefilter registry
+  - COMPRESSED_API_DOCS for code generation prompts
+  - Python function signatures from JSON Schema parameters
+
+Cache system: compiled manifests are saved to ~/delfhos/api_cache/{hash}/
+so the spec only needs to be parsed once.
+
+No LLM required — pure deterministic schema transformation.
+"""
+
+import hashlib
+import json
+import os
+import re
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+from delfhos.errors import ConnectionConfigurationError
+
+
+# JSON Schema type → LLM-friendly type annotation
+_TYPE_MAP = {
+    "string": "string",
+    "integer": "integer",
+    "number": "number",
+    "boolean": "boolean",
+    "array": "array",
+    "object": "object",
+}
+
+CACHE_DIR = Path.home() / "delfhos" / "api_cache"
+
+# Maximum number of endpoints to compile from a single spec.
+# Large specs (Stripe, GitHub) can have 300+ endpoints — compiling
+# all of them bloats the prefilter and code-gen prompts. Users should
+# use `allow=` to pick what they need; this cap is a safety net.
+MAX_ENDPOINTS = 100
+
+
+def _load_spec(source: str) -> Dict[str, Any]:
+    """Load an OpenAPI spec from a URL or local file path.
+
+    Supports JSON and YAML formats. For URLs, fetches via httpx.
+    """
+    text: str
+
+    if source.startswith(("http://", "https://")):
+        import httpx
+        resp = httpx.get(source, follow_redirects=True, timeout=30)
+        resp.raise_for_status()
+        text = resp.text
+    else:
+        path = Path(source).expanduser().resolve()
+        if not path.is_file():
+            raise ConnectionConfigurationError(
+                tool_name="api",
+                detail=f"OpenAPI spec file not found: {path}",
+            )
+        text = path.read_text(encoding="utf-8")
+
+    # Try JSON first, fall back to YAML
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    try:
+        import yaml
+        return yaml.safe_load(text)
+    except ImportError:
+        raise ConnectionConfigurationError(
+            tool_name="api",
+            detail=(
+                "OpenAPI spec appears to be YAML but PyYAML is required to parse it. "
+                "Install it with: pip install pyyaml"
+            ),
+        )
+    except Exception as exc:
+        raise ConnectionConfigurationError(
+            tool_name="api",
+            detail=f"Failed to parse OpenAPI spec: {exc}",
+        )
+
+
+def _resolve_ref(spec: Dict[str, Any], ref: str) -> Dict[str, Any]:
+    """Resolve a $ref pointer like '#/components/schemas/Pet'."""
+    if not ref.startswith("#/"):
+        return {}
+    parts = ref.lstrip("#/").split("/")
+    node = spec
+    for part in parts:
+        node = node.get(part, {})
+        if not isinstance(node, dict):
+            return {}
+    return node
+
+
+def _deep_resolve(spec: Dict[str, Any], schema: Any, depth: int = 0) -> Any:
+    """Recursively resolve $ref pointers in a schema, up to a depth limit."""
+    if depth > 8 or not isinstance(schema, dict):
+        return schema
+    if "$ref" in schema:
+        resolved = _resolve_ref(spec, schema["$ref"])
+        return _deep_resolve(spec, resolved, depth + 1)
+    result = {}
+    for key, value in schema.items():
+        if isinstance(value, dict):
+            result[key] = _deep_resolve(spec, value, depth + 1)
+        elif isinstance(value, list):
+            result[key] = [
+                _deep_resolve(spec, item, depth + 1) if isinstance(item, dict) else item
+                for item in value
+            ]
+        else:
+            result[key] = value
+    return result
+
+
+class OpenAPICompiler:
+    """
+    Compiles an OpenAPI 3.x specification into Delfhos-native tool_docs and registry entries.
+
+    No LLM needed — pure deterministic schema transformation.
+    """
+
+    def __init__(self, tool_name: str, spec_source: str, base_url: Optional[str] = None):
+        """
+        Args:
+            tool_name:   Delfhos tool name (e.g., "petstore", "stripe")
+            spec_source: URL or file path to an OpenAPI 3.x JSON/YAML spec
+            base_url:    Override for the API base URL. If None, extracted from
+                         spec's ``servers[0].url``.
+        """
+        self.tool_name = tool_name
+        self.spec_source = spec_source
+        self.base_url_override = base_url
+        self._cache_dir = CACHE_DIR / self._cache_key()
+        self.manifest: Optional[Dict[str, Any]] = None
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def compile(self, spec: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Parse the OpenAPI spec and compile every operation into Delfhos format.
+
+        Args:
+            spec: Pre-loaded spec dict. If None, loads from ``self.spec_source``.
+
+        Returns:
+            Compiled manifest dict (same shape as MCPCompiler manifests).
+        """
+        if spec is None:
+            spec = _load_spec(self.spec_source)
+
+        # Validate minimum spec structure
+        if "paths" not in spec:
+            raise ConnectionConfigurationError(
+                tool_name="api",
+                detail="OpenAPI spec has no 'paths' key. Ensure this is a valid OpenAPI 3.x document.",
+            )
+
+        # Extract base URL
+        base_url = self.base_url_override
+        if not base_url:
+            servers = spec.get("servers", [])
+            if servers and isinstance(servers[0], dict):
+                base_url = servers[0].get("url", "")
+            if not base_url:
+                raise ConnectionConfigurationError(
+                    tool_name="api",
+                    detail=(
+                        "No base URL found in spec's 'servers' field and no base_url= was provided. "
+                        "Pass base_url='https://api.example.com' explicitly."
+                    ),
+                )
+
+        # Strip trailing slash for clean path joining
+        base_url = base_url.rstrip("/")
+
+        compiled_tools = []
+        count = 0
+
+        for path, path_item in spec.get("paths", {}).items():
+            if not isinstance(path_item, dict):
+                continue
+            for method in ("get", "post", "put", "patch", "delete", "head", "options"):
+                operation = path_item.get(method)
+                if not operation or not isinstance(operation, dict):
+                    continue
+                if count >= MAX_ENDPOINTS:
+                    break
+                compiled = self._compile_operation(spec, method, path, operation, base_url)
+                if compiled:
+                    compiled_tools.append(compiled)
+                    count += 1
+
+        info = spec.get("info", {})
+        self.manifest = {
+            "spec_source": self.spec_source,
+            "base_url": base_url,
+            "compiled_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "api_title": info.get("title", "unknown"),
+            "api_version": info.get("version", "unknown"),
+            "tool_name": self.tool_name,
+            "tools": compiled_tools,
+        }
+
+        self._save_cache()
+        return self.manifest
+
+    def load_cache(self) -> Optional[Dict[str, Any]]:
+        """Try to load a previously compiled manifest from cache."""
+        manifest_path = self._cache_dir / "manifest.json"
+        if not manifest_path.exists():
+            return None
+        try:
+            with open(manifest_path, "r") as f:
+                self.manifest = json.load(f)
+            return self.manifest
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def get_capability(self):
+        """Build a ToolCapability from the compiled manifest.
+
+        Returns:
+            (ToolCapability, action_summaries_dict)
+        """
+        from cortex._engine.tools.tool_registry import ToolCapability, ToolActionSpec
+
+        if not self.manifest:
+            raise ConnectionConfigurationError(
+                tool_name="api",
+                detail="No compiled manifest. Call compile() or load_cache() first.",
+            )
+
+        actions = []
+        summaries = {}
+
+        for tool in self.manifest["tools"]:
+            action_name = tool["action_name"]
+            actions.append(ToolActionSpec(
+                action=action_name,
+                description=tool["description"],
+                parameters=tool["parameters"],
+            ))
+            summaries[action_name] = tool["summary"]
+
+        capability = ToolCapability(
+            tool_name=self.tool_name,
+            actions=actions,
+        )
+        return capability, summaries
+
+    def get_api_docs(self) -> Dict[str, str]:
+        """Build COMPRESSED_API_DOCS entries from the compiled manifest.
+
+        Returns:
+            Dict of "tool:action" → compressed API doc string
+        """
+        if not self.manifest:
+            raise ConnectionConfigurationError(
+                tool_name="api",
+                detail="No compiled manifest. Call compile() or load_cache() first.",
+            )
+        docs = {}
+        for tool in self.manifest["tools"]:
+            key = f"{self.tool_name}:{tool['action_name'].lower()}"
+            docs[key] = tool["api_doc"]
+        return docs
+
+    def get_action_names(self) -> List[str]:
+        """Get list of compiled action names from the manifest."""
+        if not self.manifest:
+            return []
+        return [t["action_name"] for t in self.manifest["tools"]]
+
+    # ── Single Operation Compilation ──────────────────────────────────────────
+
+    def _compile_operation(
+        self,
+        spec: Dict[str, Any],
+        method: str,
+        path: str,
+        operation: Dict[str, Any],
+        base_url: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Compile a single OpenAPI operation into Delfhos format."""
+
+        # Derive a clean function name
+        operation_id = operation.get("operationId")
+        if operation_id:
+            func_name = self._sanitize_name(operation_id)
+        else:
+            func_name = self._path_to_name(method, path)
+
+        action_name = func_name.upper()
+
+        description = (
+            operation.get("summary")
+            or operation.get("description")
+            or f"{method.upper()} {path}"
+        )
+
+        # Collect all parameters (path, query, header) and request body
+        params_spec = self._collect_parameters(spec, operation, path)
+
+        # Build Python signature and parameter descriptions
+        signature, parameters = self._build_signature(func_name, params_spec)
+
+        summary = self._build_summary(description)
+        api_doc = self._build_api_doc(func_name, method, path, description, signature, params_spec)
+
+        return {
+            "func_name": func_name,
+            "action_name": action_name,
+            "method": method.upper(),
+            "path": path,
+            "base_url": base_url,
+            "description": description,
+            "summary": summary,
+            "parameters": parameters,
+            "python_signature": signature,
+            "api_doc": api_doc,
+            "params_spec": params_spec,
+        }
+
+    def _collect_parameters(
+        self, spec: Dict[str, Any], operation: Dict[str, Any], path: str,
+    ) -> List[Dict[str, Any]]:
+        """Collect path, query, header params and request body fields into a flat list.
+
+        Each entry: {name, in, type, description, required, default?}
+        """
+        params: List[Dict[str, Any]] = []
+
+        # Operation-level parameters (path, query, header, cookie)
+        for raw_param in operation.get("parameters", []):
+            param = _deep_resolve(spec, raw_param)
+            schema = param.get("schema", {})
+            schema = _deep_resolve(spec, schema)
+            params.append({
+                "name": param.get("name", ""),
+                "in": param.get("in", "query"),
+                "type": self._describe_type(schema),
+                "description": param.get("description") or schema.get("description", ""),
+                "required": param.get("required", False),
+                "default": schema.get("default"),
+            })
+
+        # Request body → flatten top-level properties as body params
+        request_body = operation.get("requestBody")
+        if request_body:
+            request_body = _deep_resolve(spec, request_body)
+            content = request_body.get("content", {})
+            # Prefer application/json
+            media = content.get("application/json") or next(iter(content.values()), {})
+            body_schema = _deep_resolve(spec, media.get("schema", {}))
+
+            if body_schema.get("type") == "object" and body_schema.get("properties"):
+                body_required = set(body_schema.get("required", []))
+                for prop_name, prop_schema in body_schema["properties"].items():
+                    prop_schema = _deep_resolve(spec, prop_schema)
+                    params.append({
+                        "name": prop_name,
+                        "in": "body",
+                        "type": self._describe_type(prop_schema),
+                        "description": prop_schema.get("description", ""),
+                        "required": prop_name in body_required,
+                        "default": prop_schema.get("default"),
+                    })
+            else:
+                # Non-object body (raw string, array, etc.) → single `body` param
+                params.append({
+                    "name": "body",
+                    "in": "body",
+                    "type": self._describe_type(body_schema),
+                    "description": request_body.get("description", "Request body"),
+                    "required": request_body.get("required", False),
+                    "default": None,
+                })
+
+        return params
+
+    def _build_signature(
+        self, func_name: str, params_spec: List[Dict[str, Any]],
+    ) -> Tuple[str, Dict[str, str]]:
+        """Build a Python function signature and parameter descriptions dict."""
+        parts = []
+        parameters: Dict[str, str] = {}
+
+        # Required params first, then optional
+        required = [p for p in params_spec if p.get("required")]
+        optional = [p for p in params_spec if not p.get("required")]
+
+        for param in required + optional:
+            name = param["name"]
+            type_str = param["type"]
+            desc = param.get("description", name)
+            parameters[name] = desc
+
+            if param.get("required"):
+                parts.append(f"{name}: {type_str}")
+            else:
+                default = param.get("default")
+                if default is None:
+                    default_str = "None"
+                elif isinstance(default, str):
+                    default_str = f'"{default}"'
+                elif isinstance(default, bool):
+                    default_str = str(default)
+                else:
+                    default_str = str(default)
+                parts.append(f"{name}: {type_str} = {default_str}")
+
+        sig = f"{func_name}({', '.join(parts)})"
+        return sig, parameters
+
+    def _describe_type(self, schema: Dict[str, Any], depth: int = 0) -> str:
+        """Convert a JSON Schema type into an LLM-friendly type string."""
+        if depth > 4:
+            return "object"
+
+        schema_type = schema.get("type", "string")
+
+        if schema_type == "object":
+            props = schema.get("properties", {})
+            if props:
+                req = set(schema.get("required", []))
+                fields = []
+                for fname, fprop in list(props.items())[:8]:
+                    inner = self._describe_type(fprop, depth + 1)
+                    opt = "" if fname in req else "?"
+                    fields.append(f"{fname}{opt}: {inner}")
+                return "{" + ", ".join(fields) + "}"
+            return "object"
+
+        if schema_type == "array":
+            items = schema.get("items", {})
+            if items:
+                inner = self._describe_type(items, depth + 1)
+                return f"array[{inner}]"
+            return "array"
+
+        if "enum" in schema:
+            vals = schema["enum"][:6]
+            return "string(" + "|".join(str(v) for v in vals) + ")"
+
+        return _TYPE_MAP.get(schema_type, schema_type)
+
+    # ── Doc builders ─────────────────────────────────────────────────────────
+
+    def _build_summary(self, description: str) -> str:
+        """Build a compact summary for the prefilter (~15 tokens)."""
+        first_sentence = description.split(".")[0].strip()
+        if len(first_sentence) > 80:
+            first_sentence = first_sentence[:77] + "..."
+        return first_sentence
+
+    def _build_api_doc(
+        self,
+        func_name: str,
+        method: str,
+        path: str,
+        description: str,
+        signature: str,
+        params_spec: List[Dict[str, Any]],
+    ) -> str:
+        """Build comprehensive API doc for code generation prompts."""
+        lines = [
+            f"# await {self.tool_name}.{signature}",
+            f"# {method.upper()} {path} — {description}",
+        ]
+
+        # Add parameter hints (max 8)
+        hints = []
+        for p in params_spec[:8]:
+            loc = p["in"]
+            desc = p.get("description", "")
+            req = " (required)" if p.get("required") else ""
+            if desc:
+                hints.append(f"#   {p['name']} [{loc}]{req}: {desc}")
+        if hints:
+            lines.extend(hints)
+
+        return "\n".join(lines)
+
+    # ── Name helpers ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _sanitize_name(operation_id: str) -> str:
+        """Convert an operationId into a clean Python function name.
+
+        Examples:
+            'getApiV2UsersList' → 'get_api_v2_users_list'
+            'create-user'       → 'create_user'
+            'listPets'          → 'list_pets'
+        """
+        # Insert underscore before uppercase runs (camelCase → snake_case)
+        name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", operation_id)
+        # Replace non-alphanumeric with underscore
+        name = re.sub(r"[^a-zA-Z0-9]", "_", name)
+        # Collapse multiple underscores, strip edges
+        name = re.sub(r"_+", "_", name).strip("_").lower()
+        return name or "unknown_operation"
+
+    @staticmethod
+    def _path_to_name(method: str, path: str) -> str:
+        """Derive a function name from HTTP method + path when operationId is absent.
+
+        Examples:
+            ('get', '/users/{id}')       → 'get_users_by_id'
+            ('post', '/orders')          → 'post_orders'
+            ('delete', '/items/{itemId}')→ 'delete_items_by_item_id'
+        """
+        # Remove path parameter braces and convert to descriptive suffix
+        clean = path.strip("/")
+        parts = []
+        for segment in clean.split("/"):
+            if segment.startswith("{") and segment.endswith("}"):
+                param = segment[1:-1]
+                # camelCase → snake_case
+                param = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", param).lower()
+                parts.append(f"by_{param}")
+            else:
+                parts.append(segment)
+
+        name = f"{method}_{'_'.join(parts)}"
+        name = re.sub(r"[^a-zA-Z0-9]", "_", name)
+        name = re.sub(r"_+", "_", name).strip("_").lower()
+        return name or f"{method}_unknown"
+
+    # ── Cache Management ─────────────────────────────────────────────────────
+
+    def _cache_key(self) -> str:
+        """Generate a stable cache key from spec source + tool name."""
+        key_str = f"{self.tool_name}|{self.spec_source}"
+        short_hash = hashlib.sha256(key_str.encode()).hexdigest()[:12]
+        return f"{self.tool_name}_{short_hash}"
+
+    def _save_cache(self) -> None:
+        """Save compiled manifest to disk cache."""
+        if not self.manifest:
+            return
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = self._cache_dir / "manifest.json"
+        with open(manifest_path, "w") as f:
+            json.dump(self.manifest, f, indent=2)
+
+    def clear_cache(self) -> None:
+        """Delete the cached manifest."""
+        import shutil
+        if self._cache_dir.exists():
+            shutil.rmtree(self._cache_dir)

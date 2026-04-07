@@ -295,7 +295,7 @@ async def calendar_tool(
             )
             events = result.get("items", [])
             summary = f"Found {len(events)} event(s) between {time_min} and {time_max}."
-            console.tool(f"[CALENDAR LIST] {summary}", task_id=task_id, agent_id=agent_id)
+
             return {
                 "message": summary,
                 "events": events,
@@ -311,7 +311,7 @@ async def calendar_tool(
                 lambda: client.get_event(calendar_id=calendar_id, event_id=event_id)
             )
             summary = f"Fetched event '{event.get('summary', 'Untitled')}'."
-            console.tool(f"[CALENDAR GET] {summary}", task_id=task_id, agent_id=agent_id)
+
             return {"message": summary, "event": event}
 
         if action == "CREATE":
@@ -363,7 +363,7 @@ async def calendar_tool(
                 or event.get("conferenceData", {}).get("entryPoints", [{}])[0].get("uri")
             )
             summary = f"Created event '{event.get('summary', 'Untitled')}' on {calendar_id}."
-            console.tool(f"[CALENDAR CREATE] {summary}", task_id=task_id, agent_id=agent_id)
+
             return {
                 "message": summary,
                 "event": event,
@@ -423,7 +423,7 @@ async def calendar_tool(
                 )
             )
             summary = f"Updated event '{event.get('summary', 'Untitled')}'."
-            console.tool(f"[CALENDAR UPDATE] {summary}", task_id=task_id, agent_id=agent_id)
+
             return {"message": summary, "event": event, "eventId": event_id}
 
         if action == "DELETE":
@@ -438,7 +438,7 @@ async def calendar_tool(
                 )
             )
             summary = f"Deleted event '{event_id}' from {calendar_id}."
-            console.tool(f"[CALENDAR DELETE] {summary}", task_id=task_id, agent_id=agent_id)
+
             return {"message": summary, "eventId": event_id}
 
         if action == "RESPOND":
@@ -463,7 +463,7 @@ async def calendar_tool(
                 )
             )
             summary = f"Updated RSVP for {attendee_email} → {response_status}."
-            console.tool(f"[CALENDAR RESPOND] {summary}", task_id=task_id, agent_id=agent_id)
+
             return {"message": summary, "event": event, "eventId": event_id}
 
         # Unknown action - format beautiful error with available actions

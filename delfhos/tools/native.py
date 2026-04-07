@@ -12,6 +12,7 @@ _TOOL_MAP = {
     "Calendar":    ("cortex.connections.calendar",     "CalendarConnection"),
     "Docs":        ("cortex.connections.docs",         "DocsConnection"),
     "WebSearch":   ("cortex.connections.websearch",    "WebSearchConnection"),
+    "APITool":     ("cortex.connections.api",          "APITool"),
 }
 
 # Long-name aliases map to the same classes

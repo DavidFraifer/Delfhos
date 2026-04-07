@@ -1,7 +1,36 @@
 """Type stubs for delfhos.memory.persistent — Long-term semantic memory."""
 
-from typing import Iterator, List, Optional, Union
+from typing import Iterator, List, Optional, Union, Tuple, Dict
 from delfhos.memory.types import Fact
+
+class EmbeddingModelInfo:
+    """Auto-detect embedding model capabilities and requirements.
+    
+    Supports any sentence-transformers model with automatic detection of:
+    - Whether trust_remote_code is required
+    - Whether instruction/prefix tokens are needed
+    """
+    
+    REQUIRES_TRUST_REMOTE: frozenset[str]
+    MODELS_WITH_PREFIXES: Dict[str, Tuple[str, str]]
+    
+    @staticmethod
+    def _matches_pattern(model_name: str, pattern: str) -> bool: ...
+    
+    @classmethod
+    def requires_trust_remote_code(cls, model_name: str) -> bool:
+        """Check if model requires trust_remote_code=True."""
+        ...
+    
+    @classmethod
+    def get_prefixes(cls, model_name: str) -> Optional[Tuple[str, str]]:
+        """Get (document_prefix, query_prefix) if model uses them, else None."""
+        ...
+    
+    @classmethod
+    def normalize_model_name(cls, model_name: str, aliases: Dict[str, str]) -> str:
+        """Resolve aliases and normalize model name."""
+        ...
 
 class Memory:
     """
@@ -10,29 +39,33 @@ class Memory:
     Uses local sentence-transformer embeddings by default — no API key needed,
     nothing leaves your machine.
 
-    Usage::
+    Supports ANY sentence-transformers model with automatic detection of
+    model-specific requirements (trust_remote_code, instruction prefixes, etc.).
 
-        # Default — local all-MiniLM-L6-v2, ~90MB download (cached forever)
+    Popular models::
+
+        # Default — all-MiniLM-L6-v2, ~90MB download (good balance)
         memory = Memory()
+        
+        # All models from https://www.sbert.net/docs/pretrained_models.html work
+        memory = Memory(embedding_model="all-mpnet-base-v2")      # Higher quality
+        memory = Memory(embedding_model="nomic-embed-text")       # Auto-detected prefixes
+        memory = Memory(embedding_model="bge-small-en-v1.5")      # BGE models
+        
+        # HuggingFace model IDs work directly too
+        memory = Memory(embedding_model="sentence-transformers/all-MiniLM-L6-v2")
 
-        # Better quality local model
-        memory = Memory(embedding_model="nomic-embed-text")
+    Built-in aliases for convenience::
 
-        # Use a specific namespace to isolate facts
-        user_memory = Memory(namespace="user_profile")
-        user_memory.save("User likes Python.")
-
-    Any Sentence Transformers-compatible embedding model can be used.
-    Built-in aliases::
-
-        all-MiniLM-L6-v2      -> sentence-transformers/all-MiniLM-L6-v2 (default)
-        nomic-embed-text      -> nomic-ai/nomic-embed-text-v1.5
+        all-MiniLM-L6-v2  -> sentence-transformers/all-MiniLM-L6-v2
+        nomic-embed-text  -> nomic-ai/nomic-embed-text-v1.5
 
     Args:
         guidelines: Optional guidelines for memory retrieval behavior.
         path: SQLite file path. Defaults to ~/delfhos/memory/<namespace>.db.
         namespace: Namespace to isolate facts (default: "default").
-        embedding_model: Sentence-transformer model name or alias (default: "all-MiniLM-L6-v2").
+        embedding_model: Any sentence-transformer model name, HF model ID, or alias
+                        (default: "all-MiniLM-L6-v2").
     """
     guidelines: Optional[str]
     namespace: str
@@ -56,7 +89,6 @@ class Memory:
         Returns:
             Newline-joined string of all facts, or empty string if empty.
         """
-        ...
 
     def search(self, query: str, top_k: int = 5, threshold: float = 0.3) -> List[Fact]:
         """Fetch the most relevant memories using semantic similarity.

@@ -3,13 +3,74 @@ import json
 import sqlite3
 import logging
 import re
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 import threading
 import io
 from contextlib import redirect_stdout, redirect_stderr
 from datetime import datetime
 from typing import Union, Iterator
 from .types import Fact
+
+
+class EmbeddingModelInfo:
+    """
+    Auto-detect embedding model capabilities and requirements.
+    
+    Supports any sentence-transformers model with automatic detection of:
+    - Whether trust_remote_code is required
+    - Whether instruction/prefix tokens are needed
+    - Model dimension (inferred after loading)
+    """
+    
+    # Models that require trust_remote_code=True for safety/licensing
+    REQUIRES_TRUST_REMOTE = frozenset([
+        "nomic-embed-text",
+        "nomic-ai/nomic-embed-text",
+        "bge-",  # All BGE models
+        "jina-",  # All Jina models
+    ])
+    
+    # Models with instruction/prefix requirements (e.g., search_document/search_query)
+    MODELS_WITH_PREFIXES = {
+        "nomic-embed-text": ("search_document: ", "search_query: "),
+        "nomic-ai/nomic-embed-text-v1.5": ("search_document: ", "search_query: "),
+        "nomic-ai/nomic-embed-text-v1": ("search_document: ", "search_query: "),
+    }
+    
+    @staticmethod
+    def _matches_pattern(model_name: str, pattern: str) -> bool:
+        """Check if model name contains or starts with pattern."""
+        model_lower = model_name.lower()
+        return pattern.lower() in model_lower or model_lower.startswith(pattern.lower())
+    
+    @classmethod
+    def requires_trust_remote_code(cls, model_name: str) -> bool:
+        """Check if model requires trust_remote_code=True."""
+        model_lower = model_name.lower()
+        return any(
+            cls._matches_pattern(model_lower, pattern)
+            for pattern in cls.REQUIRES_TRUST_REMOTE
+        )
+    
+    @classmethod
+    def get_prefixes(cls, model_name: str) -> Optional[Tuple[str, str]]:
+        """Get (document_prefix, query_prefix) if model uses them, else None."""
+        # Exact matches in registry
+        for registered_name, prefixes in cls.MODELS_WITH_PREFIXES.items():
+            if model_name == registered_name or model_name.endswith("/" + registered_name.split("/")[-1]):
+                return prefixes
+        
+        # Pattern-based detection for nomic models
+        if "nomic" in model_name.lower() and "embed-text" in model_name.lower():
+            return ("search_document: ", "search_query: ")
+        
+        return None
+    
+    @classmethod
+    def normalize_model_name(cls, model_name: str, aliases: Dict[str, str]) -> str:
+        """Resolve aliases and normalize model name."""
+        return aliases.get(model_name, model_name)
+
 
 class Memory:
     """
@@ -19,29 +80,38 @@ class Memory:
     nothing leaves your machine. Good enough for matching business facts like
     "Acme Corp billing email" against "process Acme invoice".
 
-    Usage::
+    Supports ANY sentence-transformers model automatically. Popular choices::
 
-        # Default — local all-MiniLM-L6-v2, ~90MB download (cached forever)
+        # Default — all-MiniLM-L6-v2, ~90MB download (good balance)
         memory = Memory()
-
-        # Better quality local model
-        memory = Memory(embedding_model="nomic-embed-text")
-
+        
+        # All models from https://www.sbert.net/docs/pretrained_models.html work
+        memory = Memory(embedding_model="all-mpnet-base-v2")      # Higher quality
+        memory = Memory(embedding_model="nomic-embed-text")       # Auto-detected prefixes
+        memory = Memory(embedding_model="bge-small-en-v1.5")      # BGE models
+        
+        # Use HuggingFace model IDs directly
+        memory = Memory(embedding_model="sentence-transformers/all-MiniLM-L6-v2")
+        
         # Use a specific namespace to isolate facts
         user_memory = Memory(namespace="user_profile")
         user_memory.save("User likes Python.")
 
-    Any Sentence Transformers-compatible embedding model can be used.
-    The following aliases are built-in::
-
-        all-MiniLM-L6-v2      -> sentence-transformers/all-MiniLM-L6-v2 (default)
-        nomic-embed-text      -> nomic-ai/nomic-embed-text-v1.5
+    Model requirements are auto-detected. Supports:
+    - Instruction-based models (nomic-embed-text, BGE, Jina, etc.)
+    - Standard embedding models (all-MiniLM, MPNET, etc.)
+    - Any future sentence-transformers compatible model
+    
+    Built-in aliases for convenience::
+        all-MiniLM-L6-v2  -> sentence-transformers/all-MiniLM-L6-v2
+        nomic-embed-text  -> nomic-ai/nomic-embed-text-v1.5
     """
 
     _DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
     _MODEL_ALIASES = {
         "all-MiniLM-L6-v2": "all-MiniLM-L6-v2",
         "nomic-embed-text": "nomic-ai/nomic-embed-text-v1.5",
+        # Add more aliases as needed
     }
 
     def __init__(
@@ -106,12 +176,10 @@ class Memory:
 
     def _resolve_embedding_model_name(self) -> str:
         """Resolve user-provided model name, preserving compatibility aliases."""
-        return self._MODEL_ALIASES.get(self.embedding_model_name, self.embedding_model_name)
-
-    def _requires_nomic_prefix(self) -> bool:
-        """Nomic models expect search_document/search_query instruction prefixes."""
-        target = self._resolve_embedding_model_name().lower()
-        return "nomic-embed-text" in target
+        return EmbeddingModelInfo.normalize_model_name(
+            self.embedding_model_name, 
+            self._MODEL_ALIASES
+        )
 
     def _get_model(self):
         """Lazy-load the sentence-transformer model once."""
@@ -160,12 +228,25 @@ class Memory:
         if console:
             console.info("Memory", msg)
 
-        kwargs = {"trust_remote_code": True} if self._requires_nomic_prefix() else {}
+        # Auto-detect if model requires trust_remote_code
+        trust_remote = EmbeddingModelInfo.requires_trust_remote_code(target_model)
+        kwargs = {"trust_remote_code": trust_remote} if trust_remote else {}
 
         # Silence residual noisy third-party model loading output that bypasses
         # logger settings (stderr/stdout writes).
-        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            self._model = SentenceTransformer(target_model, **kwargs)
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self._model = SentenceTransformer(target_model, **kwargs)
+        except Exception as e:
+            # If loading fails without trust_remote_code, try with it as fallback
+            if not trust_remote:
+                try:
+                    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                        self._model = SentenceTransformer(target_model, trust_remote_code=True)
+                except Exception:
+                    raise e  # Raise original error
+            else:
+                raise
         
         model_load_time = time.time() - model_load_start
         ready_msg = f"Embedding model ready ({model_load_time:.1f}s)"
@@ -179,17 +260,30 @@ class Memory:
         """Return numpy array of shape (len(texts), dim)."""
         import numpy as np
         model = self._get_model()
-        if self._requires_nomic_prefix():
-            # nomic requires a task prefix
-            texts = [f"search_document: {t}" for t in texts]
-        return model.encode(texts, normalize_embeddings=True)
+        
+        # Auto-detect if model requires instruction prefixes
+        prefixes = EmbeddingModelInfo.get_prefixes(self._resolve_embedding_model_name())
+        
+        texts_to_encode = texts
+        if prefixes:
+            doc_prefix = prefixes[0]
+            texts_to_encode = [f"{doc_prefix}{t}" for t in texts]
+        
+        return model.encode(texts_to_encode, normalize_embeddings=True)
 
     def _embed_query(self, query: str):
         """Embed a single query string. Returns 1-D numpy array."""
         model = self._get_model()
-        if self._requires_nomic_prefix():
-            query = f"search_query: {query}"
-        return model.encode([query], normalize_embeddings=True)[0]
+        
+        # Auto-detect if model requires instruction prefixes
+        prefixes = EmbeddingModelInfo.get_prefixes(self._resolve_embedding_model_name())
+        
+        query_to_encode = query
+        if prefixes:
+            query_prefix = prefixes[1]
+            query_to_encode = f"{query_prefix}{query}"
+        
+        return model.encode([query_to_encode], normalize_embeddings=True)[0]
 
     @staticmethod
     def _blob_to_vec(blob: bytes):

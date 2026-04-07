@@ -162,22 +162,20 @@ async def load_task_files(task_id: str) -> List[FileHandler]:
     for file_path in upload_dir.glob("*"):
         if file_path.is_file():
             try:
-                handler = FileHandler(str(file_path), task_id=task_id)
                 files.append(handler)
             except Exception as e:
-                console.error(f"Failed to load file {file_path}: {e}", task_id=task_id)
-    
+                pass
+
     # Also search in output subdirectory
     output_dir = upload_dir / "output"
     if output_dir.exists():
         for file_path in output_dir.glob("*"):
             if file_path.is_file():
                 try:
-                    handler = FileHandler(str(file_path), task_id=task_id)
                     files.append(handler)
                 except Exception as e:
-                    console.error(f"Failed to load file {file_path}: {e}", task_id=task_id)
-    
+                    pass
+
     return files
 
 
@@ -298,9 +296,6 @@ async def save_output_file(
     else:
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(content)
-    
-    console.tool(f"[FILES] Saved output file: {filename} ({file_path.stat().st_size} bytes)", 
-                 task_id=task_id, agent_id=agent_id)
-    
+            
     return str(file_path)
 

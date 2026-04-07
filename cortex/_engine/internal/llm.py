@@ -11,6 +11,7 @@ import requests
 from typing import List, Dict, Any, Optional, Union, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from delfhos.errors import LLMExecutionError
+from delfhos.llm_config import LLMConfig
 
 # Increase default thread pool for asyncio.to_thread() calls.
 # The default (min(32, os.cpu_count()+4)) can bottleneck parallel LLM calls
@@ -50,13 +51,23 @@ def _raise_llm_api_error(provider: str, detail: str) -> None:
     )
 
 
-def resolve_model(model: str) -> Tuple[str, str]:
-    """Resolve provider and provider-native model id from a user model string.
+def resolve_model(model: Union[str, LLMConfig]) -> Tuple[str, str, Optional[str], Optional[str]]:
+    """Resolve provider and model id from a model string or LLMConfig.
 
-    Supported forms:
-      - Plain model id: gemini-2.5-flash, gpt-4.1, claude-3-7-sonnet
+    Returns: (provider, model_id, base_url, api_key)
+
+    Supported string forms:
+      - Auto-detected: gemini-2.5-flash, gpt-4.1, claude-3-7-sonnet
       - Provider-prefixed: google/gemini-2.5-flash, openai:gpt-4.1
+      - OpenAI-compatible (any model): openai/llama3.2, openai/mistral-7b-instruct
+
+    For full control (custom base URL, local servers, enterprise endpoints):
+      - LLMConfig(model="llama3.2", base_url="http://localhost:11434/v1")
     """
+    # LLMConfig: always routes to openai-compatible backend with custom base_url/api_key
+    if isinstance(model, LLMConfig):
+        return "openai", model.model, model.base_url, model.api_key
+
     if not model or not isinstance(model, str):
         raise_error("LLM-001", context={"model": model, "error": "Model identifier must be a non-empty string"})
 
@@ -73,42 +84,55 @@ def resolve_model(model: str) -> Tuple[str, str]:
                 continue
 
             if provider == "google" and candidate_lower.startswith("gemini"):
-                return provider, candidate
+                return provider, candidate, None, None
             if provider == "anthropic" and candidate_lower.startswith("claude"):
-                return provider, candidate
-            if provider == "openai" and (
-                candidate_lower.startswith(("gpt", "o1", "o3", "o4", "chatgpt")) or "gpt-" in candidate_lower
-            ):
-                return provider, candidate
+                return provider, candidate, None, None
+            # openai/ prefix: accept ANY model name (for openai-compatible endpoints)
+            if provider == "openai":
+                return provider, candidate, None, None
 
             raise_error(
                 "LLM-001",
                 context={
                     "model": model,
-                    "error": "Only Gemini, GPT, and Claude model families are supported",
-                    "hint": "Use gemini-*, gpt-* (or o1/o3/o4), or claude-*",
+                    "error": f"Unrecognized model '{candidate}' for provider '{maybe_provider}'",
+                    "hint": (
+                        "For Google use gemini-*, for Anthropic use claude-*. "
+                        "For any OpenAI-compatible model (local or cloud) prefix with openai/ "
+                        "or pass an LLMConfig with base_url."
+                    ),
                 },
             )
 
     if lowered.startswith("gemini"):
-        return "google", model_text
+        return "google", model_text, None, None
     if lowered.startswith("claude"):
-        return "anthropic", model_text
+        return "anthropic", model_text, None, None
     if lowered.startswith(("gpt", "o1", "o3", "o4", "chatgpt")) or "gpt-" in lowered:
-        return "openai", model_text
+        return "openai", model_text, None, None
 
     raise_error(
         "LLM-001",
         context={
             "model": model,
-            "error": "Only Gemini, GPT, and Claude model families are supported",
-            "hint": "Use gemini-*, gpt-* (or o1/o3/o4), or claude-*",
+            "error": (
+                f"Cannot auto-detect provider for model '{model}'. "
+                "Known prefixes: gemini-* (Google), claude-* (Anthropic), gpt-*/o1/o3/o4 (OpenAI)."
+            ),
+            "hint": (
+                "Prefix your model with its provider: openai/llama3.2, google/gemini-2.5-flash. "
+                "For local/enterprise models, use LLMConfig(model=..., base_url=...)."
+            ),
         },
     )
 
 
-def _get_api_key(provider: str) -> str:
+def _get_api_key(provider: str, api_key_override: Optional[str] = None, base_url_override: Optional[str] = None) -> str:
     from ..config import get_cached_api_key
+
+    # Explicit api_key from LLMConfig always wins
+    if api_key_override is not None:
+        return api_key_override
 
     if provider == "inception":
         key = os.getenv("INCEPTION_AI")
@@ -117,10 +141,10 @@ def _get_api_key(provider: str) -> str:
         return key
 
     if provider == "openai":
-        # For OpenAI-compatible local endpoints, allow missing OPENAI_API_KEY and
-        # send a harmless placeholder bearer token.
-        base_url = _get_openai_base_url()
-        is_default_openai = base_url.rstrip("/") == "https://api.openai.com/v1"
+        # For OpenAI-compatible local endpoints (custom base_url or OPENAI_BASE_URL),
+        # allow missing OPENAI_API_KEY and send a harmless placeholder bearer token.
+        effective_base_url = (base_url_override or _get_openai_base_url()).rstrip("/")
+        is_default_openai = effective_base_url == "https://api.openai.com/v1"
         try:
             return get_cached_api_key(provider)
         except Exception:
@@ -132,11 +156,11 @@ def _get_api_key(provider: str) -> str:
 
 
 async def llm_completion_async(
-    model: str,
+    model: Union[str, LLMConfig],
     prompt: str,
     system_message: str = "",
     temperature: float = 0.0,
-    max_tokens: int = 100,  
+    max_tokens: int = 100,
     response_format: str = "text",
     use_web_search: bool = False,
     images: Optional[List[Union[str, Dict[str, Any]]]] = None,
@@ -153,8 +177,8 @@ async def llm_completion_async(
         else:
             prompt = f"{current_context}\n\n{prompt}"
 
-    provider, provider_model = resolve_model(model)
-    api_key = _get_api_key(provider)
+    provider, provider_model, base_url_override, api_key_override = resolve_model(model)
+    api_key = _get_api_key(provider, api_key_override=api_key_override, base_url_override=base_url_override)
 
     if provider == "google":
         # Run Gemini in dedicated thread pool for better parallelism
@@ -186,6 +210,7 @@ async def llm_completion_async(
             response_format,
             api_key,
             images,
+            base_url_override,
         )
 
     if provider == "anthropic":
@@ -586,8 +611,9 @@ def _openai_sync(
     response_format: str,
     api_key: str,
     images: Optional[List[Union[str, Dict[str, Any]]]],
+    base_url_override: Optional[str] = None,
 ) -> tuple[str, dict]:
-    session = _get_openai_session(api_key)
+    session = _get_openai_session(api_key, base_url_override=base_url_override)
 
     user_content: Union[str, List[Dict[str, Any]]] = prompt
     if images:
@@ -619,12 +645,13 @@ def _openai_sync(
         {"max_tokens": max_tokens},
     ]
 
+    effective_base_url = (base_url_override or _get_openai_base_url()).rstrip("/")
     response = None
     last_error = None
     for variant in payload_variants:
         payload = dict(base_payload)
         payload.update(variant)
-        response = session.post(_get_openai_base_url() + "/chat/completions", json=payload, timeout=45)
+        response = session.post(effective_base_url + "/chat/completions", json=payload, timeout=45)
         if response.status_code < 400:
             break
 
@@ -798,8 +825,9 @@ def _get_anthropic_base_url() -> str:
     return os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1").rstrip("/")
 
 
-def _get_openai_session(api_key: str) -> requests.Session:
-    cache_key = f"{_get_openai_base_url()}::{api_key}"
+def _get_openai_session(api_key: str, base_url_override: Optional[str] = None) -> requests.Session:
+    effective_base = (base_url_override or _get_openai_base_url()).rstrip("/")
+    cache_key = f"{effective_base}::{api_key}"
     if cache_key not in _openai_sessions:
         session = requests.Session()
         session.headers.update(

@@ -103,12 +103,7 @@ async def sql_tool(
     if action == "SCHEMA":
         try:
             schema = await asyncio.to_thread(client.get_schema)
-            console.tool(
-                "[SQL SCHEMA] Retrieved database schema",
-                details=schema[:4000],
-                task_id=task_id,
-                agent_id=agent_id,
-            )
+
             return {
                 "message": "Database schema retrieved successfully.",
                 "schema": schema,
@@ -135,12 +130,7 @@ async def sql_tool(
         # Force read-only mode: only allow SELECT / safe queries
         try:
             message, rows = await asyncio.to_thread(client.execute_query, sql_text, True)
-            console.tool(
-                "[SQL QUERY] Executed query",
-                details=f"{message} | sample={str(rows[:3])[:2000]}",
-                task_id=task_id,
-                agent_id=agent_id,
-            )
+
 
             if as_csv:
                 # Convert rows (list of dicts) to CSV string: header row + data rows
@@ -184,13 +174,6 @@ async def sql_tool(
         # Execute write operations (UPDATE, INSERT, DELETE, etc.) - NO read-only restriction
         try:
             message, rows = await asyncio.to_thread(client.execute_query, sql_text, False)
-            console.tool(
-                "[SQL EXECUTE] Executed write operation",
-                details=f"{message} | query={sql_text[:200]}",
-                task_id=task_id,
-                agent_id=agent_id,
-            )
-
             return {
                 "message": message,
                 "rows": rows if rows else [],

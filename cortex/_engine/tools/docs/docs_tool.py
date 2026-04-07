@@ -299,7 +299,7 @@ async def gdocs_tool(
         if document_id and operations_raw:
             await _execute_docs_call(lambda: client.batch_update(document_id, operations_raw))
 
-        console.tool(f"[DOCS CREATE] Created document: {title} (ID: {document_id})", task_id=task_id, agent_id=agent_id)
+
         return {
             "message": f"Document '{title}' created successfully",
             "document_id": document_id,
@@ -344,7 +344,7 @@ async def gdocs_tool(
         for element in body.get("content", []):
             content_text += extract_text(element)
         
-        console.tool(f"[DOCS READ] Read document: {title}", task_id=task_id, agent_id=agent_id)
+
         return {
             "message": f"Read document '{title}'",
             "document_id": document_id,
@@ -428,7 +428,7 @@ async def gdocs_tool(
         
         if requests:
             result = await _execute_docs_call(lambda: client.batch_update(document_id, requests))
-            console.tool(f"[DOCS UPDATE] Applied {len(requests)} operation(s)", task_id=task_id, agent_id=agent_id)
+
             return {
                 "message": f"Applied {len(requests)} operation(s) to document",
                 "document_id": document_id,
@@ -526,7 +526,7 @@ async def gdocs_tool(
         
         if requests:
             result = await _execute_docs_call(lambda: client.batch_update(document_id, requests))
-            console.tool(f"[DOCS FORMAT] Applied formatting", task_id=task_id, agent_id=agent_id)
+
             return {
                 "message": "Formatting applied successfully",
                 "document_id": document_id,
@@ -542,7 +542,7 @@ async def gdocs_tool(
         # Use Drive API to delete
         try:
             client.drive_service.files().delete(fileId=document_id).execute()
-            console.tool(f"[DOCS DELETE] Deleted document: {document_id}", task_id=task_id, agent_id=agent_id)
+
             return {
                 "message": "Document deleted successfully",
                 "document_id": document_id,

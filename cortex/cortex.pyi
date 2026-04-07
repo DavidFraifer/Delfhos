@@ -3,6 +3,10 @@
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from delfhos.memory import Chat, Memory
+from delfhos.llm_config import LLMConfig
+
+# LLMSpec: a model string or a fully configured LLMConfig for custom/local endpoints
+LLMSpec = Union[str, LLMConfig]
 
 class Response:
     """Unified response object for agent run execution."""
@@ -44,11 +48,11 @@ class Cortex:
         tools: Optional[List[Union[Any, Callable]]] = ...,
         chat: Optional[Chat] = ...,
         memory: Optional[Memory] = ...,
-        llm: Optional[str] = ...,
-        light_llm: Optional[str] = ...,
-        heavy_llm: Optional[str] = ...,
-        code_llm: Optional[str] = ...,
-        vision_llm: Optional[str] = ...,
+        llm: Optional[LLMSpec] = ...,
+        light_llm: Optional[LLMSpec] = ...,
+        heavy_llm: Optional[LLMSpec] = ...,
+        code_llm: Optional[LLMSpec] = ...,
+        vision_llm: Optional[LLMSpec] = ...,
         system_prompt: Optional[str] = ...,
         on_confirm: Optional[Callable] = ...,
         providers: Optional[Dict[str, str]] = ...,

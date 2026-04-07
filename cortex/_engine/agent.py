@@ -89,13 +89,13 @@ class Agent:
         verbose: If True, print detailed execution traces.
         providers: API key overrides {"google": "...", "openai": "..."}, etc.
     """
-    def __init__(self, tools: List[Union[str, Callable, Connection]], llm: Optional[str] = None, light_llm: Optional[str] = None, heavy_llm: Optional[str] = None,
+    def __init__(self, tools: List[Union[str, Callable, Connection]], llm=None, light_llm=None, heavy_llm=None,
                  agent_id: Optional[str] = None, auto_stop_timeout: Optional[int] = None,
                  on_confirm: Optional[Callable] = None,
                  system_prompt: Optional[str] = None,
-                 prefilter_llm: Optional[str] = None,
-                 code_generation_llm: Optional[str] = None,
-                 vision_llm: Optional[str] = None,
+                 prefilter_llm=None,
+                 code_generation_llm=None,
+                 vision_llm=None,
                  chat: Optional[Chat] = None,
                  memory: Optional[Memory] = None,
                  providers: Optional[Dict[str, str]] = None,
@@ -224,11 +224,14 @@ class Agent:
             (vision_llm, "vision_llm")
         ]
         
+        from delfhos.llm_config import LLMConfig
         for model, name in models_to_validate:
             if model is None:
                 continue
+            if isinstance(model, LLMConfig):
+                continue  # LLMConfig is always valid (validated in its own __post_init__)
             if not isinstance(model, str) or not model.strip():
-                raise_error("AGT-002", context={"model": model, "model_type": name, "reason": "Model must be a non-empty string"})
+                raise_error("AGT-002", context={"model": model, "model_type": name, "reason": "Model must be a non-empty string or LLMConfig"})
         
         self.tools = tools
         self.llm = llm  # Store original choice (could be None if using light_llm/heavy_llm)
@@ -350,7 +353,7 @@ class Agent:
         
         for tool in self.tools:
             if isinstance(tool, Connection):
-                # If it's an MCP connection, compile it (introspect + register)
+                # If the connection has a compile step (MCP, APITool), run it to introspect + register
                 if tool.connection_name == "mcp" or getattr(tool, "TOOL_NAME", "") == "mcp" or hasattr(tool, "compile"):
                     tool.compile()
 
@@ -514,7 +517,7 @@ class Agent:
             # (run() prints task box first, so we skip this to avoid duplication)
             if not suppress_startup_message:
                 available_tools = list(self.orchestrator.tools.tools.keys())
-                console.system("Agent started", f"Available tools: {', '.join(available_tools)}", agent_id=self.agent_id)
+                console.system("Agent ready", f"{', '.join(available_tools)}", agent_id=self.agent_id)
             
             # Start inactivity timer
             self._reset_inactivity_timer()
@@ -562,7 +565,8 @@ class Agent:
                 if self.chat is not None and getattr(self.chat, "persist", True) is False:
                     self.chat.clear()
 
-                console.system("Agent stopped", "All tasks terminated", agent_id=self.agent_id)
+                console.loading_stop_all()
+                console.system("Agent stopped", agent_id=self.agent_id)
             else:
                 report_error("AGT-005", context={"agent_id": self.agent_id, "current_state": "not running"})
     

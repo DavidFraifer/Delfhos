@@ -88,7 +88,7 @@ agent.stop()
 ## Built-in tools
 
 ```python
-from delfhos import Gmail, SQL, Sheets, Drive, Calendar, Docs, WebSearch, MCP
+from delfhos import Gmail, SQL, Sheets, Drive, Calendar, Docs, WebSearch, MCP, APITool
 ```
 
 ```python
@@ -103,6 +103,45 @@ agent.stop()
 
 **`allow`** — restrict which actions are available on the tool (`["read", "send"]`, `["schema", "query"]`, …).  
 **`confirm`** — when human approval is required: `True` (all), `False` (none), or a list of specific actions.
+
+---
+
+## REST API Integration (APITool)
+
+Connect any REST API with an OpenAPI 3.x specification — no custom code needed.
+
+```python
+from delfhos import Agent, APITool
+
+# From a public OpenAPI spec
+petstore = APITool(
+    spec="https://petstore3.swagger.io/api/v3/openapi.json",
+    allow=["list_pets", "get_pet_by_id"],
+    confirm=["create_pet", "delete_pet"],
+)
+
+# From a local spec with authentication
+internal = APITool(
+    spec="./openapi.yaml",
+    base_url="https://api.internal.corp/v1",
+    auth={"Authorization": "Bearer sk_..."},
+)
+
+# Inspect available endpoints
+print(petstore.inspect())  # Compact: endpoint names
+print(petstore.inspect(verbose=True))  # Detailed: methods, paths, descriptions
+
+agent = Agent(tools=[petstore, internal], llm="gemini-2.5-flash")
+agent.run("List all pets and create a new one named 'Buddy'")
+```
+
+**Features:**
+- Automatic endpoint compilation from OpenAPI specs (no LLM needed)
+- Path, query, and request body parameters extracted and typed
+- Auth headers and query params injected per-endpoint
+- `$ref` resolution for complex schemas
+- `allow=` and `confirm=` support for fine-grained access control
+- Caching: specs compiled once and cached to `~/delfhos/api_cache/`
 
 ---
 
@@ -122,7 +161,9 @@ agent.run_chat()  # starts a terminal session — type /help for commands
 
 ---
 
-## Memory
+## Memory & Long-term Context
+
+Delfhos supports both session memory and persistent semantic memory with 100+ embedding models.
 
 ```python
 from delfhos import Agent, Chat, Memory
@@ -134,6 +175,19 @@ agent = Agent(
     memory=Memory(namespace="my_agent"),                         # long-term semantic
 )
 ```
+
+**100+ Embedding Models:** Automatic detection and compatibility for:
+- **Proprietary:** OpenAI, Cohere, Anthropic, Google
+- **Open-source:** Sentence-Transformers (MiniLM, all-MiniLM, all-mpnet, etc.)
+- **Specialized:** BGE models (Alibaba), Jina, Nomic Embed, NV-Embed
+- **Local-first:** Run models locally via Ollama or Hugging Face Transformers
+
+Auto-detects model requirements:
+- `trust_remote_code` toggles (for BGE, Jina, etc.)
+- Instruction/prefix tokens (e.g., Nomic's "search_document:" prefix)
+- Model dimensions (inferred after loading)
+
+See [EMBEDDING_MODELS_GUIDE.md](https://github.com/Delfhos/delfhos/blob/main/EMBEDDING_MODELS_GUIDE.md) for the full compatibility matrix.
 
 ---
 
@@ -167,7 +221,7 @@ print(r.duration_ms) # wall-clock time in milliseconds
 
 ## Model support
 
-Pass any model string from Gemini, OpenAI, or Anthropic:
+**Cloud providers:** Gemini, OpenAI, or Anthropic
 
 ```python
 # Gemini
@@ -175,7 +229,7 @@ agent = Agent(tools=[...], llm="gemini-2.0-flash-lite")
 agent = Agent(tools=[...], llm="gemini-2.0-flash")
 
 # OpenAI
-agent = Agent(tools=[...], llm="gpt-5)
+agent = Agent(tools=[...], llm="gpt-5")
 agent = Agent(tools=[...], llm="gpt-4o")
 
 # Anthropic
@@ -183,13 +237,45 @@ agent = Agent(tools=[...], llm="claude-4-5-haiku")
 agent = Agent(tools=[...], llm="claude-4-6-sonnet")
 ```
 
-Use `light_llm` + `heavy_llm` to split fast prefiltering from heavier code generation:
+**Local & custom models:** Use `LLMConfig` for any OpenAI-compatible endpoint
+
+```python
+from delfhos import Agent, LLMConfig
+
+# Local Ollama model
+agent = Agent(
+    tools=[...],
+    llm=LLMConfig(model="llama3.2", base_url="http://localhost:11434/v1")
+)
+
+# Enterprise vLLM server
+agent = Agent(
+    tools=[...],
+    llm=LLMConfig(
+        model="mistral-7b-instruct",
+        base_url="https://llm.corp.internal/v1",
+        api_key="internal-token"
+    )
+)
+
+# Any OpenAI-compatible provider (Groq, Together, Anyscale, etc.)
+agent = Agent(
+    tools=[...],
+    llm=LLMConfig(
+        model="meta-llama/Llama-3-70b-chat-hf",
+        base_url="https://api.together.xyz/v1",
+        api_key="..."
+    )
+)
+```
+
+**Dual-LLM optimization:** Use fast local + strong cloud model
 
 ```python
 agent = Agent(
     tools=[...],
-    light_llm="gemini-3.1-flash-lite-preview",   # fast, cheap — for tool selection
-    heavy_llm="claude-4-6-sonnet",         # stronger — for code generation
+    light_llm=LLMConfig(model="qwen2.5:7b", base_url="http://localhost:11434/v1"),
+    heavy_llm="gemini-2.5-flash",  # or Claude, OpenAI, etc.
 )
 ```
 

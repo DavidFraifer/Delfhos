@@ -329,21 +329,6 @@ class ToolLibraryBase:
             if isinstance(context, dict) and context.get("action"):
                 action_name = str(context.get("action")).strip().lower().replace("-", "_")
 
-            # Always print tool activity so the user has context during long tasks
-            _verbose = "low"
-            if self.tool_tracker and getattr(self.tool_tracker, "orchestrator", None):
-                _verbose = getattr(self.tool_tracker.orchestrator, "verbose", "low")
-            _tool_msg = f"[{tool_name}] {desc or f'Running {tool_name}'}"
-            if _verbose == "high":
-                _parts = []
-                if action_name:
-                    _parts.append(f"action={action_name}")
-                if connection_name:
-                    _parts.append(f"connection={connection_name}")
-                console.tool(_tool_msg, " | ".join(_parts) if _parts else None, task_id=self.task_id, agent_id=self.agent_id)
-            else:
-                console.tool(_tool_msg, task_id=self.task_id, agent_id=self.agent_id)
-
             result = await self.tool_manager.execute_tool(
                 connection_name,
                 context=context,
@@ -1822,9 +1807,10 @@ class WebSearchLibrary(ToolLibraryBase):
         description = desc or f"Searching: {query}"
         start_time = time.time()
         
+        ws_meta = {"_tool_trace_args": {"query": query}, "_tool_action": "search"}
         if self.tool_tracker:
-            await self.tool_tracker.track_start(tool_name, description, model=self.search_llm)
-        
+            await self.tool_tracker.track_start(tool_name, description, model=self.search_llm, ui_metadata=ws_meta)
+
         try:
             result, token_info = await web_search(
                 query=query,
@@ -1832,19 +1818,11 @@ class WebSearchLibrary(ToolLibraryBase):
                 model=self.search_llm,
                 agent_id=self.agent_id,
             )
-            
+
             duration = time.time() - start_time
-            
-            # Build success description with token info
-            success_desc = description
-            if token_info:
-                tokens_used = token_info.get("tokens_used", 0)
-                input_tokens = token_info.get("input_tokens", 0)
-                output_tokens = token_info.get("output_tokens", 0)
-                success_desc = f"{description}\nTokens: In: {input_tokens}, Out: {output_tokens}, Tot: {tokens_used}"
-            
+
             if self.tool_tracker:
-                await self.tool_tracker.track_end(tool_name, duration, success=True, description=success_desc, model=self.search_llm)
+                await self.tool_tracker.track_end(tool_name, duration, success=True, description=description, model=self.search_llm, ui_metadata=ws_meta)
             if self.tool_tracker and self.tool_tracker.orchestrator:
                 self.tool_tracker.orchestrator.track_tool_usage(self.task_id, tool_name)
             
@@ -2029,7 +2007,7 @@ class LLMLibrary(ToolLibraryBase):
             }
             if desc: ui_metadata["_tool_trace_args"]["desc"] = desc
             await self.tool_tracker.track_start("llm", display_desc, model=llm_model, ui_metadata=ui_metadata)
-        
+
         try:
             # Use internal LLM action
             from cortex._engine.internal.llm import llm_completion_async
@@ -2053,7 +2031,7 @@ class LLMLibrary(ToolLibraryBase):
             duration = time.time() - start_time
             if self.tool_tracker:
                 end_meta = {"_tool_trace_result": result_str[:500] + ("..." if len(result_str) > 500 else "")}
-                await self.tool_tracker.track_end("llm", duration, success=True, model=llm_model, ui_metadata=end_meta)
+                await self.tool_tracker.track_end("llm", duration, success=True, model=llm_model, description=display_desc, ui_metadata=end_meta)
             
             # Track tool usage - record that llm was used
             if self.tool_tracker and hasattr(self.tool_tracker, 'orchestrator') and self.tool_tracker.orchestrator:
@@ -2077,7 +2055,7 @@ class LLMLibrary(ToolLibraryBase):
             # Track LLM call failure
             duration = time.time() - start_time
             if self.tool_tracker:
-                await self.tool_tracker.track_end("llm", duration, success=False, error=str(e), model=llm_model, ui_metadata={"_tool_trace_error": str(e)})
+                await self.tool_tracker.track_end("llm", duration, success=False, error=str(e), model=llm_model, description=display_desc, ui_metadata={"_tool_trace_error": str(e)})
             raise
     
 def _bind_arguments(fn: Any, args: tuple, kwargs: dict) -> dict:

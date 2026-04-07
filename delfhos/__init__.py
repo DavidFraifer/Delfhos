@@ -60,10 +60,11 @@ from delfhos.tool import tool, ToolException, DelfhosToolWarning
 
 # Service tools
 from delfhos.tools import (
-    Gmail, SQL, Sheets, Drive, Calendar, Docs, WebSearch, MCP,
+    Gmail, SQL, Sheets, Drive, Calendar, Docs, WebSearch, MCP, APITool,
 )
 
 from delfhos.memory import Chat, Memory
+from delfhos.llm_config import LLMConfig
 
 if TYPE_CHECKING:
     # Static typing/IDE support: lets hover resolve Agent docs/signature.
@@ -81,6 +82,7 @@ __all__ = [
     "DelfhosToolWarning",
     "Chat",
     "Memory",
+    "LLMConfig",
     # Service tools
     "Gmail",
     "SQL",
@@ -90,6 +92,7 @@ __all__ = [
     "Docs",
     "WebSearch",
     "MCP",
+    "APITool",
 ]
 
 

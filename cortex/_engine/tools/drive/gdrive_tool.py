@@ -106,7 +106,7 @@ async def gdrive_tool(
         )
         files = result.get("files", [])
         summary = f"Found {len(files)} file(s)"
-        console.tool(f"[DRIVE SEARCH] {summary}", task_id=task_id, agent_id=agent_id)
+
         return {
             "message": summary,
             "files": files,
@@ -120,7 +120,7 @@ async def gdrive_tool(
         
         result = client.get_file(file_id)
         summary = f"Retrieved file: {result.get('name', 'Unknown')}"
-        console.tool(f"[DRIVE GET] {summary}", task_id=task_id, agent_id=agent_id)
+
         return {
             "message": summary,
             "file": result,
@@ -160,7 +160,7 @@ async def gdrive_tool(
             content=file_content,
         )
         summary = f"Created file: {result.get('name', 'Unknown')} (ID: {result.get('id')})"
-        console.tool(f"[DRIVE CREATE] {summary}", task_id=task_id, agent_id=agent_id)
+
         return {
             "message": summary,
             "file": result,
@@ -202,7 +202,7 @@ async def gdrive_tool(
             mime_type=mime_type,
         )
         summary = f"Updated file: {result.get('name', 'Unknown')} (ID: {file_id})"
-        console.tool(f"[DRIVE UPDATE] {summary}", task_id=task_id, agent_id=agent_id)
+
         return {
             "message": summary,
             "file": result,
@@ -218,7 +218,7 @@ async def gdrive_tool(
         client.delete_file(file_id, permanent=permanent)
         action_type = "permanently deleted" if permanent else "moved to trash"
         summary = f"File {action_type}: {file_id}"
-        console.tool(f"[DRIVE DELETE] {summary}", task_id=task_id, agent_id=agent_id)
+
         return {
             "message": summary,
             "fileId": file_id,
@@ -233,7 +233,7 @@ async def gdrive_tool(
         result = client.list_permissions(file_id)
         permissions = result.get("permissions", [])
         summary = f"Found {len(permissions)} permission(s) for file {file_id}"
-        console.tool(f"[DRIVE LIST_PERMISSIONS] {summary}", task_id=task_id, agent_id=agent_id)
+
         return {
             "message": summary,
             "permissions": permissions,
@@ -259,7 +259,7 @@ async def gdrive_tool(
             domain=domain,
         )
         summary = f"Shared file {file_id} with {role} permission"
-        console.tool(f"[DRIVE SHARE] {summary}", task_id=task_id, agent_id=agent_id)
+
         return {
             "message": summary,
             "permission": result,
@@ -277,7 +277,7 @@ async def gdrive_tool(
         
         client.delete_permission(file_id, permission_id)
         summary = f"Removed permission {permission_id} from file {file_id}"
-        console.tool(f"[DRIVE UNSHARE] {summary}", task_id=task_id, agent_id=agent_id)
+
         return {
             "message": summary,
             "fileId": file_id,
