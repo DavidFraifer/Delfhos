@@ -82,11 +82,6 @@ class ToolExecutionError(DelfhosConfigError):
     message_template = "Tool '{tool_name}' failed during execution: {detail}"
     resolution = "Review the arguments sent to the tool. By default, `@tool` uses `handle_error=True` and returns `ToolException` messages to the LLM for recovery."
 
-class MCPConnectionError(DelfhosConfigError):
-    code = "ERR-MCP-001"
-    message_template = "MCP server '{server}' failed to start or connect over stdio."
-    resolution = "Ensure the MCP command (e.g., 'npx -y @modelcontextprotocol/server-...') is installed and executable in your current environment."
-
 class EnvironmentKeyError(DelfhosConfigError):
     code = "ERR-ENV-001"
     message_template = "Missing required environment variable: '{key}'"

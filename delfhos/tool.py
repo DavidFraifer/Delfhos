@@ -439,6 +439,12 @@ class Tool:
         if self.parameters:
             self._validate_inputs(kwargs)
 
+        # The orchestrator may attach an execution description (`desc`) to all
+        # tool calls. Custom @tool functions rarely declare this argument, so
+        # strip it before invoking the wrapped callable.
+        if "desc" in kwargs:
+            kwargs.pop("desc")
+
         try:
             if self._is_async:
                 return await func(*args, **kwargs)

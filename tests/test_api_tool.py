@@ -219,6 +219,17 @@ class TestOpenAPICompiler:
         assert len(capability.actions) == 4
         assert "LIST_PETS" in summaries
 
+    def test_get_capability_with_filtered_tools(self):
+        compiler = OpenAPICompiler("petstore", "inline")
+        manifest = compiler.compile(spec=PETSTORE_SPEC)
+        filtered = [t for t in manifest["tools"] if t["func_name"] == "list_pets"]
+        capability, summaries = compiler.get_capability(tools=filtered)
+
+        assert capability.tool_name == "petstore"
+        assert len(capability.actions) == 1
+        assert "LIST_PETS" in summaries
+        assert "CREATE_PET" not in summaries
+
     def test_get_api_docs(self):
         compiler = OpenAPICompiler("petstore", "inline")
         compiler.compile(spec=PETSTORE_SPEC)
@@ -227,6 +238,15 @@ class TestOpenAPICompiler:
         assert "petstore:list_pets" in docs
         assert "petstore:create_pet" in docs
         assert "await petstore." in docs["petstore:list_pets"]
+
+    def test_get_api_docs_with_filtered_tools(self):
+        compiler = OpenAPICompiler("petstore", "inline")
+        manifest = compiler.compile(spec=PETSTORE_SPEC)
+        filtered = [t for t in manifest["tools"] if t["func_name"] == "list_pets"]
+        docs = compiler.get_api_docs(tools=filtered)
+
+        assert "petstore:list_pets" in docs
+        assert "petstore:create_pet" not in docs
 
     def test_python_signature(self):
         compiler = OpenAPICompiler("petstore", "inline")

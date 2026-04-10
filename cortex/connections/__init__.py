@@ -31,7 +31,6 @@ from .calendar import CalendarConnection
 from .docs import DocsConnection
 from .websearch import WebSearchConnection
 from .base import BaseConnection, GoogleBaseConnection, AuthType, ConnectionStatus
-from .mcp import MCP
 
 __all__ = [
     "GmailConnection",
@@ -41,7 +40,6 @@ __all__ = [
     "CalendarConnection",
     "DocsConnection",
     "WebSearchConnection",
-    "MCP",
     "BaseConnection",
     "GoogleBaseConnection",
     "AuthType",

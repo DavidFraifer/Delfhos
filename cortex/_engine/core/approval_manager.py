@@ -85,6 +85,21 @@ class ApprovalManager:
         self._lock = threading.Lock()
         self._callbacks: Dict[str, Callable] = {}  # request_id -> callback
         self.on_confirm = on_confirm
+        # Guard interactive confirmation I/O so concurrent async tool calls do
+        # not interleave prompts and corrupt terminal rendering.
+        self._confirm_locks: Dict[int, asyncio.Lock] = {}
+        self._confirm_locks_guard = threading.Lock()
+
+    def _get_confirm_lock(self) -> asyncio.Lock:
+        """Return a per-event-loop async lock for serialized confirmation UI."""
+        loop = asyncio.get_running_loop()
+        loop_id = id(loop)
+        with self._confirm_locks_guard:
+            lock = self._confirm_locks.get(loop_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._confirm_locks[loop_id] = lock
+            return lock
 
     def _is_interactive_stdin(self) -> bool:
         stdin = getattr(sys, "stdin", None)
@@ -309,33 +324,52 @@ class ApprovalManager:
         - dict with {"approved": bool, "response": str}
         - None -> no auto decision
         """
-        if not self.on_confirm:
-            # Built-in interactive fallback for CLI usage.
-            # Only try questionary if stdin is actually interactive
-            if self._is_interactive_stdin():
+        async with self._get_confirm_lock():
+            # Suppress ALL console output (spinners + log lines) while the
+            # interactive approval UI is active.  This prevents concurrent
+            # async tasks from writing to the terminal and corrupting the
+            # questionary prompt.
+            try:
+                console.suppress()
+            except Exception:
+                pass
+
+            try:
+                if not self.on_confirm:
+                    # Built-in interactive fallback for CLI usage.
+                    # Only try questionary if stdin is actually interactive
+                    if self._is_interactive_stdin():
+                        try:
+                            decision = await self._stdin_confirm(request)
+                            self._apply_decision(request, decision, "stdin")
+                        except asyncio.CancelledError:
+                            # Task was cancelled (timeout/stop) - reject the approval
+                            request.reject("Cancelled due to task timeout or stop")
+                            raise  # Re-raise cancellation
+                        except Exception as e:
+                            console.unsuppress()
+                            console.error("stdin confirmation failed", str(e), task_id=request.task_id, agent_id=request.agent_id)
+                    return
+
+                # Custom callback provided - invoke it
                 try:
-                    decision = await self._stdin_confirm(request)
-                    self._apply_decision(request, decision, "stdin")
+                    decision = await self._invoke_on_confirm_with_live_stdio(request)
                 except asyncio.CancelledError:
-                    # Task was cancelled (timeout/stop) - reject the approval
+                    # Task was cancelled - reject the approval
                     request.reject("Cancelled due to task timeout or stop")
                     raise  # Re-raise cancellation
                 except Exception as e:
-                    console.error("stdin confirmation failed", str(e), task_id=request.task_id, agent_id=request.agent_id)
-            return
+                    console.unsuppress()
+                    console.error("on_confirm callback failed", str(e), task_id=request.task_id, agent_id=request.agent_id)
+                    return
 
-        # Custom callback provided - invoke it
-        try:
-            decision = await self._invoke_on_confirm_with_live_stdio(request)
-        except asyncio.CancelledError:
-            # Task was cancelled - reject the approval
-            request.reject("Cancelled due to task timeout or stop")
-            raise  # Re-raise cancellation
-        except Exception as e:
-            console.error("on_confirm callback failed", str(e), task_id=request.task_id, agent_id=request.agent_id)
-            return
-
-        self._apply_decision(request, decision, "on_confirm")
+                self._apply_decision(request, decision, "on_confirm")
+            finally:
+                # Always resume normal output, flushing any queued messages.
+                try:
+                    console.unsuppress()
+                except Exception:
+                    pass
 
     def _invoke_callback_sync(self, callback: Callable, *args):
         """Invoke callback from sync code, supporting async callback returns."""
@@ -353,6 +387,13 @@ class ApprovalManager:
             self.requests[request.request_id] = request
             if callback:
                 self._callbacks[request.request_id] = callback
+
+        console.warning(
+            "Approval required",
+            f"Request: {request.request_id} | {message}",
+            task_id=task_id,
+            agent_id=agent_id,
+        )
         
         # Flush stdout/stderr to ensure warning is visible before questionary takes control
         sys.stdout.flush()

@@ -28,11 +28,21 @@ Usage::
 """
 
 import re
+import time
 from typing import Any, Dict, List, Optional, Set, Union
 from urllib.parse import urlparse
 
 from cortex._engine.connection import AuthType
 from .base import BaseConnection, _PrettyInspectDict
+
+
+def _log_connection(message: str, details: str) -> None:
+    """Best-effort compile telemetry for API connection flows."""
+    try:
+        from cortex._engine.utils.console import console
+        console.tool(message, details)
+    except Exception:
+        return
 
 
 class _InspectDescriptor:
@@ -77,8 +87,9 @@ class APITool(BaseConnection):
                      None means all endpoints are available.
         confirm:     Require human approval before executing listed endpoints.
                      True (all), False (none), or a list of function names.
-        cache:       If True (default), reuse ``~/delfhos/api_cache/`` to skip
+        cache:       If True, reuse ``~/delfhos/api_cache/`` to skip
                      re-parsing the spec on subsequent runs.
+                     Disabled by default to avoid stale schemas.
 
     Example::
 
@@ -110,7 +121,7 @@ class APITool(BaseConnection):
         name: Optional[str] = None,
         allow: Optional[Union[str, List[str]]] = None,
         confirm: Union[bool, List[str], None] = True,
-        cache: bool = True,
+        cache: bool = False,
     ):
         self.spec_source = spec
         self.base_url_override = base_url
@@ -122,7 +133,7 @@ class APITool(BaseConnection):
         self.api_tool_name = name or self._derive_name(spec)
 
         # Override class-level TOOL_NAME so Delfhos registries treat each
-        # APITool instance as a distinct tool (like MCP does).
+        # APITool instance as a distinct tool.
         self.TOOL_NAME = self.api_tool_name
 
         super().__init__(
@@ -141,7 +152,7 @@ class APITool(BaseConnection):
         spec: str,
         verbose: bool = False,
         base_url: Optional[str] = None,
-        cache: bool = True,
+        cache: bool = False,
     ) -> dict:
         """Inspect API endpoints from a spec without creating a full connection.
 
@@ -168,15 +179,25 @@ class APITool(BaseConnection):
         """Build inspect output for this API connection."""
         from cortex._engine.api.compiler import OpenAPICompiler
 
+        started = time.perf_counter()
+        _log_connection("API INSPECT", f"{self.api_tool_name}: preparing manifest")
+
         compiler = OpenAPICompiler(
             tool_name=self.api_tool_name,
             spec_source=self.spec_source,
             base_url=self.base_url_override,
+            cache=self.cache,
         )
 
-        manifest = compiler.load_cache() if self.cache else None
+        manifest = compiler.load_cache()
         if not manifest:
+            _log_connection("API INSPECT", f"{self.api_tool_name}: cache miss, compiling spec")
             manifest = compiler.compile()
+        else:
+            _log_connection(
+                "API INSPECT",
+                f"{self.api_tool_name}: using cache ({len(manifest.get('tools', []))} endpoint(s))",
+            )
 
         endpoints = []
         for tool in manifest.get("tools", []):
@@ -193,6 +214,9 @@ class APITool(BaseConnection):
             "base_url": manifest.get("base_url", ""),
             "spec_source": self.spec_source,
         }
+
+        elapsed = time.perf_counter() - started
+        _log_connection("API INSPECT", f"{self.api_tool_name}: ready in {elapsed:.2f}s")
 
         if not verbose:
             return _PrettyInspectDict({
@@ -233,41 +257,36 @@ class APITool(BaseConnection):
         from cortex._engine.tools.tool_registry import TOOL_REGISTRY, COMPRESSED_API_DOCS, TOOL_ACTION_SUMMARIES
         from cortex._engine.tools.internal_tools import internal_tools
 
+        started = time.perf_counter()
+        _log_connection("API COMPILE", f"{self.api_tool_name}: start")
+
         compiler = OpenAPICompiler(
             tool_name=self.api_tool_name,
             spec_source=self.spec_source,
             base_url=self.base_url_override,
+            cache=self.cache,
         )
-
-        if not self.cache:
-            compiler.clear_cache()
 
         manifest = compiler.load_cache()
         if not manifest:
-            manifest = compiler.compile()
+            # When allow= is set, compile all endpoints so the filter
+            # can find them (otherwise MAX_ENDPOINTS may cut them off).
+            max_ep = 0 if self.allow else None
+            _log_connection("API COMPILE", f"{self.api_tool_name}: cache miss, compiling OpenAPI schema")
+            manifest = compiler.compile(max_endpoints=max_ep)
+        else:
+            _log_connection(
+                "API COMPILE",
+                f"{self.api_tool_name}: cache hit ({len(manifest.get('tools', []))} endpoint(s))",
+            )
 
-        # 1. Register into TOOL_REGISTRY (for prefilter LLM)
-        capability, summaries = compiler.get_capability()
-        TOOL_REGISTRY[self.api_tool_name] = capability
-        TOOL_ACTION_SUMMARIES[self.api_tool_name] = summaries
-
-        # 2. Register into COMPRESSED_API_DOCS (for code gen LLM)
-        docs = compiler.get_api_docs()
-        COMPRESSED_API_DOCS.update(docs)
-
-        # 3. Build executor and Tool namespace
-        executor = APIExecutor(
-            tool_name=self.api_tool_name,
-            compiled_tools=manifest["tools"],
-            auth_headers=self.auth_headers,
-            auth_params=self.auth_params,
-        )
+        manifest_tools = manifest.get("tools", [])
+        selected_tools = manifest_tools
 
         # Filter by allow= if set
-        allowed_actions = None
         if self.allow is not None:
             normalized = {self._normalize_action_name(a) for a in self.allow}
-            discovered = {t["func_name"] for t in manifest.get("tools", [])}
+            discovered = {t["func_name"] for t in manifest_tools}
             unknown = sorted(a for a in normalized if a not in discovered)
             if unknown:
                 from delfhos.errors import ConnectionConfigurationError
@@ -279,10 +298,36 @@ class APITool(BaseConnection):
                         f"Use APITool.inspect(spec=...) to see all endpoints."
                     ),
                 )
-            allowed_actions = normalized
+            selected_tools = [t for t in manifest_tools if t["func_name"] in normalized]
+            _log_connection(
+                "API COMPILE",
+                f"{self.api_tool_name}: allow filter kept {len(selected_tools)}/{len(manifest_tools)} endpoint(s)",
+            )
 
-        namespace = build_api_tools(executor, self.api_tool_name, allow=allowed_actions)
+        # 1. Register into TOOL_REGISTRY (for prefilter LLM)
+        capability, summaries = compiler.get_capability(tools=selected_tools)
+        TOOL_REGISTRY[self.api_tool_name] = capability
+        TOOL_ACTION_SUMMARIES[self.api_tool_name] = summaries
+
+        # 2. Register into COMPRESSED_API_DOCS (for code gen LLM)
+        docs = compiler.get_api_docs(tools=selected_tools)
+        COMPRESSED_API_DOCS.update(docs)
+
+        # 3. Build executor and Tool namespace
+        executor = APIExecutor(
+            tool_name=self.api_tool_name,
+            compiled_tools=selected_tools,
+            auth_headers=self.auth_headers,
+            auth_params=self.auth_params,
+        )
+
+        namespace = build_api_tools(executor, self.api_tool_name, allow=None)
         internal_tools[self.api_tool_name] = namespace
+        elapsed = time.perf_counter() - started
+        _log_connection(
+            "API COMPILE",
+            f"{self.api_tool_name}: registered {len(selected_tools)} endpoint(s) in {elapsed:.2f}s",
+        )
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

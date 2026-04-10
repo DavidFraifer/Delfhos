@@ -46,7 +46,7 @@ Key features:
   • Fast: Multi-step optimization with light/heavy LLM split.
   • Safe: Built-in approval workflow, action restrictions, sandboxed execution.
   • Transparent: See exactly what code the agent generated and why.
-  • Flexible: @tool decorator, service integrations (Gmail, Drive, SQL, etc), MCP servers.
+  • Flexible: @tool decorator, service integrations (Gmail, Drive, SQL, etc), REST API tools.
 """
 
 # Suppress noisy TF warnings (may be triggered by transitive deps)
@@ -60,7 +60,7 @@ from delfhos.tool import tool, ToolException, DelfhosToolWarning
 
 # Service tools
 from delfhos.tools import (
-    Gmail, SQL, Sheets, Drive, Calendar, Docs, WebSearch, MCP, APITool,
+    Gmail, SQL, Sheets, Drive, Calendar, Docs, WebSearch, APITool,
 )
 
 from delfhos.memory import Chat, Memory
@@ -91,7 +91,6 @@ __all__ = [
     "Calendar",
     "Docs",
     "WebSearch",
-    "MCP",
     "APITool",
 ]
 

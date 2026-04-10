@@ -28,7 +28,7 @@ class Cortex:
       4. Iterate: Get feedback and refine until the goal succeeds.
 
     Args:
-        tools: Service tools (Gmail, Drive, SQL, MCP, WebSearch, etc) or @tool functions.
+        tools: Service tools (Gmail, Drive, SQL, APITool, WebSearch, etc) or @tool functions.
                Per-tool approval: set confirm= on each tool, e.g. Gmail(confirm=["send"]).
         llm: Single LLM for all ops.
         light_llm: Fast LLM for prefiltering.

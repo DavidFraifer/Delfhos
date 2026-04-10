@@ -34,6 +34,14 @@ class TestCustomToolConfirm(unittest.TestCase):
         result = asyncio.run(fail_tool.execute())
         self.assertEqual(result, "Tool error: boom")
 
+    def test_desc_kwarg_is_stripped_for_custom_tools(self):
+        @tool
+        def greet(name: str) -> str:
+            return f"hello {name}"
+
+        result = asyncio.run(greet.execute(name="david", desc="friendly greeting"))
+        self.assertEqual(result, "hello david")
+
 
 if __name__ == "__main__":
     unittest.main()

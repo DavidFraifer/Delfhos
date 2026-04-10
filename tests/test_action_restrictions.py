@@ -1,11 +1,9 @@
-import asyncio
 import sys
 
 sys.path.insert(0, ".")
 
-from delfhos import Calendar, Docs, Drive, Gmail, MCP, SQL, Sheets, WebSearch
+from delfhos import Calendar, Docs, Drive, Gmail, SQL, Sheets, WebSearch
 from delfhos.sandbox import MockDatabase, MockEmail
-from cortex._engine.mcp import executor as mcp_executor
 from cortex._engine.tools.tool_registry import map_frontend_action_to_registry_action, TOOL_ACTION_SUMMARIES
 
 
@@ -33,19 +31,19 @@ def test_sandbox_mock_tools_are_discoverable_via_class_inspect():
     assert mock_db["methods"] == ["schema", "query", "write"]
 
 
-def test_dynamic_action_mapping_for_mcp_like_tools():
-    # Simulate dynamically-registered MCP actions in the summaries table.
-    TOOL_ACTION_SUMMARIES["github"] = {
-        "CREATE_ISSUE": "Create issue",
-        "LIST_REPOSITORIES": "List repos",
+def test_dynamic_action_mapping_for_dynamic_tools():
+    # Simulate dynamically-registered actions in the summaries table (e.g., APITool).
+    TOOL_ACTION_SUMMARIES["petstore"] = {
+        "LIST_PETS": "List pets",
+        "CREATE_PET": "Create pet",
     }
 
-    assert map_frontend_action_to_registry_action("github", "CREATE_ISSUE") == "CREATE_ISSUE"
-    assert map_frontend_action_to_registry_action("github", "create-issue") == "CREATE_ISSUE"
-    assert map_frontend_action_to_registry_action("github", "list repositories") == "LIST_REPOSITORIES"
+    assert map_frontend_action_to_registry_action("petstore", "LIST_PETS") == "LIST_PETS"
+    assert map_frontend_action_to_registry_action("petstore", "list-pets") == "LIST_PETS"
+    assert map_frontend_action_to_registry_action("petstore", "create pet") == "CREATE_PET"
 
 
-def test_native_inspect_matches_mcp_style_structure_and_printing():
+def test_native_inspect_structure_and_printing():
     ws = WebSearch()
 
     compact = ws.inspect()
@@ -60,37 +58,3 @@ def test_native_inspect_matches_mcp_style_structure_and_printing():
     assert isinstance(detailed["methods"], list)
     assert detailed["methods"][0]["name"] == "search"
     assert "Search the web" in detailed["methods"][0]["description"]
-
-
-def test_mcp_namespace_blocks_disallowed_actions():
-    class FakeClient:
-        def call_tool(self, name, args):
-            return {"content": [{"type": "text", "text": f"ok {name}"}]}
-
-    compiled_tools = [
-        {
-            "mcp_name": "create_issue",
-            "description": "Create issue",
-            "input_schema": {"type": "object", "properties": {}, "required": []},
-        },
-        {
-            "mcp_name": "list_repositories",
-            "description": "List repositories",
-            "input_schema": {"type": "object", "properties": {}, "required": []},
-        },
-    ]
-
-    ex = mcp_executor.MCPExecutor(FakeClient(), "github", compiled_tools)
-    ns = mcp_executor.build_mcp_tools(ex, "github", allow={"list_repositories"})
-
-    # Allowed action should work.
-    result = asyncio.run(ns.list_repositories())
-    assert "ok list_repositories" in result
-
-    # Disallowed action should surface as a permission failure.
-    try:
-        _ = ns.create_issue
-        assert False, "Expected disallowed MCP action to fail"
-    except Exception as e:
-        code = getattr(e, "code", None)
-        assert code == "TOL-007" or "TOL-007" in str(e) or isinstance(e, AttributeError)

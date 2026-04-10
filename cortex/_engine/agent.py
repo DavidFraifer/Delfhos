@@ -353,8 +353,8 @@ class Agent:
         
         for tool in self.tools:
             if isinstance(tool, Connection):
-                # If the connection has a compile step (MCP, APITool), run it to introspect + register
-                if tool.connection_name == "mcp" or getattr(tool, "TOOL_NAME", "") == "mcp" or hasattr(tool, "compile"):
+                # If the connection has a compile step (APITool, etc.), run it to introspect + register
+                if hasattr(tool, "compile"):
                     tool.compile()
 
                 # Connection - add it to the orchestrator
@@ -362,7 +362,12 @@ class Agent:
                 # Also add the corresponding internal tool function
                 tool_name = tool.tool_name.lower() if hasattr(tool, 'tool_name') else None
                 if tool_name and tool_name in internal_tools:
-                    self.orchestrator.add_tool(tool_name, internal_tools[tool_name])
+                    # Get description from the tool's api_doc if available (API namespaces have get_all_api_docs)
+                    t_desc = ""
+                    tool_namespace = internal_tools[tool_name]
+                    if hasattr(tool_namespace, "get_all_api_docs") and callable(tool_namespace.get_all_api_docs):
+                        t_desc = tool_namespace.get_all_api_docs()
+                    self.orchestrator.add_tool(tool_name, tool_namespace, description=t_desc if t_desc else None)
             elif callable(tool) and hasattr(tool, "tool_name") and hasattr(tool, "execute"):
                 # Custom user-defined Tool abstraction
                 t_name = getattr(tool, "tool_name", "")
@@ -504,7 +509,7 @@ class Agent:
             agent.stop()  # Clean up resources
         """
         if not self.running:
-            # Deferred tool setup (MCP compile, client warmup) — runs once
+            # Deferred tool setup (APITool compile, client warmup) — runs once
             if not self._tools_configured:
                 self._configure_tools()
                 self._warmup_clients()

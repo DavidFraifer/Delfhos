@@ -24,9 +24,8 @@ class _PrettyInspectDict(dict):
         if not isinstance(methods, list):
             return json.dumps(self, indent=2, ensure_ascii=False)
 
-        is_mcp = "server" in self
-        label = "MCP Server" if is_mcp else "Tool"
-        target = str(self.get("server") if is_mcp else self.get("tool", "tool"))
+        label = "Tool"
+        target = str(self.get("tool", "tool"))
         total = self.get("total", len(methods))
         auth_type = str(self.get("auth_type", "none"))
         allowed = self.get("allowed", None)

@@ -17,20 +17,16 @@ Short names (Gmail, Drive) are preferred over long names (GmailTool, DriveTool).
 
 from delfhos.tool import tool, ToolException
 
-# All tool names that are lazily forwarded to .native or .mcp
+# All tool names that are lazily forwarded to .native or .api
 _LAZY_NAMES = {
     "Gmail", "SQL", "Sheets", "Drive", "Calendar", "Docs", "WebSearch",
     "GmailTool", "SQLTool", "SheetsTool", "DriveTool", "CalendarTool", "DocsTool", "WebSearchTool",
-    "MCP", "APITool",
+    "APITool",
 }
 
 
 def __getattr__(name):
     if name in _LAZY_NAMES:
-        if name == "MCP":
-            from .mcp import MCP
-            globals()["MCP"] = MCP
-            return MCP
         if name == "APITool":
             from cortex.connections.api import APITool
             globals()["APITool"] = APITool
@@ -59,7 +55,6 @@ __all__ = [
     "Calendar",
     "Docs",
     "WebSearch",
-    "MCP",
     "APITool",
     # Service tools (long names)
     "GmailTool",

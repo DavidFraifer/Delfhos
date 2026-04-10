@@ -859,6 +859,21 @@ class Orchestrator:
                                 "requesting permission change instead of attempting it. Output Python code ONLY."
                             )
 
+                        # Compute which user-defined variables actually survived the crash
+                        baseline_keys = getattr(executor, "_baseline_keys", set())
+                        user_vars = sorted(
+                            k for k in executor.namespace
+                            if k not in baseline_keys and not k.startswith("_")
+                        )
+                        if user_vars:
+                            state_section = (
+                                f"\n\nPRESERVED VARIABLES (these exist in memory and can be used directly — do NOT re-fetch them):\n"
+                                + ", ".join(user_vars)
+                                + "\nAny variable NOT listed above was never assigned and must be fetched/computed."
+                            )
+                        else:
+                            state_section = "\n\nNO variables were preserved from the previous run — start fresh."
+
                         retry_prompt = f"""TASK: "{payload}"
 
 PREVIOUS CODE THAT FAILED:
@@ -868,9 +883,7 @@ PREVIOUS CODE THAT FAILED:
 
 ERROR:
 {error_msg}
-{completed_section}{output_section}
-
-CRITICAL STATE PRESERVATION: All variables defined in the PREVIOUS CODE before it crashed are ALREADY preserved in memory. You CAN and MUST use them directly. Do NOT query the database again or recreate variables.
+{completed_section}{output_section}{state_section}
 
 {retry_instructions}"""
                         
@@ -914,11 +927,16 @@ CRITICAL STATE PRESERVATION: All variables defined in the PREVIOUS CODE before i
                                 
                                 original_output = result.get("output", "")
                                 new_output = retry_result.get("output", "")
+                                retry_succeeded = retry_result.get("success", False)
 
-                                if original_output.strip() and new_output.strip():
+                                if retry_succeeded and new_output.strip():
+                                    # Retry re-runs from scratch — show only the complete retry output.
+                                    # The partial first attempt was already sent to the LLM as context.
+                                    combined_output = new_output
+                                elif original_output.strip() and new_output.strip():
                                     combined_output = original_output.rstrip() + "\n\n--- Auto-Retry Executed ---\n" + new_output.lstrip()
                                 elif new_output.strip():
-                                    combined_output = "--- Auto-Retry Executed ---\n" + new_output.lstrip()
+                                    combined_output = new_output
                                 else:
                                     combined_output = original_output
 
@@ -1688,7 +1706,7 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
                     # Add legend/explanation at the bottom
                     actions_table.caption = (
                         "[bold]Legend:[/bold] "
-                        "[bold magenta]User[/bold magenta] = Tools you provided (Native, MCP, Custom Tools) | "
+                        "[bold magenta]User[/bold magenta] = Tools you provided (Native, APITool, Custom Tools) | "
                         "[dim white]Internal[/dim white] = Sandbox-only tools (files, llm)"
                     )
                     
@@ -1827,12 +1845,13 @@ BEFORE CODING: If task is vague (missing names/dates/files), output ONLY a print
 
 RULES:
 - ONLY Python code. Minimal code. Async (await). NO asyncio.run(); define `async def main():...` & `await main()`.
+- API tools: use ONLY the namespace shown in `await <name>.method()` lines above. Do NOT invent or use any other variable name.
 - NEVER pass connection_name (auto-detected).
 - EVERY tool call MUST include `desc="..."` with a short, specific action text.
 - If you call `websearch.search`, `llm.call`, `sql.query`, `gmail.read`, `sheets.write`, etc., include `desc=` explicitly in that same call.
 - `desc` must describe intent (e.g., `desc="Searching AI news April 2026"`), not a generic label.
 - SELF-CHECK BEFORE OUTPUT: if any tool call is missing `desc=`, rewrite the code before returning it.
-- `files` tool ONLY reads Sandbox uploads. For local files, use MCP if available.
+- `files` tool ONLY reads Sandbox uploads.
 - User visibility: ONLY print() is visible. Print final answers. Use Markdown, `format_table()`. Match user language.
 - Order: Wait for tool output before generating text dependent on it.
 - Processing N items (emails, rows, files): ALWAYS `asyncio.gather(*[process(x) for x in items])`, NEVER sequential `for` loops with `await`.

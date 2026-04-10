@@ -139,6 +139,32 @@ class TestApprovalManager(unittest.TestCase):
         self.assertEqual(request.status, "approved")
         self.assertTrue(manager.wait_for_approval(request.request_id))
 
+    def test_on_confirm_is_serialized_for_concurrent_requests(self):
+        active = 0
+        max_active = 0
+
+        async def on_confirm(_request):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.02)
+            active -= 1
+            return True
+
+        manager = ApprovalManager(on_confirm=on_confirm)
+
+        async def _create_many():
+            return await asyncio.gather(
+                manager.create_request_async("task-1", "agent-1", "approve 1"),
+                manager.create_request_async("task-2", "agent-1", "approve 2"),
+                manager.create_request_async("task-3", "agent-1", "approve 3"),
+            )
+
+        requests = asyncio.run(_create_many())
+
+        self.assertEqual(max_active, 1)
+        self.assertTrue(all(r.status == "approved" for r in requests))
+
 
 if __name__ == "__main__":
     unittest.main()

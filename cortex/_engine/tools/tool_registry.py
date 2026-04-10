@@ -494,9 +494,9 @@ def map_frontend_action_to_registry_action(tool_name: str, frontend_action: str)
     if mapped:
         return mapped
 
-    # Fallback for MCP and any dynamic tool names:
-    # - accept already-registry-like names (e.g. CREATE_ISSUE)
-    # - normalize user forms (e.g. create-issue, create issue)
+    # Fallback for dynamic tool names (APITool, etc.):
+    # - accept already-registry-like names (e.g. LIST_PETS)
+    # - normalize user forms (e.g. list-pets, list pets)
     registry_candidate = frontend_action.strip().upper().replace("-", "_").replace(" ", "_")
     tool_summaries = TOOL_ACTION_SUMMARIES.get(tool_name, {})
     if registry_candidate in tool_summaries:
@@ -565,7 +565,7 @@ TOOL_ACTION_SUMMARIES = {
         "CALL": "Universal method for text analysis, image analysis, content generation, and structured data extraction",
     },
     "files": {
-        "READ": "Read uploaded task files ONLY. For local/user system filesystem, use the available MCP filesystem tool instead.",
+        "READ": "Read uploaded task files ONLY.",
         "SAVE": "Save internal/temporary output files (HIDDEN from user, use docs/sheets to share)",
         "LIST": "List uploaded task files (NOT user desktop/system files)",
     },
@@ -594,7 +594,7 @@ COMPRESSED_API_DOCS = {
     "calendar:DELETE": "await calendar.delete(event_id)",
     "websearch:SEARCH": "await websearch.search('query', max_results=5, desc='...') -> str // Returns ready-to-use markdown with findings and links. Use directly — only call llm.call() after if a specific output format (table, JSON, etc.) is explicitly required.",
     "llm:CALL": "await llm.call('Summarize: ' + str(data), max_tokens=2000, desc='...') -> str // File analysis: await llm.call('Desc', file_data=[var]). JSON extract: await llm.call('Extract JSON: {...}')",
-    "files:READ": "await files.read('data.csv', desc='...') // UPLOADED task files ONLY. CSV->List[Dict]. Image for LLM: files.read('img.png', for_llm=True). local files -> use MCP",
+    "files:READ": "await files.read('data.csv', desc='...') // UPLOADED task files ONLY. CSV->List[Dict]. Image for LLM: files.read('img.png', for_llm=True).",
     "files:SAVE": "await files.save('out.csv', [{'A':1}], desc='...') // HIDDEN from user! Save directly to list[dict]->CSV/Excel, dict->JSON. Use Docs/print to share to user.",
     "files:LIST": "await files.list(desc='...') -> List[{filename, file_type, size_bytes, path}]",
 }
@@ -629,7 +629,7 @@ def _get_connection_available_actions(conn: Any, available_tools: Dict[str, Set[
         if mapped:
             mapped_actions.add(mapped)
 
-    # For dynamic tools (for example MCP), keep known allowed actions as fallback
+    # For dynamic tools (e.g. APITool), keep known allowed actions as fallback
     # if mapping table cannot resolve them.
     if not mapped_actions:
         mapped_actions = {str(a).strip().upper().replace("-", "_").replace(" ", "_") for a in raw_actions if str(a).strip()}
@@ -674,7 +674,6 @@ def build_prefilter_prompt(task: str, available_tools: Dict[str, Set[str]], conn
             # Get allowed actions for this specific connection.
             actions = _get_connection_available_actions(conn, available_tools)
             if actions:
-                # For MCP tools, show lowercase method names with parentheses (READ_FILE → read_file()) for clarity
                 method_names = sorted([f"{a.lower()}()" for a in actions])
                 methods_str = ", ".join(method_names)
                 desc_compact = (conn_desc or "").strip()
@@ -729,13 +728,12 @@ def build_prefilter_prompt(task: str, available_tools: Dict[str, Set[str]], conn
     lines.append("Rules:")
     lines.append("- If internal knowledge is enough and no tools are needed, return: ANSWER: <text>")
     lines.append("- If tools are needed, return only comma-separated <Tool>:<METHOD or ACTION>")
-    lines.append("- For MCP tools: use the exact method name shown (e.g., filesystem:read_media_file NOT filesystem:read)")
     lines.append("- For connection-based tools: use connection_name:ACTION (e.g., 'Gmail Account:READ' or tool_name:ACTION)")
     lines.append("- Never return ANSWER if tools are used")
     lines.append("- Prefer minimal tool set")
     lines.append("Output format examples:")
     lines.append("- ANSWER: Python is a high-level language (no tools needed)")
-    lines.append("- filesystem:read_media_file,llm:call (MCP method + built-in tool)")
+    lines.append("- petstore:list_pets,llm:call (APITool method + built-in tool)")
     lines.append("- Work Gmail:READ,llm:CALL (named connection + built-in tool)")
     
     return "\n".join(lines)
@@ -828,24 +826,24 @@ def parse_prefilter_response(response: str, connections: List[Any] = None) -> tu
 def build_filtered_api_docs(selected_actions: List[str], custom_descriptions: Dict[str, str] = None) -> str:
     """
     Build API documentation for only the selected tool:action pairs.
-    
+
     Args:
         selected_actions: List of "tool:action" strings (e.g., ["gmail:READ", "llm:CALL"])
         custom_descriptions: Optional descriptions for custom tools injected at runtime
-    
+
     Returns:
         Compressed API documentation string
     """
     docs = ["# Tools (async, use await):"]
     examples = []
-    
+
     # Normalize and deduplicate
     selected = set(a.strip().lower() for a in selected_actions)
-    
+
     # Always include basic built-ins
     selected.add("files:read")
     # files:save is NOT auto-included to discourage hidden outputs
-    
+
     # Build docs for selected actions
     for action_key in sorted(selected):
         # Try exact match first
@@ -855,7 +853,7 @@ def build_filtered_api_docs(selected_actions: List[str], custom_descriptions: Di
                 docs.append(doc)
                 matched = True
                 break
-        
+
         # If no standard doc found, check if it's a custom tool
         if not matched and custom_descriptions:
             tool_name = action_key.split(":")[0]

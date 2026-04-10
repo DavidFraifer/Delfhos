@@ -39,7 +39,6 @@ from delfhos.tools import (
     Docs as Docs,
     Drive as Drive,
     Gmail as Gmail,
-    MCP as MCP,
     SQL as SQL,
     Sheets as Sheets,
     WebSearch as WebSearch,
@@ -88,7 +87,7 @@ class Agent:
         agent.run("Top 3 AI trends. Request: Format as 1. trend, 2. trend, 3. trend")
 
     Args:
-        tools: Service tools (Gmail, Drive, SQL, MCP, WebSearch, etc) or @tool functions.
+        tools: Service tools (Gmail, Drive, SQL, APITool, WebSearch, etc) or @tool functions.
                Note: WebSearch(llm="model") requires an explicit model (Gemini or OpenAI/GPT).
         llm: Single LLM for all ops (simple). Use either llm OR (light_llm + heavy_llm).
         light_llm: Fast LLM for prefiltering (advanced; requires heavy_llm).
@@ -124,7 +123,7 @@ class Agent:
         """Initialize an Agent with tools and language models.
 
         Args:
-            tools: List of Service tools (Gmail, Drive, SQL, MCP, etc), @tool functions, or Connections.
+            tools: List of Service tools (Gmail, Drive, SQL, APITool, etc), @tool functions, or Connections.
             llm: Single LLM for all operations (e.g., "gemini-3.1-flash-lite-preview").
                  Shorthand for: light_llm=llm, heavy_llm=llm.
             light_llm: (Advanced) Fast LLM for prefiltering/lightweight tasks (requires heavy_llm).
@@ -305,5 +304,4 @@ __all__ = [
     "Calendar",
     "Docs",
     "WebSearch",
-    "MCP",
 ]

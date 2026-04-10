@@ -14,7 +14,6 @@ from cortex.connections.calendar import CalendarConnection
 from cortex.connections.docs import DocsConnection
 from cortex.connections.websearch import WebSearchConnection
 from cortex.connections.base import BaseConnection, GoogleBaseConnection, AuthType, ConnectionStatus
-from cortex.connections.mcp import MCP
 
 __all__ = [
     "GmailConnection",
@@ -24,7 +23,6 @@ __all__ = [
     "CalendarConnection",
     "DocsConnection",
     "WebSearchConnection",
-    "MCP",
     "BaseConnection",
     "GoogleBaseConnection",
     "AuthType",

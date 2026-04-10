@@ -17,8 +17,6 @@ from delfhos.tools.native import (
     WebSearch as WebSearch,
     WebSearchTool as WebSearchTool,
 )
-from delfhos.tools.mcp import MCP as MCP
-
 __all__ = [
     "tool",
     "ToolException",
@@ -29,7 +27,6 @@ __all__ = [
     "Calendar",
     "Docs",
     "WebSearch",
-    "MCP",
     "GmailTool",
     "SQLTool",
     "SheetsTool",

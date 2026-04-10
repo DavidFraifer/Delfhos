@@ -1,6 +1,6 @@
-# Tool System Architecture (v0.6+)
+# Tool System Architecture (v0.7+)
 
-Delfhos provides a unified tool system supporting four tool types: **Native Tools**, **REST APIs (APITool)**, **MCP Servers**, and **Custom Functions**.
+Delfhos provides a unified tool system supporting three tool types: **Native Tools**, **REST APIs (APITool)**, and **Custom Functions**.
 
 ## Overview
 
@@ -8,7 +8,6 @@ Delfhos provides a unified tool system supporting four tool types: **Native Tool
 |-----------|--------|-------------|---------|-----------|
 | **Native** | Hand-coded | Manual (Python) | Direct client calls | Gmail, Drive, Sheets, SQL |
 | **APITool** | OpenAPI spec | Deterministic (no LLM) | HTTP requests | Any REST API (Stripe, custom endpoints) |
-| **MCP** | MCP server | Deterministic (no LLM) | JSON-RPC calls | Filesystem, GitHub, Slack, etc. |
 | **Custom (@tool)** | Python function | Manual (function signature) | Direct call | Domain-specific logic |
 
 ## Tool Registration & Compilation Pipeline
@@ -31,7 +30,7 @@ agent = Agent(tools=[gmail], llm="gemini-2.5-flash")
 
 ---
 
-### 2. **REST APIs (APITool)** — NEW in v0.6
+### 2. **REST APIs (APITool)**
 
 **Implementation:** Deterministic OpenAPI spec → Python namespace compilation
 
@@ -72,7 +71,7 @@ JSON/text response
 - `cortex/connections/api.py` — `APITool`: user-facing API with `.inspect()`
 
 **Why no LLM?**
-OpenAPI specs are machine-readable, fully structured descriptions of every endpoint. Compilation is **deterministic** — each operation becomes exactly one action with its exact parameters. This is identical to how MCP works.
+OpenAPI specs are machine-readable, fully structured descriptions of every endpoint. Compilation is **deterministic** — each operation becomes exactly one action with its exact parameters.
 
 **Features:**
 - **Path parameters:** `/pets/{petId}` → `petId: string` parameter
@@ -96,25 +95,7 @@ new_pet = await petstore.create_pet(name="Fluffy", tag="cat")
 
 ---
 
-### 3. **MCP Servers**
-
-**Implementation:** Deterministic JSON-RPC tool listing → Python namespace compilation
-
-```python
-from delfhos import Agent, MCP
-
-github = MCP("server-github", env={"GITHUB_TOKEN": "ghp_..."})
-agent = Agent(tools=[github], llm="gemini-2.5-flash")
-```
-
-**Key files:**
-- `cortex/_engine/mcp/compiler.py` — `MCPCompiler`: introspects server, builds manifest
-- `cortex/_engine/mcp/executor.py` — `MCPExecutor`: maps Python calls → JSON-RPC tools/call
-- `cortex/connections/mcp.py` — `MCP`: user-facing API with `.inspect()`
-
----
-
-### 4. **Custom Functions (@tool)**
+### 3. **Custom Functions (@tool)**
 
 **Implementation:** Python function signature → manual tool definition
 
@@ -140,12 +121,11 @@ When you call `agent.start()` or `agent.run()`, the Agent._configure_tools() met
 
 1. **Detect compilation-required tools** via `hasattr(tool, "compile")`
    - APITool instances
-   - MCP instances
    - Any other Connection with compile()
 
 2. **Run compilation** to introspect and register:
    ```python
-   # cortex/_engine/agent.py, line ~357
+   # cortex/_engine/agent.py
    if hasattr(tool, "compile"):
        tool.compile()
    ```
@@ -166,7 +146,6 @@ All modern tools support `.inspect()` to see available actions **without credent
 ```python
 # Class-level (no instance needed)
 print(APITool.inspect(spec="https://api.example.com/openapi.json"))
-print(MCP.inspect(server="server-github", env={"GITHUB_TOKEN": "..."}))
 
 # Instance-level
 api = APITool(spec="...", auth={...})
@@ -212,7 +191,6 @@ TOOL_REGISTRY = {
         ]
     ),
     "petstore": ToolCapability(...),  # from APITool
-    "github": ToolCapability(...),     # from MCP
 }
 ```
 
@@ -224,7 +202,6 @@ Compact API documentation for code generation (injected into code-gen prompts):
 COMPRESSED_API_DOCS = {
     "gmail:READ": "await gmail.read(max_results=10, query='is:unread') -> List[email_obj]",
     "petstore:list_pets": "await petstore.list_pets(limit: int = None) -> List[Pet]",
-    "github:create_issue": "await github.create_issue(repo: str, title: str, body: str) -> Issue",
 }
 ```
 
@@ -236,7 +213,6 @@ Python callables (functions or tool namespaces) imported in sandbox execution:
 internal_tools = {
     "gmail": gmail_tool,                    # async function
     "petstore": APIToolNamespace(...),      # namespace with attribute access
-    "github": MCPToolNamespace(...),        # namespace with attribute access
 }
 ```
 
@@ -256,9 +232,6 @@ api = APITool(
     allow=["list_customers", "create_charge"],
     confirm=["create_charge", "delete_customer"],
 )
-
-# MCP
-github = MCP("server-github", allow=["search"], confirm=["create_issue"])
 ```
 
 **Policy resolution:**
@@ -273,9 +246,7 @@ github = MCP("server-github", allow=["search"], confirm=["create_issue"])
 | Component | Purpose | Input | Output | Deterministic? |
 |-----------|---------|-------|--------|---|
 | **OpenAPICompiler** | Parse OpenAPI spec, extract operations | Spec URL/file | Manifest dict | ✓ Yes |
-| **MCPCompiler** | Introspect MCP server | Running server | Manifest dict | ✓ Yes |
 | **APIExecutor** | Map Python calls → HTTP | Function call + manifest | HTTP response | ✓ Yes |
-| **MCPExecutor** | Map Python calls → JSON-RPC | Function call + manifest | RPC response | ✓ Yes |
 | **@tool decorator** | Extract Python function signature | Function + docstring | Parameter schema | ✓ Yes |
 
 All compilation paths are **deterministic** (no LLM involved). This ensures fast startup, predictable behavior, and no hallucination risk.

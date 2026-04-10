@@ -17,6 +17,7 @@ import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from delfhos.errors import ConnectionConfigurationError
@@ -39,6 +40,19 @@ CACHE_DIR = Path.home() / "delfhos" / "api_cache"
 # all of them bloats the prefilter and code-gen prompts. Users should
 # use `allow=` to pick what they need; this cap is a safety net.
 MAX_ENDPOINTS = 100
+
+# Use threads for larger specs where schema transformation dominates startup time.
+API_PARALLEL_THRESHOLD = 40
+API_PROGRESS_EVERY = 25
+
+
+def _log_compile(message: str, details: str) -> None:
+    """Best-effort compile telemetry for CLI visibility."""
+    try:
+        from cortex._engine.utils.console import console
+        console.tool(message, details)
+    except Exception:
+        return
 
 
 def _load_spec(source: str) -> Dict[str, Any]:
@@ -127,32 +141,37 @@ class OpenAPICompiler:
     No LLM needed — pure deterministic schema transformation.
     """
 
-    def __init__(self, tool_name: str, spec_source: str, base_url: Optional[str] = None):
+    def __init__(self, tool_name: str, spec_source: str, base_url: Optional[str] = None, cache: bool = False):
         """
         Args:
             tool_name:   Delfhos tool name (e.g., "petstore", "stripe")
             spec_source: URL or file path to an OpenAPI 3.x JSON/YAML spec
             base_url:    Override for the API base URL. If None, extracted from
                          spec's ``servers[0].url``.
+            cache:       Whether to read/write the disk cache.
         """
         self.tool_name = tool_name
         self.spec_source = spec_source
         self.base_url_override = base_url
+        self.cache = cache
         self._cache_dir = CACHE_DIR / self._cache_key()
         self.manifest: Optional[Dict[str, Any]] = None
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def compile(self, spec: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def compile(self, spec: Optional[Dict[str, Any]] = None, max_endpoints: Optional[int] = None) -> Dict[str, Any]:
         """Parse the OpenAPI spec and compile every operation into Delfhos format.
 
         Args:
-            spec: Pre-loaded spec dict. If None, loads from ``self.spec_source``.
+            spec:          Pre-loaded spec dict. If None, loads from ``self.spec_source``.
+            max_endpoints: Override for MAX_ENDPOINTS cap. Pass 0 for unlimited.
 
         Returns:
-            Compiled manifest dict (same shape as MCPCompiler manifests).
+            Compiled manifest dict.
         """
+        started = time.perf_counter()
         if spec is None:
+            _log_compile("API COMPILER", f"{self.tool_name}: loading spec from {self.spec_source}")
             spec = _load_spec(self.spec_source)
 
         # Validate minimum spec structure
@@ -180,22 +199,67 @@ class OpenAPICompiler:
         # Strip trailing slash for clean path joining
         base_url = base_url.rstrip("/")
 
-        compiled_tools = []
-        count = 0
+        limit = MAX_ENDPOINTS if max_endpoints is None else (max_endpoints or float("inf"))
+
+        operation_candidates: List[Tuple[int, str, str, Dict[str, Any]]] = []
+        hit_limit = False
 
         for path, path_item in spec.get("paths", {}).items():
+            if hit_limit:
+                break
             if not isinstance(path_item, dict):
                 continue
             for method in ("get", "post", "put", "patch", "delete", "head", "options"):
                 operation = path_item.get(method)
                 if not operation or not isinstance(operation, dict):
                     continue
-                if count >= MAX_ENDPOINTS:
+                if len(operation_candidates) >= limit:
+                    hit_limit = True
                     break
+                operation_candidates.append((len(operation_candidates), method, path, operation))
+
+        total_candidates = len(operation_candidates)
+        use_parallel = total_candidates >= API_PARALLEL_THRESHOLD
+        _log_compile(
+            "API COMPILER",
+            f"{self.tool_name}: compiling {total_candidates} endpoint(s) ({'parallel' if use_parallel else 'sequential'})",
+        )
+
+        compiled_indexed: List[Tuple[int, Dict[str, Any]]] = []
+        completed = 0
+
+        if use_parallel:
+            max_workers = min(32, (os.cpu_count() or 4) + 4, total_candidates)
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                future_to_idx = {
+                    pool.submit(self._compile_operation, spec, method, path, operation, base_url): idx
+                    for idx, method, path, operation in operation_candidates
+                }
+                for future in as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    compiled = future.result()
+                    if compiled:
+                        compiled_indexed.append((idx, compiled))
+                    completed += 1
+                    if completed % API_PROGRESS_EVERY == 0 or completed == total_candidates:
+                        _log_compile(
+                            "API COMPILER",
+                            f"{self.tool_name}: compiled {completed}/{total_candidates} endpoint(s)",
+                        )
+        else:
+            for idx, method, path, operation in operation_candidates:
                 compiled = self._compile_operation(spec, method, path, operation, base_url)
                 if compiled:
-                    compiled_tools.append(compiled)
-                    count += 1
+                    compiled_indexed.append((idx, compiled))
+                completed += 1
+                if completed % API_PROGRESS_EVERY == 0 or completed == total_candidates:
+                    _log_compile(
+                        "API COMPILER",
+                        f"{self.tool_name}: compiled {completed}/{total_candidates} endpoint(s)",
+                    )
+
+        compiled_indexed.sort(key=lambda pair: pair[0])
+        compiled_tools = [tool for _, tool in compiled_indexed]
 
         info = spec.get("info", {})
         self.manifest = {
@@ -209,21 +273,31 @@ class OpenAPICompiler:
         }
 
         self._save_cache()
+        elapsed = time.perf_counter() - started
+        _log_compile(
+            "API COMPILER",
+            f"{self.tool_name}: ready ({len(compiled_tools)} endpoint(s), {elapsed:.2f}s, hit_limit={hit_limit})",
+        )
         return self.manifest
 
     def load_cache(self) -> Optional[Dict[str, Any]]:
         """Try to load a previously compiled manifest from cache."""
+        if not self.cache:
+            return None
         manifest_path = self._cache_dir / "manifest.json"
         if not manifest_path.exists():
+            _log_compile("API CACHE", f"{self.tool_name}: miss")
             return None
         try:
             with open(manifest_path, "r") as f:
                 self.manifest = json.load(f)
+            _log_compile("API CACHE", f"{self.tool_name}: hit")
             return self.manifest
         except (json.JSONDecodeError, OSError):
+            _log_compile("API CACHE", f"{self.tool_name}: corrupted cache, recompiling")
             return None
 
-    def get_capability(self):
+    def get_capability(self, tools: Optional[List[Dict[str, Any]]] = None):
         """Build a ToolCapability from the compiled manifest.
 
         Returns:
@@ -240,7 +314,8 @@ class OpenAPICompiler:
         actions = []
         summaries = {}
 
-        for tool in self.manifest["tools"]:
+        source_tools = self.manifest["tools"] if tools is None else tools
+        for tool in source_tools:
             action_name = tool["action_name"]
             actions.append(ToolActionSpec(
                 action=action_name,
@@ -255,7 +330,7 @@ class OpenAPICompiler:
         )
         return capability, summaries
 
-    def get_api_docs(self) -> Dict[str, str]:
+    def get_api_docs(self, tools: Optional[List[Dict[str, Any]]] = None) -> Dict[str, str]:
         """Build COMPRESSED_API_DOCS entries from the compiled manifest.
 
         Returns:
@@ -267,7 +342,8 @@ class OpenAPICompiler:
                 detail="No compiled manifest. Call compile() or load_cache() first.",
             )
         docs = {}
-        for tool in self.manifest["tools"]:
+        source_tools = self.manifest["tools"] if tools is None else tools
+        for tool in source_tools:
             key = f"{self.tool_name}:{tool['action_name'].lower()}"
             docs[key] = tool["api_doc"]
         return docs
@@ -308,11 +384,15 @@ class OpenAPICompiler:
         # Collect all parameters (path, query, header) and request body
         params_spec = self._collect_parameters(spec, operation, path)
 
+        # Extract response schema for output-format hints
+        response_schema = self._collect_response_schema(spec, operation)
+        response_hint = self._build_response_hint(response_schema)
+
         # Build Python signature and parameter descriptions
         signature, parameters = self._build_signature(func_name, params_spec)
 
         summary = self._build_summary(description)
-        api_doc = self._build_api_doc(func_name, method, path, description, signature, params_spec)
+        api_doc = self._build_api_doc(func_name, method, path, description, signature, params_spec, response_hint)
 
         return {
             "func_name": func_name,
@@ -326,6 +406,7 @@ class OpenAPICompiler:
             "python_signature": signature,
             "api_doc": api_doc,
             "params_spec": params_spec,
+            "response_hint": response_hint,
         }
 
     def _collect_parameters(
@@ -385,6 +466,104 @@ class OpenAPICompiler:
 
         return params
 
+    def _collect_response_schema(
+        self, spec: Dict[str, Any], operation: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Extract the success response JSON schema from an operation.
+
+        Tries 200, 201, 202, then 2XX/default. Returns the resolved
+        ``application/json`` schema or None if not documented.
+        """
+        responses = operation.get("responses", {})
+
+        resp = None
+        for code in ("200", "201", "202"):
+            resp = responses.get(code)
+            if resp:
+                break
+        if not resp:
+            resp = responses.get("2XX") or responses.get("default")
+        if not resp:
+            return None
+
+        resp = _deep_resolve(spec, resp)
+        content = resp.get("content", {})
+        media = content.get("application/json") or next(iter(content.values()), {})
+        schema = media.get("schema")
+        if not schema:
+            return None
+        return _deep_resolve(spec, schema)
+
+    # Short type names for token efficiency
+    _SHORT_TYPES = {
+        "string": "str", "integer": "int", "number": "num",
+        "boolean": "bool", "array": "array", "object": "obj",
+    }
+
+    def _build_response_hint(self, response_schema: Optional[Dict[str, Any]]) -> Optional[str]:
+        """Build a full response-type hint. No truncation — every field is shown.
+
+        Uses short type names (str/int/num/bool) and complex-first field ordering
+        so the LLM always sees payload fields before metadata.
+        """
+        if not response_schema:
+            return None
+        hint = self._describe_response_schema(response_schema, depth=0)
+        if hint in self._SHORT_TYPES.values() or hint in ("obj", "array"):
+            return hint
+        return hint
+
+    def _describe_response_schema(
+        self, schema: Dict[str, Any], depth: int = 0,
+    ) -> str:
+        """Recursively describe a full response schema — no field or char limits.
+
+        Uses token-efficient short type names. Complex fields (objects, arrays)
+        are sorted first so payload fields are visible before metadata.
+        Max recursion depth: 5 to avoid infinite loops on circular refs.
+        """
+        if depth > 5 or not isinstance(schema, dict):
+            return "obj"
+
+        schema_type = schema.get("type", "object")
+        if isinstance(schema_type, list):
+            non_null = [t for t in schema_type if t != "null"]
+            schema_type = non_null[0] if non_null else "string"
+
+        if schema_type == "array":
+            items = schema.get("items", {})
+            if items:
+                inner = self._describe_response_schema(items, depth + 1)
+                return f"[{inner}]"
+            return "array"
+
+        if schema_type == "object":
+            props = schema.get("properties", {})
+            if not props:
+                return "obj"
+
+            # Complex types first: objects/arrays carry the payload, primitives are metadata
+            def _complexity(item):
+                _name, prop = item
+                t = prop.get("type", "")
+                if isinstance(t, list):
+                    t = next((x for x in t if x != "null"), "")
+                if t in ("object", "array") or prop.get("properties") or prop.get("items"):
+                    return 0
+                return 1
+
+            fields = []
+            for fname, fprop in sorted(props.items(), key=_complexity):
+                inner = self._describe_response_schema(fprop, depth + 1)
+                fields.append(f"{fname}:{inner}")
+            return "{" + ",".join(fields) + "}"
+
+        if "enum" in schema:
+            vals = schema["enum"][:6]
+            return "str(" + "|".join(str(v) for v in vals) + ")"
+
+        return self._SHORT_TYPES.get(schema_type, schema_type)
+
     def _build_signature(
         self, func_name: str, params_spec: List[Dict[str, Any]],
     ) -> Tuple[str, Dict[str, str]]:
@@ -425,6 +604,12 @@ class OpenAPICompiler:
             return "object"
 
         schema_type = schema.get("type", "string")
+
+        # JSON Schema allows type to be a list, e.g. ["string", "null"].
+        # Normalise to the first non-null type.
+        if isinstance(schema_type, list):
+            non_null = [t for t in schema_type if t != "null"]
+            schema_type = non_null[0] if non_null else "string"
 
         if schema_type == "object":
             props = schema.get("properties", {})
@@ -468,12 +653,19 @@ class OpenAPICompiler:
         description: str,
         signature: str,
         params_spec: List[Dict[str, Any]],
+        response_hint: Optional[str] = None,
     ) -> str:
         """Build comprehensive API doc for code generation prompts."""
         lines = [
             f"# await {self.tool_name}.{signature}",
             f"# {method.upper()} {path} — {description}",
         ]
+
+        # Response format hint — critical for correct field access
+        if response_hint:
+            lines.append(f"# Returns: {response_hint}")
+        else:
+            lines.append(f"# Returns: dict or str (response format not documented — print result to inspect)")
 
         # Add parameter hints (max 8)
         hints = []
@@ -542,8 +734,8 @@ class OpenAPICompiler:
         return f"{self.tool_name}_{short_hash}"
 
     def _save_cache(self) -> None:
-        """Save compiled manifest to disk cache."""
-        if not self.manifest:
+        """Save compiled manifest to disk cache (no-op when cache=False)."""
+        if not self.cache or not self.manifest:
             return
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         manifest_path = self._cache_dir / "manifest.json"

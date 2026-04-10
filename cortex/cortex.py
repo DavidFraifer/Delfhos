@@ -66,7 +66,7 @@ class Cortex:
         agent.run("COVID stats. Request: Return JSON with country and cases fields.")
 
     Args:
-        tools: Service tools (Gmail, Drive, SQL, MCP, WebSearch, etc) or @tool functions.
+        tools: Service tools (Gmail, Drive, SQL, APITool, WebSearch, etc) or @tool functions.
                Note: WebSearch(llm="model") requires an explicit model (Gemini or OpenAI/GPT).
         llm: Single LLM for all ops (simple). Use either llm OR (light_llm + heavy_llm).
         light_llm: Fast LLM for prefiltering (advanced; requires heavy_llm).
@@ -103,7 +103,7 @@ class Cortex:
         """Initialize an Agent (Cortex) with tools and language models.
 
         Args:
-            tools: List of Service tools (Gmail, Drive, SQL, MCP, etc), @tool functions, or Connections.
+            tools: List of Service tools (Gmail, Drive, SQL, APITool, etc), @tool functions, or Connections.
                    Per-tool approval: set confirm= on each connection, e.g. Gmail(confirm=["send"]).
                    Custom tools: use @tool(confirm=True) to always require approval.
             llm: Single LLM for all operations (e.g., "gemini-3.1-flash-lite-preview").
@@ -273,66 +273,87 @@ class Cortex:
         chat_console.print(welcome)
         chat_console.print()  # Blank line for spacing
 
-        while True:
-            try:
-                # Stop the background rich progress viewer so it doesn't intercept or flicker user input
-                runtime_console.progress.stop()
+        try:
+            while True:
+                # Pause the live spinner while waiting for user input so Rich's
+                # control bytes don't compete with the terminal prompt.
+                runtime_console.pause_live(clear_tasks=True)
                 try:
                     user_input = input("You > ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    runtime_console.loading_stop_all()
+                    chat_console.print("\n[dim]Chat ended.[/dim]")
+                    break
                 finally:
-                    # Restart it so the agent logs display correctly
-                    runtime_console.progress.start()
-            except (EOFError, KeyboardInterrupt):
-                chat_console.print("\n[dim]Chat ended.[/dim]")
-                break
+                    # Always restore live rendering (idempotent if _pause_depth already 0).
+                    runtime_console.resume_live()
 
-            if not user_input:
-                continue
+                if not user_input:
+                    continue
 
-            lowered = user_input.lower()
-            if lowered in {"/exit", "/quit"}:
-                chat_console.print("[dim]Goodbye.[/dim]\n")
-                break
-            if lowered == "/help":
-                help_panel = Panel(
-                    "[bold cyan]/help[/bold cyan]   Show this help\n"
-                    "[bold cyan]/stop[/bold cyan]   Stop agent (will restart on next message)\n"
-                    "[bold cyan]/exit[/bold cyan]   Exit chat\n"
-                    "[bold cyan]/clear[/bold cyan]  Clear screen",
-                    title="[bold]Commands[/bold]",
-                    border_style="blue",
-                    padding=(1, 2),
-                )
-                chat_console.print(help_panel)
-                chat_console.print()  # Spacing
-                continue
-            if lowered == "/clear":
-                chat_console.clear()
-                chat_console.print(welcome)
-                chat_console.print()
-                continue
-            if lowered == "/stop":
-                self.stop()
-                chat_console.print("[yellow]Agent stopped.[/yellow] [dim]Send a new message to resume.[/dim]\n")
-                continue
-
-            response = self.run(user_input, timeout=timeout)
-            
-            # Note: Result is already printed by orchestrator.task_summary() above,
-            # so we only need to handle errors here
-            if not response.status:
-                err = response.error or "Unknown error"
-                chat_console.print(
-                    Panel(
-                        f"[red]{err}[/red]",
-                        title="[bold red]✗ Error[/bold red]",
-                        border_style="red",
-                        expand=False,
+                lowered = user_input.lower()
+                if lowered in {"/exit", "/quit"}:
+                    runtime_console.loading_stop_all()
+                    chat_console.print("[dim]Goodbye.[/dim]\n")
+                    break
+                if lowered == "/help":
+                    help_panel = Panel(
+                        "[bold cyan]/help[/bold cyan]   Show this help\n"
+                        "[bold cyan]/stop[/bold cyan]   Stop agent (will restart on next message)\n"
+                        "[bold cyan]/exit[/bold cyan]   Exit chat\n"
+                        "[bold cyan]/clear[/bold cyan]  Clear screen",
+                        title="[bold]Commands[/bold]",
+                        border_style="blue",
                         padding=(1, 2),
                     )
-                )
-            
-            chat_console.print()  # Blank line for spacing between responses
+                    chat_console.print(help_panel)
+                    chat_console.print()  # Spacing
+                    continue
+                if lowered == "/clear":
+                    chat_console.clear()
+                    chat_console.print(welcome)
+                    chat_console.print()
+                    continue
+                if lowered == "/stop":
+                    self.stop()
+                    runtime_console.loading_stop_all()
+                    chat_console.print("[yellow]Agent stopped.[/yellow] [dim]Send a new message to resume.[/dim]\n")
+                    continue
+
+                response = None
+                try:
+                    response = self.run(user_input, timeout=timeout)
+                except Exception as exc:
+                    chat_console.print(
+                        Panel(
+                            f"[red]{exc}[/red]",
+                            title="[bold red]✗ Error[/bold red]",
+                            border_style="red",
+                            expand=False,
+                            padding=(1, 2),
+                        )
+                    )
+                finally:
+                    # Force-close any lingering spinner before returning to prompt.
+                    runtime_console.loading_stop_all()
+
+                # Note: Result is already printed by orchestrator.task_summary() above,
+                # so we only need to handle explicit errors here.
+                if response is not None and not response.status:
+                    err = response.error or "Unknown error"
+                    chat_console.print(
+                        Panel(
+                            f"[red]{err}[/red]",
+                            title="[bold red]✗ Error[/bold red]",
+                            border_style="red",
+                            expand=False,
+                            padding=(1, 2),
+                        )
+                    )
+
+                chat_console.print()  # Blank line for spacing between responses
+        finally:
+            runtime_console.loading_stop_all()
 
     async def arun(self, task: str, timeout: float = 60.0) -> Response:
         """

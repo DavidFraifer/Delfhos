@@ -2,6 +2,7 @@ import sys
 import threading
 import time
 import re
+from contextlib import contextmanager
 from enum import Enum
 from typing import Optional, Dict
 
@@ -108,7 +109,46 @@ class ProfessionalConsole:
         )
         self.active_tasks: Dict[str, int] = {}
         self._loading_tasks: Dict[str, int] = {}
-        self.progress.start()
+
+        # When True, all print/loading output is queued instead of displayed.
+        # This prevents concurrent async task output from corrupting the
+        # interactive approval prompt (questionary).
+        self._suppressed = False
+        self._suppressed_queue: list = []
+        self._suppression_depth = 0
+        self._pause_depth = 0
+        self._progress_running = False
+
+    def _remove_all_loading_tasks_locked(self):
+        for task_id in list(self._loading_tasks.values()):
+            try:
+                self.progress.remove_task(task_id)
+            except Exception:
+                pass
+        self._loading_tasks.clear()
+
+    def _stop_progress_locked(self):
+        if not self._progress_running:
+            return
+        try:
+            self.progress.stop()
+        except Exception:
+            pass
+        finally:
+            self._progress_running = False
+
+    def _start_progress_locked(self):
+        if self._progress_running:
+            return
+        if self._suppression_depth > 0 or self._pause_depth > 0:
+            return
+        if not self._loading_tasks:
+            return
+        try:
+            self.progress.start()
+            self._progress_running = True
+        except Exception:
+            self._progress_running = False
 
     def _get_color(self, level: LogLevel) -> str:
         colors = {
@@ -125,56 +165,140 @@ class ProfessionalConsole:
 
     def print(self, level: LogLevel, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None):
         with self._lock:
-            color = self._get_color(level)
-            symbol = self._SYMBOLS.get(level, "●")
+            if self._suppressed:
+                self._suppressed_queue.append((level, message, details, task_id, agent_id))
+                return
 
-            parts = []
+            self._print_line(level, message, details)
 
-            # Timestamps only in verbose mode
-            if self.verbose:
-                elapsed_ms = int((time.time() - self.start_time) * 1000)
-                if elapsed_ms < 1000:
-                    time_str = f"+{elapsed_ms}ms"
-                else:
-                    time_str = f"+{elapsed_ms / 1000:.2f}s"
-                parts.append(f"[grey50]{time_str:>10}[/grey50]")
+    def _print_line(self, level: LogLevel, message: str, details: Optional[str] = None):
+        """Render a single log line to the console (caller must hold _lock)."""
+        color = self._get_color(level)
+        symbol = self._SYMBOLS.get(level, "●")
 
-            parts.append(f"  [{color}]{symbol}[/{color}] {message}")
+        parts = []
 
-            if details:
-                parts.append(f"  [grey50]{details}[/grey50]")
+        # Timestamps only in verbose mode
+        if self.verbose:
+            elapsed_ms = int((time.time() - self.start_time) * 1000)
+            if elapsed_ms < 1000:
+                time_str = f"+{elapsed_ms}ms"
+            else:
+                time_str = f"+{elapsed_ms / 1000:.2f}s"
+            parts.append(f"[grey50]{time_str:>10}[/grey50]")
 
-            self.console.print("".join(parts))
+        parts.append(f"  [{color}]{symbol}[/{color}] {message}")
+
+        if details:
+            parts.append(f"  [grey50]{details}[/grey50]")
+
+        self.console.print("".join(parts))
 
     def stop_all(self):
-        self.progress.stop()
+        with self._lock:
+            self._remove_all_loading_tasks_locked()
+            self._stop_progress_locked()
+
+    def suppress(self):
+        """Suppress all output, queuing it for later.
+
+        Used during interactive approval prompts so concurrent async task
+        output doesn't corrupt the terminal.  Call ``unsuppress()`` when
+        the interactive session is over.
+        """
+        with self._lock:
+            self._suppression_depth += 1
+            self._suppressed = True
+
+            # Already suppressed by another caller; keep waiting for the
+            # matching number of unsuppress() calls before resuming output.
+            if self._suppression_depth > 1:
+                return
+
+            # Stop the live progress renderer completely — its repaints
+            # would overwrite the questionary prompt otherwise.
+            self._remove_all_loading_tasks_locked()
+            self._stop_progress_locked()
+
+    def unsuppress(self):
+        """Resume normal output and flush any queued messages."""
+        with self._lock:
+            if self._suppression_depth == 0:
+                return
+
+            self._suppression_depth -= 1
+            self._suppressed = self._suppression_depth > 0
+
+            # Still suppressed by another caller.
+            if self._suppression_depth > 0:
+                return
+
+            # Restart the live progress renderer unless chat input has paused it.
+            self._start_progress_locked()
+
+            # Flush queued messages
+            queued = list(self._suppressed_queue)
+            self._suppressed_queue.clear()
+            for level, message, details, _tid, _aid in queued:
+                self._print_line(level, message, details)
+
+    def pause_live(self, clear_tasks: bool = False):
+        """Temporarily pause live spinner rendering (nesting-safe)."""
+        with self._lock:
+            self._pause_depth += 1
+            if clear_tasks:
+                self._remove_all_loading_tasks_locked()
+            self._stop_progress_locked()
+
+    def resume_live(self):
+        """Resume live spinner rendering when all pauses have completed."""
+        with self._lock:
+            if self._pause_depth == 0:
+                return
+            self._pause_depth -= 1
+            if self._pause_depth == 0 and self._suppression_depth == 0:
+                self._start_progress_locked()
+
+    @contextmanager
+    def paused_live(self, clear_tasks: bool = False):
+        """Context manager form of pause_live()/resume_live()."""
+        self.pause_live(clear_tasks=clear_tasks)
+        try:
+            yield
+        finally:
+            self.resume_live()
 
     def loading_start(self, label: str, key: str):
         """Show a simple circle spinner while an operation is running."""
-        if key in self._loading_tasks:
-            return
-        task_id = self.progress.add_task(label, total=None)
-        self._loading_tasks[key] = task_id
+        with self._lock:
+            if self._suppressed or self._pause_depth > 0 or key in self._loading_tasks:
+                return
+            try:
+                task_id = self.progress.add_task(label, total=None)
+            except Exception:
+                return
+            self._loading_tasks[key] = task_id
+            self._start_progress_locked()
 
     def loading_stop(self, key: str):
         """Remove a spinner loading line."""
-        if key in self._loading_tasks:
-            self.progress.remove_task(self._loading_tasks.pop(key))
-
-    def loading_stop_all(self):
-        """Stop all active spinners and force a clean display refresh."""
-        for task_id in list(self._loading_tasks.values()):
+        with self._lock:
+            task_id = self._loading_tasks.pop(key, None)
+            if task_id is None:
+                return
             try:
                 self.progress.remove_task(task_id)
             except Exception:
                 pass
-        self._loading_tasks.clear()
-        # Stop and restart the live renderer to flush any lingering spinner frames
-        try:
-            self.progress.stop()
-            self.progress.start()
-        except Exception:
-            pass
+            if not self._loading_tasks:
+                self._stop_progress_locked()
+
+    def loading_stop_all(self):
+        """Stop all active spinners and force a clean display refresh."""
+        with self._lock:
+            self._remove_all_loading_tasks_locked()
+            # Stop the live renderer and keep it idle until a new spinner starts.
+            self._stop_progress_locked()
 
     def info(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None):
         if "payload generated" in str(message) or (details and "payload generated" in str(details)):
@@ -225,13 +349,31 @@ class ProfessionalConsole:
             sys.stderr.flush()
 
     def task_summary(self, task_id: str, duration: float, tokens: dict, status: str, final_message: str = None, computational_time: float = None, wait_time: float = None, agent_id: Optional[str] = None, task_status: str = "success", tools: list = None, llm_config: Optional[str] = None):
+        # Stop all spinners before printing so the progress renderer doesn't
+        # race with console.print() calls and cause ghost spinner lines.
+        self.loading_stop_all()
+
         status_symbol = "✓" if task_status == "success" else "✗"
         status_color = "green" if task_status == "success" else "red"
         status_word = "Completed" if task_status == "success" else "Failed"
 
+        def _as_int(value) -> int:
+            try:
+                if value is None:
+                    return 0
+                return int(value)
+            except (TypeError, ValueError):
+                return 0
+
+        input_t = _as_int(tokens.get('input_tokens', tokens.get('prompt_tokens', 0)))
+        output_t = _as_int(tokens.get('output_tokens', tokens.get('completion_tokens', 0)))
+        tokens_used = _as_int(tokens.get('tokens_used', tokens.get('total_tokens', input_t + output_t)))
+
         # Build compact stats
         stats = []
         stats.append(f"{duration:.2f}s")
+        stats.append(f"{tokens_used:,} tok")
+        stats.append(f"in/out {input_t:,}/{output_t:,}")
         cost_val = tokens.get('total_cost_usd')
         if cost_val is not None:
             stats.append(f"${float(cost_val):.4f}")
@@ -242,10 +384,9 @@ class ProfessionalConsole:
         # Verbose: show detailed breakdown
         if self.verbose:
             detail_parts = []
-            tokens_used = tokens.get('tokens_used', 0)
-            input_t = tokens.get('input_tokens', 0)
-            output_t = tokens.get('output_tokens', 0)
-            detail_parts.append(f"{tokens_used} tokens (in: {input_t}, out: {output_t})")
+            detail_parts.append(f"tokens={tokens_used:,}")
+            detail_parts.append(f"in={input_t:,}")
+            detail_parts.append(f"out={output_t:,}")
             if cost_val is not None:
                 detail_parts.append(f"${float(cost_val):.6f}")
             self.console.print(f"    [dim]{'  ·  '.join(detail_parts)}[/dim]")

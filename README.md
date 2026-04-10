@@ -1,6 +1,6 @@
 # Delfhos
 
-Python SDK for building AI agents that use real tools — Gmail, SQL, Drive, Sheets, MCP servers, and your own functions — with safe, human-in-the-loop execution.
+Python SDK for building AI agents that use real tools — Gmail, SQL, Drive, Sheets, REST APIs, and your own functions — with safe, human-in-the-loop execution.
 
 > Full documentation at **[delfhos.com/docs](https://delfhos.com/docs)**
 
@@ -88,7 +88,7 @@ agent.stop()
 ## Built-in tools
 
 ```python
-from delfhos import Gmail, SQL, Sheets, Drive, Calendar, Docs, WebSearch, MCP, APITool
+from delfhos import Gmail, SQL, Sheets, Drive, Calendar, Docs, WebSearch, APITool
 ```
 
 ```python
@@ -188,19 +188,6 @@ Auto-detects model requirements:
 - Model dimensions (inferred after loading)
 
 See [EMBEDDING_MODELS_GUIDE.md](https://github.com/Delfhos/delfhos/blob/main/EMBEDDING_MODELS_GUIDE.md) for the full compatibility matrix.
-
----
-
-## MCP servers
-
-```python
-from delfhos import Agent, MCP
-
-fs = MCP("server-filesystem", args=["."], allow=["read_file", "write_file"])
-agent = Agent(tools=[fs], llm="gemini-3.1-flash-lite-preview")
-agent.run("List all Python files and write a one-line summary for each.")
-agent.stop()
-```
 
 ---
 

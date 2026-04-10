@@ -47,6 +47,24 @@ class APIExecutor:
         self._auth_headers = auth_headers or {}
         self._auth_params = auth_params or {}
 
+        # Validate that no auth value is None — catches missing env vars early
+        for k, v in self._auth_headers.items():
+            if v is None:
+                raise ToolDefinitionError(
+                    detail=(
+                        f"APITool '{tool_name}': auth header '{k}' is None. "
+                        f"Check that the environment variable holding the API key is set."
+                    )
+                )
+        for k, v in self._auth_params.items():
+            if v is None:
+                raise ToolDefinitionError(
+                    detail=(
+                        f"APITool '{tool_name}': auth param '{k}' is None. "
+                        f"Check that the environment variable holding the API key is set."
+                    )
+                )
+
     def call(self, func_name: str, **kwargs) -> str:
         """Execute an API call and return formatted result."""
         import httpx
@@ -89,10 +107,16 @@ class APIExecutor:
                 if value is not None:
                     query_params[key] = value
 
-        # Build URL with path parameters
+        # Build URL with path parameters (use re.sub for exact matches only)
         path = path_template
         for param_name, param_value in path_params.items():
-            path = path.replace(f"{{{param_name}}}", str(param_value))
+            from urllib.parse import quote
+            safe_value = quote(str(param_value), safe="")
+            path = re.sub(
+                r"\{" + re.escape(param_name) + r"\}",
+                safe_value,
+                path,
+            )
 
         url = f"{base_url}{path}"
 
@@ -136,19 +160,41 @@ class APIExecutor:
             raise ToolException(f"Request failed for {method} {url}: {exc}")
 
     @staticmethod
-    def _format_response(response) -> str:
-        """Format HTTP response into a string for the agent."""
+    def _format_response(response):
+        """Return the parsed response object for the agent.
+
+        JSON responses are returned as native Python dicts/lists so that
+        LLM-generated code can use them directly (no json.loads() needed).
+        Non-JSON responses are returned as plain text strings.
+
+        JSON detection uses two passes:
+        1. Content-Type header says "application/json" → parse immediately.
+        2. Fallback: body starts with { or [ → attempt JSON parse regardless
+           of content-type (handles APIs that omit or mislabel the header).
+        """
         content_type = response.headers.get("content-type", "")
 
         if "application/json" in content_type:
             try:
-                data = response.json()
-                return json.dumps(data, indent=2, ensure_ascii=False)
+                return response.json()
             except (json.JSONDecodeError, ValueError):
                 pass
 
         text = response.text
-        # Truncate very large responses to avoid blowing up context
+        if not text.strip():
+            return {"status": response.status_code, "body": None}
+
+        # Fallback JSON detection: try to parse if body looks like JSON.
+        # This handles APIs that return application/octet-stream, text/plain,
+        # or any other non-JSON content-type with a JSON body.
+        stripped = text.lstrip()
+        if stripped.startswith(("{", "[")):
+            try:
+                return json.loads(text)
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # Truncate very large non-JSON responses to avoid blowing up context
         if len(text) > 50_000:
             return text[:50_000] + "\n... (truncated)"
         return text
@@ -203,6 +249,7 @@ def build_api_tools(
             parameters=params if params else None,
             func=_make_func(func_name),
             _internal_use=True,
+            handle_error=None,  # Let API errors propagate so the orchestrator sees the real error
         )
         tools[func_name] = tool
 

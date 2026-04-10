@@ -2170,92 +2170,10 @@ async def _execute_tracked_callable(
 
 
 def _wrap_for_tracking(tool_name: str, tool_obj: Any, tool_tracker: Any) -> Any:
-    """Recursively wrap custom tools and MCP namespaces to enable tracing."""
+    """Wrap custom tools to enable tracing."""
     if not tool_tracker:
         return tool_obj
 
-    # It's an MCP Tool Namespace, we need to wrap the return values of __getattr__
-    if type(tool_obj).__name__ == "MCPToolNamespace":
-        class MCPNamespaceTrackerProxy:
-            def __init__(self, original):
-                self._original = original
-
-            def _get_mcp_tool_description(self, action_name: str) -> str:
-                # Prefer local compiled namespace metadata.
-                tools_dict = getattr(self._original, "_tools", {})
-                tool_def = tools_dict.get(action_name)
-                if tool_def is not None:
-                    desc = getattr(tool_def, "description", None)
-                    if isinstance(desc, str) and desc.strip():
-                        return desc
-
-                # Fallback to registry summaries.
-                try:
-                    from .tool_registry import TOOL_ACTION_SUMMARIES
-                    summaries = TOOL_ACTION_SUMMARIES.get(tool_name, {})
-                    action_key = action_name.upper().replace("-", "_")
-                    return summaries.get(action_key, "")
-                except Exception:
-                    return ""
-
-            def _find_connection_confirm_policy(self):
-                orchestrator = getattr(tool_tracker, "orchestrator", None)
-                if not orchestrator or not getattr(orchestrator, "tools", None):
-                    return None, False
-
-                connections = getattr(orchestrator.tools, "connections", {})
-                for conn in connections.values():
-                    if getattr(conn, "tool_name", "").lower() == str(tool_name).lower() and conn.is_active():
-                        return conn, getattr(conn, "confirm", True)
-                return None, True
-                
-            def __getattr__(self, name: str):
-                if name.startswith("_"):
-                    return getattr(self._original, name)
-                
-                # In MCPToolNamespace, __getattr__ usually returns the 'tool.execute' coroutine
-                attr = getattr(self._original, name)
-                if callable(attr):
-                    # Wrap the function
-                    async def mcp_tool_wrapper(*args, **kwargs):
-                        full_name = f"{tool_name}.{name}"
-                        bound_args = _bind_arguments(attr, args, kwargs)
-                        ui_metadata = {"_tool_trace_args": bound_args}
-
-                        conn, confirm_policy = self._find_connection_confirm_policy()
-                        tool_description = self._get_mcp_tool_description(name)
-                        await _request_unified_approval(
-                            tool_tracker=tool_tracker,
-                            task_id=tool_tracker.task_id,
-                            tool_name=tool_name,
-                            action_name=name,
-                                                        confirm_policy=confirm_policy,
-                            connection_name=getattr(conn, "connection_name", tool_name),
-                            message=f"Approve MCP call {full_name}",
-                            context_payload={
-                                "classification": classify_tool(name, tool_description),
-                                "args": bound_args,
-                            },
-                            ui_metadata={
-                                "mcp_tool": tool_name,
-                                "mcp_method": name,
-                                "mcp_args": bound_args,
-                            },
-                        )
-
-                        return await _execute_tracked_callable(
-                            tool_tracker=tool_tracker,
-                            call_name=full_name,
-                            description=f"Executing {full_name}",
-                            callable_obj=attr,
-                            args=args,
-                            kwargs=kwargs,
-                            ui_metadata=ui_metadata,
-                        )
-                    return mcp_tool_wrapper
-                return attr
-        return MCPNamespaceTrackerProxy(tool_obj)
-        
     # Standard custom tool wrapped natively via delfhos.Tool
     if type(tool_obj).__name__ == "Tool" or callable(tool_obj):
         # We need a callable proxy that wraps the call
@@ -2355,7 +2273,7 @@ def create_tool_libraries(tool_manager, task_id: str, agent_id: str, light_llm: 
         libraries[tool_name] = lib_cls(**base_kwargs)
     
     # Pass through any other tools registered in ToolContainer directly
-    # This allows MCP namespaces and user-defined @tool functions to be used natively
+    # This allows APITool namespaces and user-defined @tool functions to be used natively
     for tool_name, tool_func in tool_manager.tools.items():
         if tool_name not in libraries:
             libraries[tool_name] = _wrap_for_tracking(tool_name, tool_func, tool_tracker)

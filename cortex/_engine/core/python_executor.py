@@ -39,13 +39,16 @@ _original_json_loads = _json.loads
 def _safe_json_loads(obj, *args, **kwargs):
     """
     Safer json.loads for agent-generated code.
-    
-    Many generated snippets accidentally call json.loads() on objects that are
-    already parsed (dict/list). Instead of raising TypeError, we just return
-    the object as-is in those cases.
+
+    - Already-parsed dict/list: returned as-is (avoids TypeError).
+    - Empty or whitespace-only string: returns None with a warning.
+    - Everything else: delegates to the standard decoder.
     """
     if isinstance(obj, (dict, list)):
         return obj
+    if isinstance(obj, str) and not obj.strip():
+        print("Warning: json.loads() received an empty string — returning None.")
+        return None
     return _original_json_loads(obj, *args, **kwargs)
 
 
@@ -399,11 +402,23 @@ class PythonExecutor:
             
             # Build safe execution namespace
             self.namespace = self._build_namespace(libraries)
-        
+            # Record the initial set of keys so user-defined vars can be identified later
+            self._baseline_keys = set(self.namespace.keys())
+
         # Capture stdout/stderr
         stdout_capture = io.StringIO()
         stderr_capture = io.StringIO()
-        
+
+        # Bind print() in the namespace directly to the capture buffer so
+        # output is collected even when other subsystems (e.g. the approval
+        # flow) temporarily swap sys.stdout to the real terminal.
+        def _capture_print(*args, **kwargs):
+            kwargs.pop("file", None)       # always write to the capture buffer
+            kwargs.setdefault("flush", True)
+            print(*args, file=stdout_capture, **kwargs)
+
+        self.namespace["print"] = _capture_print
+
         try:
             lib_keys = list(libraries.keys()) if 'libraries' in locals() else list(self.namespace.keys())
             console.debug(
@@ -412,7 +427,7 @@ class PythonExecutor:
                 task_id=self.task_id,
                 agent_id=self.agent_id
             )
-            
+
             # Execute with timeout
             with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
                 result = await asyncio.wait_for(
@@ -659,9 +674,30 @@ class PythonExecutor:
             "all": all,
             "enumerate": enumerate,
             "zip": zip,
+            "map": map,
+            "filter": filter,
+            "sorted": sorted,
+            "reversed": reversed,
+            "next": next,
+            "iter": iter,
             "isinstance": isinstance,
             "issubclass": issubclass,
+            "hasattr": hasattr,
+            "getattr": getattr,
+            "setattr": setattr,
+            "callable": callable,
+            "repr": repr,
+            "format": format,
+            "chr": chr,
+            "ord": ord,
+            "hash": hash,
+            "id": id,
             "type": type,
+            "object": object,
+            "super": super,
+            "bytes": bytes,
+            "bytearray": bytearray,
+            "frozenset": frozenset,
             "range": range,
             "json": _json, # Use the monkey-patched _json
             "asyncio": asyncio_proxy,
@@ -678,6 +714,13 @@ class PythonExecutor:
             "TypeError": TypeError,
             "AttributeError": AttributeError,
             "IndexError": IndexError,
+            "RuntimeError": RuntimeError,
+            "StopIteration": StopIteration,
+            "NotImplementedError": NotImplementedError,
+            "ZeroDivisionError": ZeroDivisionError,
+            "FileNotFoundError": FileNotFoundError,
+            "OverflowError": OverflowError,
+            "NameError": NameError,
             "None": None,
             "True": True,
             "False": False,
