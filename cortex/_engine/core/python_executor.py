@@ -511,9 +511,15 @@ class PythonExecutor:
         elif "async def run" in code_to_wrap and "await run(" not in code_to_wrap:
             code_to_wrap += "\nawait run()\n"
 
-        # Add a helper to export locals to the global namespace
+        # Add a helper to export locals to the global namespace.
+        # Protected keys (builtins, tool libraries, special names) must never be
+        # overwritten by user-defined variables, or subsequent executions will
+        # lose access to built-in functions like hasattr/isinstance/etc.
+        _protected_keys = getattr(self, '_baseline_keys', set())
+
         def __export_locals__(l):
-            namespace.update({k: v for k, v in l.items() if not k.startswith('_')})
+            namespace.update({k: v for k, v in l.items()
+                              if not k.startswith('_') and k not in _protected_keys})
         namespace['__export_locals__'] = __export_locals__
 
         # Inject export at the end for successful runs
@@ -553,7 +559,8 @@ class PythonExecutor:
                     tb = tb.tb_next
                 
                 if target_frame:
-                    namespace.update({k: v for k, v in target_frame.f_locals.items() if not k.startswith('_')})
+                    namespace.update({k: v for k, v in target_frame.f_locals.items()
+                                      if not k.startswith('_') and k not in _protected_keys})
                 
                 if isinstance(e, NameError):
                     # Log the full code when NameError occurs during execution
@@ -726,8 +733,10 @@ class PythonExecutor:
             "False": False,
             "locals": locals,
             "input": _blocked_input,
+            "format_table": format_table,
+            "safe_json_loads": safe_json_loads,
         }
-        
+
         # Standard library modules (safe subset)
         safe_modules = {
             "json": _json,
@@ -738,22 +747,28 @@ class PythonExecutor:
             "statistics": __import__("statistics"),
             "asyncio": asyncio_proxy,
         }
-        
+
         # Add safe modules to the namespace
         namespace.update(safe_modules)
-        
+
+        # Create a separate, non-circular restricted builtins dict.
+        # Using `namespace` itself as `__builtins__` (circular reference) can corrupt
+        # name resolution in Python 3.12+ when the namespace is mutated between
+        # executions (e.g. by the error-handler that exports frame locals).
+        # A snapshot taken here is immutable from exec's perspective.
+        _restricted_builtins = dict(namespace)
+        self._restricted_builtins = _restricted_builtins
+
         # Build namespace
         namespace.update({
-            "__builtins__": namespace,
+            "__builtins__": _restricted_builtins,  # non-circular, protected from mutation
             "ctx": self.orchestrator.agent_context if self.orchestrator else {},
             **libraries,  # Tool libraries (sql, sheets, gmail, etc.)
             "task_id": self.task_id,  # Make task_id available for use in code (though files.save() handles paths automatically)
-            "format_table": format_table,  # Helper function to format data as Markdown tables
-            "safe_json_loads": safe_json_loads,  # Safe JSON parser (returns None on empty/invalid, prints warning)
             "__name__": "__agent_execution__",  # Define __name__ to prevent NameErrors and skip if __name__ == "__main__" blocks
             "__file__": "agent_script.py",  # Define __file__ for completeness
         })
-        
+
         return namespace
     
     def _indent_code(self, code: str, spaces: int = 4) -> str:

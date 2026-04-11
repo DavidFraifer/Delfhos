@@ -1856,6 +1856,7 @@ RULES:
 - Order: Wait for tool output before generating text dependent on it.
 - Processing N items (emails, rows, files): ALWAYS `asyncio.gather(*[process(x) for x in items])`, NEVER sequential `for` loops with `await`.
 - Libs: asyncio, json, re, datetime, time, math, statistics. NO pandas.
+- APITool responses are plain Python objects (dict/list/str). If a result is a string, parse it with `json.loads(result)` before calling dict/list methods on it.
 - WEBSEARCH: If value needed, ask "Return ONLY JSON: {{k:v}}" -> use `safe_json_loads(response)` (returns None on empty/invalid). If None, abort and print raw response. NEVER hardcode/guess facts.
 {examples_section}
 
