@@ -35,11 +35,7 @@ _TYPE_MAP = {
 
 CACHE_DIR = Path.home() / "delfhos" / "api_cache"
 
-# Maximum number of endpoints to compile from a single spec.
-# Large specs (Stripe, GitHub) can have 300+ endpoints — compiling
-# all of them bloats the prefilter and code-gen prompts. Users should
-# use `allow=` to pick what they need; this cap is a safety net.
-MAX_ENDPOINTS = 100
+MAX_ENDPOINTS = None  # No cap — all endpoints in the spec are compiled.
 
 # Use threads for larger specs where schema transformation dominates startup time.
 API_PARALLEL_THRESHOLD = 40
@@ -199,7 +195,7 @@ class OpenAPICompiler:
         # Strip trailing slash for clean path joining
         base_url = base_url.rstrip("/")
 
-        limit = MAX_ENDPOINTS if max_endpoints is None else (max_endpoints or float("inf"))
+        limit = float("inf") if (max_endpoints is None or max_endpoints == 0) else max_endpoints
 
         operation_candidates: List[Tuple[int, str, str, Dict[str, Any]]] = []
         hit_limit = False

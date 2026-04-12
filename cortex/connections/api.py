@@ -269,11 +269,8 @@ class APITool(BaseConnection):
 
         manifest = compiler.load_cache()
         if not manifest:
-            # When allow= is set, compile all endpoints so the filter
-            # can find them (otherwise MAX_ENDPOINTS may cut them off).
-            max_ep = 0 if self.allow else None
             _log_connection("API COMPILE", f"{self.api_tool_name}: cache miss, compiling OpenAPI schema")
-            manifest = compiler.compile(max_endpoints=max_ep)
+            manifest = compiler.compile()
         else:
             _log_connection(
                 "API COMPILE",
