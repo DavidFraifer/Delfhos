@@ -78,6 +78,7 @@ class Orchestrator:
         self.trace_mode = trace_mode
         self.trace_callback = trace_callback
         self.current_trace = None
+        self.api_enrichment_info = None  # Set by Agent._configure_tools() for APITool enrichment
         self.logger = logger
         self.light_llm = light_llm
         self.heavy_llm = heavy_llm
@@ -678,6 +679,22 @@ class Orchestrator:
                 trace_mode=self.trace_mode if isinstance(self.trace_mode, str) else "full"
             )
             self.current_trace.add_event("session_start", "task received")
+
+            # Inject API enrichment info if any APITool had enrich=True
+            if self.api_enrichment_info:
+                from cortex._engine.trace import EnrichmentTrace
+                info = self.api_enrichment_info
+                self.current_trace.api_enrichment = EnrichmentTrace(
+                    started_at=datetime.now(),
+                    duration_ms=info.get("duration_ms", 0),
+                    model_used=info.get("model", ""),
+                    endpoints_enriched=info.get("endpoints_enriched", 0),
+                    cached=info.get("cached", False),
+                    tokens_input=info.get("tokens_input", 0),
+                    tokens_output=info.get("tokens_output", 0),
+                    cost_usd=info.get("cost_usd"),
+                )
+
             if self.trace_callback:
                 self.trace_callback(self.current_trace)
 
@@ -1236,7 +1253,16 @@ ERROR:
                 from datetime import datetime
                 self.current_trace.ended_at = datetime.now()
                 self.current_trace.outcome = "success" if result.get("success", False) else "failed"
-                self.current_trace.total_cost_usd = token_info.get('total_cost_usd')
+                task_cost = token_info.get('total_cost_usd')
+                enrichment_cost = 0.0
+                if self.current_trace.api_enrichment and self.current_trace.api_enrichment.cost_usd:
+                    enrichment_cost = self.current_trace.api_enrichment.cost_usd
+                if task_cost is not None:
+                    self.current_trace.total_cost_usd = round(task_cost + enrichment_cost, 8)
+                elif enrichment_cost > 0:
+                    self.current_trace.total_cost_usd = round(enrichment_cost, 8)
+                else:
+                    self.current_trace.total_cost_usd = None
                 self.current_trace.pricing_path = token_info.get('pricing_path', "") or ""
 
                 cost_by_function = {}

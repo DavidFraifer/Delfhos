@@ -467,6 +467,50 @@ api = APITool(
 )
 ```
 
+### LLM enrichment — improve descriptions automatically
+
+Pass `enrich=True` and an `llm=` model to have an LLM rewrite every endpoint description and infer missing response schemas before the agent runs. The enriched manifest is cached so the LLM is only called once per spec version.
+
+```python
+finnhub = APITool(
+    spec="https://finnhub.io/static/swagger.json",
+    auth={"X-Finnhub-Token": os.environ["FINNHUB_API_KEY"]},
+    cache=True,   # Required to persist enriched manifest
+    enrich=True,  # Use LLM to improve descriptions
+    llm="gemini-2.5-flash",  # Model used for enrichment
+)
+```
+
+Token usage and cost for enrichment are tracked separately from task cost and appear in the trace summary:
+
+```
+║ API ENRICHMENT            1,823ms                         ║
+║   Model                   gemini-2.5-flash                ║
+║   Endpoints enriched      12                              ║
+║   Tokens in/out           1,024 / 487                     ║
+║   Cost USD                $0.000312                       ║
+╠═══════════════════════════════════════════════════════════╣
+║   Setup cost (API enrich) $0.000312                       ║
+║   Task cost               $0.004521                       ║
+║   Cost USD                $0.004833                       ║
+```
+
+On subsequent runs the manifest loads from cache — the setup line shows `$0.000000 (cached)` and no LLM call is made.
+
+### Background response schema sampling
+
+`sample=True` (the default) silently captures the real response structure after each successful API call and saves it to the cache. No LLM, no tokens, zero latency impact. On the next run the agent's view of each endpoint's return type automatically improves.
+
+```python
+finnhub = APITool(
+    spec="...",
+    cache=True,
+    sample=True,  # Default — capture real response schemas in background
+)
+```
+
+Sampled schemas are stored in `~/delfhos/api_cache/{tool}_{hash}/sampled_schemas.json` and are merged into the manifest on every subsequent `compile()` or `load_cache()` call.
+
 ---
 
 ## How to use local or custom OpenAI-compatible models
@@ -1261,6 +1305,9 @@ APITool(
     allow:       Optional[Union[str, List[str]]] = None,
     confirm:     Union[bool, List[str], None] = True,
     cache:       bool = False,                    # Cache compiled manifest to ~/delfhos/api_cache/
+    enrich:      bool = False,                    # Use LLM to improve descriptions/schemas
+    llm:         Optional[str] = None,            # Model for enrichment (required if enrich=True)
+    sample:      bool = True,                     # Capture real response schemas in background
 )
 ```
 
@@ -1274,6 +1321,9 @@ APITool(
 | `allow` | `list` | `None` | Restrict which endpoints the agent can use (function names from `inspect()`) |
 | `confirm` | `bool \| list` | `True` | Require approval before listed endpoints execute |
 | `cache` | `bool` | `False` | Reuse compiled manifest from disk; useful for large specs |
+| `enrich` | `bool` | `False` | Run an LLM pass to improve endpoint descriptions and infer response schemas. Cached after first run — zero cost on subsequent runs. Requires `llm=`. |
+| `llm` | `str` | `None` | Model used for enrichment (e.g. `"gemini-2.5-flash"`). Only used when `enrich=True`. |
+| `sample` | `bool` | `True` | After each successful API call, infer the response schema from real data and persist it to the cache. No LLM, no cost, zero latency impact. |
 
 ### Class methods
 
@@ -1289,7 +1339,10 @@ By default, up to 100 endpoints are compiled from a spec. Use `allow=` to pick a
 
 ### Cache location
 
-Compiled manifests are saved to `~/delfhos/api_cache/{tool}_{hash}/manifest.json`.
+| File | Contents |
+|------|----------|
+| `~/delfhos/api_cache/{tool}_{hash}/manifest.json` | Compiled (and enriched) endpoint manifest |
+| `~/delfhos/api_cache/{tool}_{hash}/sampled_schemas.json` | Real response schemas captured from live API calls |
 
 ---
 
@@ -1711,15 +1764,28 @@ This keeps context size bounded at `~keep` messages regardless of conversation l
 
 ## How APITool works
 
-`APITool` connects any REST API to a Delfhos agent through a three-stage pipeline — all without an LLM:
+`APITool` connects any REST API to a Delfhos agent through a pipeline with two optional quality layers on top:
 
-1. **Compilation:** The `OpenAPICompiler` reads the OpenAPI 3.x spec (JSON or YAML, local file or URL), resolves all `$ref` pointers, and transforms every operation into a Delfhos-native tool entry. Each entry contains a Python function signature, parameter descriptions, and a compressed API doc for code generation. Large specs are compiled in parallel using a thread pool.
+1. **Compilation** *(always, no LLM):* The `OpenAPICompiler` reads the OpenAPI 3.x spec (JSON or YAML, local file or URL), resolves all `$ref` pointers, and transforms every operation into a Delfhos-native tool entry. Each entry contains a Python function signature, parameter descriptions, and a compressed API doc for code generation. Large specs are compiled in parallel using a thread pool.
 
-2. **Registration:** Compiled entries are registered into three internal stores — `TOOL_REGISTRY` (for the prefilter LLM), `TOOL_ACTION_SUMMARIES` (for prefilter ranking), and `COMPRESSED_API_DOCS` (for code generation prompts).
+2. **LLM Enrichment** *(optional, `enrich=True`):* After compilation, the `OpenAPICompiler.enrich()` method sends all endpoint descriptions to an LLM in a single call. The LLM rewrites descriptions to be more actionable for an AI agent and infers response schemas for endpoints where the spec left them undocumented. The enriched manifest is written back to the cache — on all subsequent runs the manifest loads from disk and the LLM is never called again, so enrichment cost is incurred exactly once per spec version.
 
-3. **Execution:** The `APIExecutor` receives calls from the agent's generated code, maps function arguments to path/query/body parameters, injects auth headers or query params, and makes the HTTP request via `httpx`.
+3. **Registration:** Compiled (and optionally enriched) entries are registered into three internal stores — `TOOL_REGISTRY` (for the prefilter LLM), `TOOL_ACTION_SUMMARIES` (for prefilter ranking), and `COMPRESSED_API_DOCS` (for code generation prompts).
 
-The result: any API with an OpenAPI spec is fully usable as an agent tool with zero hand-written adapter code.
+4. **Execution:** The `APIExecutor` receives calls from the agent's generated code, maps function arguments to path/query/body parameters, injects auth headers or query params, and makes the HTTP request via `httpx`.
+
+5. **Background Schema Sampling** *(optional, `sample=True`, default):* After each successful API call that returns JSON, a daemon thread infers the exact response schema from the real data using `_infer_schema()` and saves it to `sampled_schemas.json` in the cache directory. On the next compile or cache load, sampled schemas are merged back into the manifest's `response_hint` fields — the agent's knowledge of each endpoint's output improves automatically with use, at zero token cost and zero latency.
+
+### Token tracking and cost attribution
+
+When `enrich=True` is set on any `APITool`, the execution trace separates setup cost from task cost:
+
+- **Setup cost** — tokens spent on LLM enrichment during `Agent` startup. Shown as `$0.000000 (cached)` on subsequent runs.
+- **Task cost** — tokens spent on code generation and execution for the actual user task.
+
+Both are visible in the `Trace.summary()` output and accessible on `trace.api_enrichment` (`EnrichmentTrace`) and `trace.total_cost_usd`.
+
+The result: any API with an OpenAPI spec is fully usable as an agent tool with zero hand-written adapter code, progressively better response-schema knowledge, and transparent cost attribution.
 
 ---
 

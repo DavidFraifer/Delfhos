@@ -130,6 +130,32 @@ def _deep_resolve(spec: Dict[str, Any], schema: Any, depth: int = 0) -> Any:
     return result
 
 
+def _infer_schema(data: Any, depth: int = 0, max_depth: int = 5) -> Dict[str, Any]:
+    """Infer a JSON Schema from actual response data (no LLM needed)."""
+    if depth > max_depth:
+        return {"type": "object"}
+    if data is None:
+        return {"type": "null"}
+    if isinstance(data, bool):
+        return {"type": "boolean"}
+    if isinstance(data, int):
+        return {"type": "integer"}
+    if isinstance(data, float):
+        return {"type": "number"}
+    if isinstance(data, str):
+        return {"type": "string"}
+    if isinstance(data, list):
+        if not data:
+            return {"type": "array"}
+        return {"type": "array", "items": _infer_schema(data[0], depth + 1, max_depth)}
+    if isinstance(data, dict):
+        props = {}
+        for k, v in data.items():
+            props[k] = _infer_schema(v, depth + 1, max_depth)
+        return {"type": "object", "properties": props}
+    return {"type": "string"}
+
+
 class OpenAPICompiler:
     """
     Compiles an OpenAPI 3.x specification into Delfhos-native tool_docs and registry entries.
@@ -268,6 +294,7 @@ class OpenAPICompiler:
             "tools": compiled_tools,
         }
 
+        self._merge_sampled_schemas()
         self._save_cache()
         elapsed = time.perf_counter() - started
         _log_compile(
@@ -288,6 +315,7 @@ class OpenAPICompiler:
             with open(manifest_path, "r") as f:
                 self.manifest = json.load(f)
             _log_compile("API CACHE", f"{self.tool_name}: hit")
+            self._merge_sampled_schemas()
             return self.manifest
         except (json.JSONDecodeError, OSError):
             _log_compile("API CACHE", f"{self.tool_name}: corrupted cache, recompiling")
@@ -349,6 +377,268 @@ class OpenAPICompiler:
         if not self.manifest:
             return []
         return [t["action_name"] for t in self.manifest["tools"]]
+
+    # ── LLM Enrichment ────────────────────────────────────────────────────────
+
+    def enrich(self, llm: str) -> Dict[str, Any]:
+        """Use an LLM to improve endpoint descriptions and infer response schemas.
+
+        Runs once per spec version. Results are baked into the manifest and cached
+        so subsequent calls return immediately with zero token cost.
+
+        Args:
+            llm: Model identifier (e.g., "gemini-2.5-flash", "claude-sonnet-4-5-20241022").
+
+        Returns:
+            Dict with ``tokens_input``, ``tokens_output``, ``cost_usd``, ``cached``.
+        """
+        if not self.manifest:
+            raise ConnectionConfigurationError(
+                tool_name="api",
+                detail="No compiled manifest. Call compile() or load_cache() first.",
+            )
+
+        # Already enriched — return cached result (zero cost)
+        if self.manifest.get("enriched"):
+            _log_compile("API ENRICH", f"{self.tool_name}: already enriched (cached) | 0 tokens | cost $0.000000")
+            return {
+                "tokens_input": 0, "tokens_output": 0,
+                "cost_usd": 0.0, "cached": True,
+                "model": self.manifest.get("enriched_with", llm),
+                "endpoints_enriched": 0,
+            }
+
+        import asyncio
+        from cortex._engine.internal.llm import llm_completion_async
+        from cortex._engine.config.pricing import calculate_cost_usd
+
+        tools = self.manifest["tools"]
+        _log_compile("API ENRICH", f"{self.tool_name}: enriching {len(tools)} endpoint(s) with {llm}")
+
+        # Build enrichment prompt with endpoint info
+        endpoints_info = []
+        for t in tools:
+            endpoints_info.append({
+                "func_name": t["func_name"],
+                "method": t["method"],
+                "path": t["path"],
+                "description": t["description"],
+                "parameters": [p["name"] for p in t.get("params_spec", [])],
+                "response_hint": t.get("response_hint"),
+            })
+
+        prompt = (
+            "Improve these REST API endpoint descriptions for an AI coding agent.\n\n"
+            "For each endpoint:\n"
+            "1. Write a clear, actionable description (1-2 sentences) explaining what the endpoint does and what data it returns\n"
+            "2. If response_hint is null, \"obj\", or \"str\", infer the response structure using this compact format: "
+            "{field:type,...} where type is str/int/num/bool/[inner]/null. Nested objects use {} again. "
+            "If you cannot infer, set response_hint to null.\n\n"
+            f"Endpoints:\n{json.dumps(endpoints_info, indent=2)}\n\n"
+            "Respond with ONLY a JSON array (no markdown, no explanation):\n"
+            '[{"func_name":"...","description":"...","response_hint":"..." or null}]'
+        )
+        system_message = "You are an API documentation expert. Be concise and precise. Output only valid JSON."
+
+        started = time.perf_counter()
+
+        # Run the LLM call synchronously (handle both sync and async contexts)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        coro = llm_completion_async(
+            llm, prompt, system_message,
+            temperature=0.0, max_tokens=4096, response_format="text",
+        )
+        if loop and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                content, token_info = pool.submit(asyncio.run, coro).result()
+        else:
+            content, token_info = asyncio.run(coro)
+
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+        # Calculate cost
+        input_tokens = token_info.get("input_tokens", 0)
+        output_tokens = token_info.get("output_tokens", 0)
+        cost_usd = calculate_cost_usd(llm, input_tokens, output_tokens)
+
+        # Parse LLM response
+        enriched_count = 0
+        try:
+            enriched = json.loads(content)
+        except (json.JSONDecodeError, ValueError):
+            # Try to extract JSON array from response
+            import re as _re
+            match = _re.search(r'\[.*\]', content, _re.DOTALL)
+            if match:
+                try:
+                    enriched = json.loads(match.group())
+                except (json.JSONDecodeError, ValueError):
+                    enriched = []
+            else:
+                enriched = []
+
+        # Apply enrichments to manifest tools
+        tool_map = {t["func_name"]: t for t in tools}
+        for item in enriched:
+            if not isinstance(item, dict):
+                continue
+            fname = item.get("func_name")
+            if not fname or fname not in tool_map:
+                continue
+            tool = tool_map[fname]
+            changed = False
+            if item.get("description"):
+                tool["description"] = item["description"]
+                tool["summary"] = self._build_summary(item["description"])
+                changed = True
+            if item.get("response_hint") and item["response_hint"] not in (None, "null"):
+                tool["response_hint"] = item["response_hint"]
+                changed = True
+            if changed:
+                tool["api_doc"] = self._build_api_doc(
+                    tool["func_name"], tool["method"], tool["path"],
+                    tool["description"], tool["python_signature"],
+                    tool["params_spec"], tool.get("response_hint"),
+                )
+                enriched_count += 1
+
+        self.manifest["enriched"] = True
+        self.manifest["enriched_with"] = llm
+        self._save_cache()
+
+        cost_str = f"${cost_usd:.6f}" if cost_usd is not None else "n/a"
+        _log_compile(
+            "API ENRICH",
+            f"{self.tool_name}: enriched {enriched_count}/{len(tools)} endpoint(s) in {elapsed_ms}ms"
+            f" | {input_tokens:,} in / {output_tokens:,} out tokens | cost {cost_str}",
+        )
+
+        return {
+            "tokens_input": input_tokens,
+            "tokens_output": output_tokens,
+            "cost_usd": cost_usd,
+            "cached": False,
+            "model": llm,
+            "endpoints_enriched": enriched_count,
+            "duration_ms": elapsed_ms,
+        }
+
+    # ── Background Schema Sampling ────────────────────────────────────────────
+
+    def save_sampled_schema(self, func_name: str, status_code: int, response_data: Any) -> None:
+        """Infer and save a response schema from actual API response data.
+
+        Called asynchronously in the background after each successful API call.
+        No LLM involved — pure structural inference. Zero token cost.
+
+        The sampled schema is stored in ``sampled_schemas.json`` alongside the
+        manifest. On the next compilation or cache load, these sampled schemas
+        are merged into the manifest's ``response_hint`` fields, progressively
+        improving the agent's understanding of API responses.
+        """
+        schema = _infer_schema(response_data)
+
+        # Load existing sampled schemas
+        sampled_path = self._cache_dir / "sampled_schemas.json"
+        sampled: Dict[str, Any] = {}
+        if sampled_path.exists():
+            try:
+                with open(sampled_path, "r") as f:
+                    sampled = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        # Store under func_name → status_code
+        if func_name not in sampled:
+            sampled[func_name] = {}
+        sampled[func_name][str(status_code)] = schema
+
+        # Write atomically
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = sampled_path.with_suffix(".tmp")
+        try:
+            with open(tmp_path, "w") as f:
+                json.dump(sampled, f, indent=2)
+            tmp_path.replace(sampled_path)
+        except OSError:
+            pass
+
+        # Also update the in-memory manifest if we have a success schema
+        if self.manifest and str(status_code).startswith("2"):
+            for tool in self.manifest.get("tools", []):
+                if tool["func_name"] == func_name:
+                    hint = self._describe_response_schema(schema)
+                    if hint and hint not in ("obj", "str"):
+                        tool["response_hint"] = hint
+                        tool["api_doc"] = self._build_api_doc(
+                            tool["func_name"], tool["method"], tool["path"],
+                            tool["description"], tool["python_signature"],
+                            tool["params_spec"], hint,
+                        )
+                    break
+            self._save_cache()
+
+    def _merge_sampled_schemas(self) -> None:
+        """Merge previously sampled response schemas into the current manifest.
+
+        Called after compile() or load_cache() to incorporate schemas captured
+        from real API responses during previous task executions.
+        """
+        if not self.manifest:
+            return
+        sampled_path = self._cache_dir / "sampled_schemas.json"
+        if not sampled_path.exists():
+            return
+
+        try:
+            with open(sampled_path, "r") as f:
+                sampled = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return
+
+        updated = 0
+        for tool in self.manifest.get("tools", []):
+            fname = tool["func_name"]
+            if fname not in sampled:
+                continue
+            # Prefer the 200/201/202 status code schema
+            schema = None
+            for code in ("200", "201", "202"):
+                if code in sampled[fname]:
+                    schema = sampled[fname][code]
+                    break
+            if not schema:
+                # Use any 2xx schema
+                schema = next(
+                    (s for c, s in sampled[fname].items() if c.startswith("2")),
+                    None,
+                )
+            if not schema:
+                continue
+
+            hint = self._describe_response_schema(schema)
+            if hint and hint not in ("obj", "str"):
+                existing = tool.get("response_hint")
+                # Only update if the sampled hint is more detailed
+                if not existing or existing in ("obj", "str", None) or len(hint) > len(existing or ""):
+                    tool["response_hint"] = hint
+                    tool["api_doc"] = self._build_api_doc(
+                        tool["func_name"], tool["method"], tool["path"],
+                        tool["description"], tool["python_signature"],
+                        tool["params_spec"], hint,
+                    )
+                    updated += 1
+
+        if updated:
+            _log_compile(
+                "API SAMPLE",
+                f"{self.tool_name}: merged {updated} sampled response schema(s)",
+            )
 
     # ── Single Operation Compilation ──────────────────────────────────────────
 
@@ -470,7 +760,7 @@ class OpenAPICompiler:
         Tries 200, 201, 202, then 2XX/default. Returns the resolved
         ``application/json`` schema or None if not documented.
         """
-        responses = operation.get("responses", {})
+        responses = operation.get("responses") or {}
 
         resp = None
         for code in ("200", "201", "202"):

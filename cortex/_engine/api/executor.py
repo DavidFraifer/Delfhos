@@ -34,6 +34,8 @@ class APIExecutor:
         compiled_tools: List[Dict[str, Any]],
         auth_headers: Optional[Dict[str, str]] = None,
         auth_params: Optional[Dict[str, str]] = None,
+        sample: bool = False,
+        compiler: Optional[Any] = None,
     ):
         """
         Args:
@@ -41,11 +43,15 @@ class APIExecutor:
             compiled_tools: List of compiled tool dicts from OpenAPICompiler
             auth_headers:  Headers injected into every request (e.g., {"Authorization": "Bearer ..."})
             auth_params:   Query params injected into every request (e.g., {"api_key": "..."})
+            sample:        If True, capture response schemas in the background after each call.
+            compiler:      OpenAPICompiler instance for saving sampled schemas.
         """
         self.tool_name = tool_name
         self._tools = {t["func_name"]: t for t in compiled_tools}
         self._auth_headers = auth_headers or {}
         self._auth_params = auth_params or {}
+        self._sample = sample
+        self._compiler = compiler
 
         # Validate that no auth value is None — catches missing env vars early
         for k, v in self._auth_headers.items():
@@ -148,7 +154,19 @@ class APIExecutor:
             with httpx.Client() as client:
                 response = client.request(**request_kwargs)
                 response.raise_for_status()
-                return self._format_response(response)
+                result = self._format_response(response)
+
+                # Background schema sampling — zero cost, zero latency impact
+                if self._sample and self._compiler and isinstance(result, (dict, list)):
+                    import threading
+                    status_code = response.status_code
+                    threading.Thread(
+                        target=self._sample_schema,
+                        args=(func_name, status_code, result),
+                        daemon=True,
+                    ).start()
+
+                return result
         except httpx.HTTPStatusError as exc:
             from delfhos.tool import ToolException
             body = exc.response.text[:500]
@@ -158,6 +176,13 @@ class APIExecutor:
         except httpx.RequestError as exc:
             from delfhos.tool import ToolException
             raise ToolException(f"Request failed for {method} {url}: {exc}")
+
+    def _sample_schema(self, func_name: str, status_code: int, response_data: Any) -> None:
+        """Save inferred response schema in the background (best-effort)."""
+        try:
+            self._compiler.save_sampled_schema(func_name, status_code, response_data)
+        except Exception:
+            pass  # Silent — never block or fail the API call
 
     @staticmethod
     def _format_response(response):

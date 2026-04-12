@@ -345,17 +345,24 @@ class Agent:
         """Configure which tools are available to the orchestrator"""
         self.orchestrator.tools.tools.clear()
         from .tools.internal_tools import internal_tools
-        
+
         # Allow LLM-only mode (tools=[]): no user tools are registered,
         # but the orchestrator can still complete pure-LLM tasks.
         if not self.tools:
             return
-        
+
+        # Collect enrichment info from APITools for trace injection
+        enrichment_infos = []
+
         for tool in self.tools:
             if isinstance(tool, Connection):
                 # If the connection has a compile step (APITool, etc.), run it to introspect + register
                 if hasattr(tool, "compile"):
                     tool.compile()
+
+                # Collect enrichment info from APITools
+                if hasattr(tool, "enrichment_info") and tool.enrichment_info is not None:
+                    enrichment_infos.append(tool.enrichment_info)
 
                 # Connection - add it to the orchestrator
                 self.orchestrator.add_connection(tool, agent_id=self.agent_id)
@@ -391,7 +398,28 @@ class Agent:
                 )
             else:
                 report_error("TOL-001", context={"tool": str(tool), "tool_type": type(tool).__name__})
-    
+
+        # Store aggregated enrichment info on orchestrator for trace injection
+        if enrichment_infos:
+            # Aggregate across all APITools
+            total_input = sum(e.get("tokens_input", 0) for e in enrichment_infos)
+            total_output = sum(e.get("tokens_output", 0) for e in enrichment_infos)
+            total_cost = sum(e.get("cost_usd", 0.0) or 0.0 for e in enrichment_infos)
+            total_enriched = sum(e.get("endpoints_enriched", 0) for e in enrichment_infos)
+            total_duration = sum(e.get("duration_ms", 0) for e in enrichment_infos)
+            all_cached = all(e.get("cached", False) for e in enrichment_infos)
+            model = enrichment_infos[0].get("model", "")
+
+            self.orchestrator.api_enrichment_info = {
+                "tokens_input": total_input,
+                "tokens_output": total_output,
+                "cost_usd": total_cost,
+                "cached": all_cached,
+                "model": model,
+                "endpoints_enriched": total_enriched,
+                "duration_ms": total_duration,
+            }
+
     def add_tool(self, name: str, func):
         """Register a new tool (function or Connection) with the running agent.
         

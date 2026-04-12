@@ -10,10 +10,11 @@ class TokenUsage:
     prefilter: int = 0
     summarizer: int = 0
     extractor: int = 0
+    enrichment: int = 0
 
     @property
     def total(self) -> int:
-        return self.task + self.execution + self.prefilter + self.summarizer + self.extractor
+        return self.task + self.execution + self.prefilter + self.summarizer + self.extractor + self.enrichment
 
     @property
     def overhead_percent(self) -> float:
@@ -137,6 +138,21 @@ class SessionCloseTrace:
         return self.tokens_input + self.tokens_output
 
 @dataclass
+class EnrichmentTrace:
+    started_at: datetime
+    duration_ms: int = 0
+    model_used: str = ""
+    endpoints_enriched: int = 0
+    cached: bool = False
+    tokens_input: int = 0
+    tokens_output: int = 0
+    cost_usd: Optional[float] = None
+
+    @property
+    def tokens_total(self) -> int:
+        return self.tokens_input + self.tokens_output
+
+@dataclass
 class Trace:
     session_id: str
     task: str
@@ -154,6 +170,7 @@ class Trace:
     tool_calls: List[ToolCallTrace] = field(default_factory=list)
     chat_compression: Optional[ChatCompressionTrace] = None
     session_close: Optional[SessionCloseTrace] = None
+    api_enrichment: Optional[EnrichmentTrace] = None
     total_cost_usd: Optional[float] = None
     pricing_path: str = ""
     cost_by_function: Dict[str, float] = field(default_factory=dict)
@@ -175,6 +192,7 @@ class Trace:
             prefilter=self.prefilter.tokens_total if self.prefilter else 0,
             summarizer=self.chat_compression.tokens_used if self.chat_compression else 0,
             extractor=self.session_close.tokens_total if self.session_close else 0,
+            enrichment=self.api_enrichment.tokens_total if self.api_enrichment else 0,
         )
 
     def add_event(self, event: str, detail: str, t: Optional[datetime] = None):
@@ -272,6 +290,17 @@ class Trace:
             lines.append(f"║   Facts written           {self.session_close.facts_written}".ljust(60) + "║")
             lines.append(f"║{'':<59}║")
 
+        if self.api_enrichment:
+            lines.append(f"║ API ENRICHMENT            {self.api_enrichment.duration_ms:,}ms".ljust(60) + "║")
+            lines.append(f"║   Model                   {self.api_enrichment.model_used}".ljust(60) + "║")
+            if self.api_enrichment.cached:
+                lines.append(f"║   Status                  cached (no LLM call)".ljust(60) + "║")
+            else:
+                lines.append(f"║   Endpoints enriched      {self.api_enrichment.endpoints_enriched}".ljust(60) + "║")
+            lines.append(f"║   Tokens in/out           {self.api_enrichment.tokens_input:,} / {self.api_enrichment.tokens_output:,}".ljust(60) + "║")
+            lines.append(f"║   Cost USD                {'$0.000000 (cached)' if self.api_enrichment.cached else ('None' if self.api_enrichment.cost_usd is None else f'${self.api_enrichment.cost_usd:.6f}')}".ljust(60) + "║")
+            lines.append(f"║{'':<59}║")
+
         if self.chat_compression:
             lines.append(f"║ CHAT COMPRESSION          {self.chat_compression.duration_ms:,}ms".ljust(60) + "║")
             lines.append(f"║   Model                   {self.chat_compression.model_used}".ljust(60) + "║")
@@ -286,13 +315,32 @@ class Trace:
         ext_str = f"{usage.extractor:,} (in: {self.session_close.tokens_input:,} / out: {self.session_close.tokens_output:,})" if self.session_close else "0"
         summ_str = f"{usage.summarizer:,}" if self.chat_compression else "0"
 
+        enrich_str = ""
+        if self.api_enrichment:
+            if self.api_enrichment.cached:
+                enrich_str = "0 (cached)"
+            else:
+                enrich_str = f"{usage.enrichment:,} (in: {self.api_enrichment.tokens_input:,} / out: {self.api_enrichment.tokens_output:,})"
+
         lines.append(f"║ TOKENS (Total / Input / Output)".ljust(60)+"║")
+        if enrich_str:
+            lines.append(f"║   API Enrichment          {enrich_str}".ljust(60)+"║")
         lines.append(f"║   Task (code gen)         {task_str}".ljust(60)+"║")
         lines.append(f"║   Task (execution)        {exec_str}".ljust(60)+"║")
         lines.append(f"║   Prefilter               {pref_str}".ljust(60)+"║")
         lines.append(f"║   Memory Extractor        {ext_str}".ljust(60)+"║")
         lines.append(f"║   Chat Summarizer         {summ_str}".ljust(60)+"║")
         lines.append(f"║   Total                   {usage.total:,}".ljust(60)+"║")
+
+        if self.api_enrichment:
+            setup_cost = self.api_enrichment.cost_usd
+            task_cost = (self.total_cost_usd or 0.0) - (setup_cost or 0.0) if self.total_cost_usd is not None else None
+            if self.api_enrichment.cached:
+                lines.append(f"║   Setup cost (API enrich) $0.000000 (cached)".ljust(60)+"║")
+            else:
+                lines.append(f"║   Setup cost (API enrich) {'None' if setup_cost is None else f'${setup_cost:.6f}'}".ljust(60)+"║")
+            lines.append(f"║   Task cost               {'None' if task_cost is None else f'${task_cost:.6f}'}".ljust(60)+"║")
+
         lines.append(f"║   Cost USD                {'None' if self.total_cost_usd is None else f'${self.total_cost_usd:.6f}'}".ljust(60)+"║")
         if self.pricing_path:
             lines.append(f"║   Pricing source          {self.pricing_path}".ljust(60)+"║")

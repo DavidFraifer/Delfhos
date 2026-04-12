@@ -90,6 +90,16 @@ class APITool(BaseConnection):
         cache:       If True, reuse ``~/delfhos/api_cache/`` to skip
                      re-parsing the spec on subsequent runs.
                      Disabled by default to avoid stale schemas.
+        enrich:      If True, use an LLM to improve endpoint descriptions and
+                     infer response schemas during compilation. Requires ``llm``
+                     to be set. Results are cached so cost is only incurred once.
+                     Disabled by default.
+        llm:         Model identifier for LLM enrichment (e.g., ``"gemini-2.5-flash"``).
+                     Only used when ``enrich=True``.
+        sample:      If True, capture real response schemas from API calls during
+                     task execution and store them in the cache. No LLM involved,
+                     zero token cost. Improves agent context over time.
+                     Enabled by default.
 
     Example::
 
@@ -122,12 +132,19 @@ class APITool(BaseConnection):
         allow: Optional[Union[str, List[str]]] = None,
         confirm: Union[bool, List[str], None] = True,
         cache: bool = False,
+        enrich: bool = False,
+        llm: Optional[str] = None,
+        sample: bool = True,
     ):
         self.spec_source = spec
         self.base_url_override = base_url
         self.auth_headers = auth or {}
         self.auth_params = auth_params or {}
         self.cache = cache
+        self.enrich = enrich
+        self.llm = llm
+        self.sample = sample
+        self.enrichment_info: Optional[Dict[str, Any]] = None
 
         # Derive a tool name from the spec if no name provided
         self.api_tool_name = name or self._derive_name(spec)
@@ -310,12 +327,39 @@ class APITool(BaseConnection):
         docs = compiler.get_api_docs(tools=selected_tools)
         COMPRESSED_API_DOCS.update(docs)
 
+        # 2.5. LLM Enrichment (optional — requires enrich=True and llm= to be set)
+        if self.enrich and self.llm:
+            self.enrichment_info = compiler.enrich(self.llm)
+        elif self.enrich and not self.llm:
+            _log_connection(
+                "API COMPILE",
+                f"{self.api_tool_name}: enrich=True but no llm= specified, skipping enrichment",
+            )
+
+        # Refresh selected_tools after enrichment (descriptions may have changed)
+        if self.enrichment_info and not self.enrichment_info.get("cached"):
+            manifest_tools = compiler.manifest.get("tools", [])
+            if self.allow is not None:
+                normalized = {self._normalize_action_name(a) for a in self.allow}
+                selected_tools = [t for t in manifest_tools if t["func_name"] in normalized]
+            else:
+                selected_tools = manifest_tools
+
+            # Re-register updated docs
+            capability, summaries = compiler.get_capability(tools=selected_tools)
+            TOOL_REGISTRY[self.api_tool_name] = capability
+            TOOL_ACTION_SUMMARIES[self.api_tool_name] = summaries
+            docs = compiler.get_api_docs(tools=selected_tools)
+            COMPRESSED_API_DOCS.update(docs)
+
         # 3. Build executor and Tool namespace
         executor = APIExecutor(
             tool_name=self.api_tool_name,
             compiled_tools=selected_tools,
             auth_headers=self.auth_headers,
             auth_params=self.auth_params,
+            sample=self.sample,
+            compiler=compiler if self.sample else None,
         )
 
         namespace = build_api_tools(executor, self.api_tool_name, allow=None)

@@ -1,33 +1,37 @@
 import os
 from dotenv import load_dotenv
-from delfhos import Agent, APITool
+from delfhos import Agent, APITool, Chat
 
 load_dotenv()
 
-# Uncomment to discover available endpoint names before filtering with allow=:
-# print(APITool.inspect(spec="https://api.fiscal.ai/openapi.json"))
+FINNHUB_API_KEY = os.environ["FINNHUB_API_KEY"]
 
-fiscal = APITool(
-    spec="https://api.fiscal.ai/openapi.json",
-    base_url="https://api.fiscal.ai",
-    auth={"X-Api-Key": os.environ.get("FISCAL_API_KEY")},
-    cache=True
+finnhub = APITool(
+    spec="https://finnhub.io/static/swagger.json",
+    base_url="https://finnhub.io/api/v1",
+    auth={"X-Finnhub-Token": FINNHUB_API_KEY},
+    allow=[
+        "quote",
+        "company_basic_financials",
+    ],
+    confirm=False,
+    enrich=True,
+    cache=True,
+    llm="gemini-3.1-flash-lite-preview",
+    sample=True,
 )
+
+print(finnhub.inspect(verbose=True))
 
 agent = Agent(
-    tools=[fiscal],
     llm="gemini-3.1-flash-lite-preview",
-    verbose=True,
+    tools=[finnhub],
     system_prompt=(
-        "You are an expert financial analyst. Use the fiscal.ai tools to retrieve "
-        "real financial data and provide clear, structured analysis."
+        "Eres un analista financiero experto en el mercado de valores. "
+        "Tu tarea es proporcionar información precisa y completa sobre empresas."
     ),
+    chat=Chat(summarizer_llm="gemini-3.1-flash-lite-preview"),
+    verbose=True,
 )
 
-agent.run(
-    "Give me a brief financial overview of Microsoft (MSFT): "
-    "company profile, latest annual revenue and net income from the income statement, "
-    "and key ratios (P/E and ROE). Summarize in a clean markdown report."
-)
-
-agent.stop()
+agent.run("Tell me all the information you can about Apple Inc. (AAPL) using the finnhub API tool.")

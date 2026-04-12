@@ -2174,6 +2174,65 @@ def _wrap_for_tracking(tool_name: str, tool_obj: Any, tool_tracker: Any) -> Any:
     if not tool_tracker:
         return tool_obj
 
+    # APIToolNamespace: each attribute access (e.g. finnhub.quote) must be tracked
+    # individually. The generic __call__ path is never reached for namespace method
+    # calls, so we need a dedicated proxy that wraps __getattr__.
+    if type(tool_obj).__name__ == "APIToolNamespace":
+        class APIToolNamespaceTrackerProxy:
+            def __init__(self, original):
+                self.__name__ = getattr(original, "__name__", tool_name)
+                self._original = original
+
+            def __getattr__(self, name: str):
+                if name.startswith("_"):
+                    raise AttributeError(name)
+                execute = getattr(self._original, name)
+                ns_name = tool_name
+
+                async def _tracked(**kwargs):
+                    import time as _time
+                    call_name = ns_name
+                    description = f"Calling {ns_name}.{name}"
+                    ui_metadata = {
+                        "_tool_trace_args": kwargs,
+                        "_tool_action": name,
+                    }
+                    start_time = _time.time()
+                    await tool_tracker.track_start(call_name, description, ui_metadata=ui_metadata)
+                    try:
+                        result = await execute(**kwargs)
+                        duration = _time.time() - start_time
+                        result_str = str(result)
+                        await tool_tracker.track_end(
+                            call_name,
+                            duration,
+                            description=description,
+                            success=True,
+                            ui_metadata={"_tool_trace_result": result_str[:500] + ("..." if len(result_str) > 500 else "")},
+                        )
+                        if hasattr(tool_tracker, "orchestrator") and tool_tracker.orchestrator:
+                            tool_tracker.orchestrator.track_tool_usage(tool_tracker.task_id, ns_name)
+                        return result
+                    except Exception as exc:
+                        duration = _time.time() - start_time
+                        await tool_tracker.track_end(
+                            call_name,
+                            duration,
+                            description=f"Failed: {exc}",
+                            success=False,
+                            error=str(exc),
+                            ui_metadata={"_tool_trace_error": str(exc)},
+                        )
+                        raise
+
+                return _tracked
+
+            # Keep non-method attributes (e.g. get_all_api_docs) accessible
+            def get_all_api_docs(self):
+                return self._original.get_all_api_docs()
+
+        return APIToolNamespaceTrackerProxy(tool_obj)
+
     # Standard custom tool wrapped natively via delfhos.Tool
     if type(tool_obj).__name__ == "Tool" or callable(tool_obj):
         # We need a callable proxy that wraps the call

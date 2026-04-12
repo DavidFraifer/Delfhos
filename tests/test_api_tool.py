@@ -134,6 +134,29 @@ SPEC_WITH_REFS = {
 
 class TestOpenAPICompiler:
 
+    def test_compile_is_uncapped_by_default(self):
+        many_paths = {
+            f"/items/{i}": {
+                "get": {
+                    "operationId": f"getItem{i}",
+                    "summary": f"Get item {i}",
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+            for i in range(150)
+        }
+        big_spec = {
+            "openapi": "3.0.3",
+            "info": {"title": "Big API", "version": "1.0"},
+            "servers": [{"url": "https://example.com"}],
+            "paths": many_paths,
+        }
+
+        compiler = OpenAPICompiler("big_api", "inline")
+        manifest = compiler.compile(spec=big_spec)
+
+        assert len(manifest["tools"]) == 150
+
     def test_compile_petstore(self):
         compiler = OpenAPICompiler("petstore", "inline", base_url="https://petstore.example.com/v1")
         manifest = compiler.compile(spec=PETSTORE_SPEC)
