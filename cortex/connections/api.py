@@ -19,7 +19,7 @@ Usage::
     internal = APITool(
         spec="./openapi.yaml",
         base_url="https://api.internal.corp/v1",
-        auth={"Authorization": "Bearer sk_..."},
+        headers={"Authorization": "Bearer sk_..."},
         confirm=["create_order", "delete_order"],
     )
 
@@ -68,17 +68,17 @@ class APITool(BaseConnection):
       - Loaded from URL or local file path
 
     Supported auth methods:
-      - Header-based: ``auth={"Authorization": "Bearer ..."}``
-      - Query param-based: ``auth_params={"api_key": "..."}``
+      - Header-based: ``headers={"Authorization": "Bearer ..."}``
+      - Query param-based: ``params={"api_key": "..."}``
 
     Args:
         spec:        URL or file path to an OpenAPI 3.x JSON/YAML specification.
         base_url:    Override for the API base URL. If omitted, extracted from
                      the spec's ``servers[0].url`` field.
-        auth:        Dict of HTTP headers injected into every request
+        headers:     Dict of HTTP headers injected into every request
                      (e.g., ``{"Authorization": "Bearer sk_test_..."}``,
                      ``{"X-API-Key": "..."}``).
-        auth_params: Dict of query parameters injected into every request
+        params:      Dict of query parameters injected into every request
                      (e.g., ``{"api_key": "..."}``). Use this for APIs that
                      authenticate via URL params rather than headers.
         name:        Custom label for this connection (default: auto-derived from spec title).
@@ -107,6 +107,7 @@ class APITool(BaseConnection):
 
         api = APITool(
             spec="https://petstore3.swagger.io/api/v3/openapi.json",
+            headers={"Authorization": "Bearer sk_..."},
             allow=["list_pets", "get_pet_by_id"],
             confirm=["add_pet"],
         )
@@ -126,8 +127,8 @@ class APITool(BaseConnection):
         spec: str,
         *,
         base_url: Optional[str] = None,
-        auth: Optional[Dict[str, str]] = None,
-        auth_params: Optional[Dict[str, str]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        params: Optional[Dict[str, str]] = None,
         name: Optional[str] = None,
         allow: Optional[Union[str, List[str]]] = None,
         confirm: Union[bool, List[str], None] = True,
@@ -138,8 +139,8 @@ class APITool(BaseConnection):
     ):
         self.spec_source = spec
         self.base_url_override = base_url
-        self.auth_headers = auth or {}
-        self.auth_params = auth_params or {}
+        self.headers = headers or {}
+        self.params = params or {}
         self.cache = cache
         self.enrich = enrich
         self.llm = llm
@@ -154,11 +155,11 @@ class APITool(BaseConnection):
         self.TOOL_NAME = self.api_tool_name
 
         super().__init__(
-            credentials={"auth_headers": self.auth_headers, "auth_params": self.auth_params},
+            credentials={"headers": self.headers, "params": self.params},
             allow=allow,
             confirm=confirm,
             name=self.api_tool_name,
-            auth_type=AuthType.BEARER_TOKEN if self.auth_headers else AuthType.API_KEY if self.auth_params else AuthType.NONE,
+            auth_type=AuthType.BEARER_TOKEN if self.headers else AuthType.API_KEY if self.params else AuthType.NONE,
         )
 
     # ── Class-level inspect ──────────────────────────────────────────────────
@@ -199,11 +200,14 @@ class APITool(BaseConnection):
         started = time.perf_counter()
         _log_connection("API INSPECT", f"{self.api_tool_name}: preparing manifest")
 
+        auth_param_names = set(self.headers.keys()) | set(self.params.keys())
+
         compiler = OpenAPICompiler(
             tool_name=self.api_tool_name,
             spec_source=self.spec_source,
             base_url=self.base_url_override,
             cache=self.cache,
+            auth_param_names=auth_param_names,
         )
 
         manifest = compiler.load_cache()
@@ -277,11 +281,16 @@ class APITool(BaseConnection):
         started = time.perf_counter()
         _log_connection("API COMPILE", f"{self.api_tool_name}: start")
 
+        # Collect auth param names so they're stripped from LLM-visible signatures.
+        # The executor auto-injects these — the LLM should never see or pass them.
+        auth_param_names = set(self.headers.keys()) | set(self.params.keys())
+
         compiler = OpenAPICompiler(
             tool_name=self.api_tool_name,
             spec_source=self.spec_source,
             base_url=self.base_url_override,
             cache=self.cache,
+            auth_param_names=auth_param_names,
         )
 
         manifest = compiler.load_cache()
@@ -328,8 +337,9 @@ class APITool(BaseConnection):
         COMPRESSED_API_DOCS.update(docs)
 
         # 2.5. LLM Enrichment (optional — requires enrich=True and llm= to be set)
+        # Pass selected_tools so only the allowed endpoints are enriched — not the full spec.
         if self.enrich and self.llm:
-            self.enrichment_info = compiler.enrich(self.llm)
+            self.enrichment_info = compiler.enrich(self.llm, tools=selected_tools)
         elif self.enrich and not self.llm:
             _log_connection(
                 "API COMPILE",
@@ -356,8 +366,8 @@ class APITool(BaseConnection):
         executor = APIExecutor(
             tool_name=self.api_tool_name,
             compiled_tools=selected_tools,
-            auth_headers=self.auth_headers,
-            auth_params=self.auth_params,
+            headers=self.headers,
+            params=self.params,
             sample=self.sample,
             compiler=compiler if self.sample else None,
         )

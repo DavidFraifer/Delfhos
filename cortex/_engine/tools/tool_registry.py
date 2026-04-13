@@ -603,7 +603,7 @@ COMPRESSED_API_DOCS = {
 COMPRESSED_EXAMPLES = {
     "gmail:READ": "import asyncio\nemails = await gmail.read(query='has:attachment')\nasync def process(e):\n    if e.get('attachments'): await gmail.download_attachments(e)\n    return e\nresults = await asyncio.gather(*[process(e) for e in emails])",
     "sheets:WRITE": "csv = await sql.query('SELECT *', as_csv=True)\nawait sheets.create('Rpt', data=csv)",
-    "parallel": "import asyncio\nresults = await asyncio.gather(*[llm.call(x) for x in items])",
+    "parallel": "import asyncio\nresults = await asyncio.gather(*[llm.call(x) for x in items], desc='what this parallel block does')",
 }
 
 

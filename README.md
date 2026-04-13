@@ -124,7 +124,7 @@ petstore = APITool(
 internal = APITool(
     spec="./openapi.yaml",
     base_url="https://api.internal.corp/v1",
-    auth={"Authorization": "Bearer sk_..."},
+    headers={"Authorization": "Bearer sk_..."},
 )
 
 # Inspect available endpoints
@@ -138,7 +138,7 @@ agent.run("List all pets and create a new one named 'Buddy'")
 **Features:**
 - Automatic endpoint compilation from OpenAPI specs (no LLM needed)
 - Path, query, and request body parameters extracted and typed
-- Auth headers and query params injected per-endpoint
+- `headers=` and `params=` injected automatically — agent never sees credentials
 - `$ref` resolution for complex schemas
 - `allow=` and `confirm=` support for fine-grained access control
 - Caching: specs compiled once and cached to `~/delfhos/api_cache/`

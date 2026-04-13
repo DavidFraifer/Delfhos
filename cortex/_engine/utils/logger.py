@@ -40,12 +40,15 @@ class CORTEXLogger:
             "status": "running",
         }
     
-    def add_tokens(self, task_id: str, token_info: dict, model: str = None, function_name: str = None, duration: float = None):
+    def add_tokens(self, task_id: str, token_info: dict, model=None, function_name: str = None, duration: float = None):
         if task_id in self.active_tasks:
             input_tokens = token_info.get("input_tokens", 0)
             output_tokens = token_info.get("output_tokens", 0)
             total_tokens = token_info.get("total_tokens", 0)
             image_count = token_info.get("image_count", 0)
+            # Normalize model to string — handles LLMConfig objects and other non-string values
+            if model is not None and not isinstance(model, str):
+                model = getattr(model, "model", str(model))
             model_key = (model or "").strip().lower()
             pricing_available = bool(model_key) and has_pricing_for_model(model)
             if model_key and not pricing_available and model_key not in self._warned_unpriced_models:

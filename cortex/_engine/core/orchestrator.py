@@ -134,8 +134,11 @@ class Orchestrator:
         # Initialize approval manager if enabled
         self.approval_manager = ApprovalManager(on_confirm=on_confirm) if approval_enabled else None
         
-    def _add_tokens(self, task_id: str, token_info: dict, model: str = None, function_name: str = None, duration: float = None):
+    def _add_tokens(self, task_id: str, token_info: dict, model=None, function_name: str = None, duration: float = None):
         """Wrapper to track tokens for both the Agent's TokenUsage and the Logger."""
+        # Normalize LLMConfig (and any other non-string model) to its model-name string
+        if model is not None and not isinstance(model, str):
+            model = getattr(model, "model", str(model))
         if self.token_usage and token_info:
             self.token_usage.task.add(token_info)
         if self.logger:
@@ -1120,6 +1123,8 @@ ERROR:
                     })
 
                 # Tool / phase calls
+                from cortex._engine.core.python_executor import _parallel_group_descs
+                seen_group_headers = set()
                 for entry in completed_tools:
                     tn = entry.get('tool', 'unknown')
                     if tn in duplicated_phase_tools or tn in llm_function_names or tn == 'awaiting_approval':
@@ -1127,6 +1132,22 @@ ERROR:
                     meta = entry.get('ui_metadata') or {}
                     args   = meta.get('_tool_trace_args') or {}
                     action = meta.get('_tool_action') or ''
+
+                    # Insert a header row for named parallel groups (first occurrence only)
+                    group_id = meta.get('parallel_group_id')
+                    if group_id and group_id in _parallel_group_descs and group_id not in seen_group_headers:
+                        seen_group_headers.add(group_id)
+                        timeline_items.append({
+                            'type': 'group_header',
+                            'timestamp': _to_sort_ts(entry.get('timestamp', 0)) - 0.0001,
+                            'tool': '⟳ parallel',
+                            'description': _parallel_group_descs[group_id],
+                            'params': '',
+                            'duration': 0,
+                            'wait_time': 0,
+                            'status': 'ok',
+                        })
+
                     param_parts = []
                     if action:
                         param_parts.append(f"action={action}")
@@ -1165,6 +1186,15 @@ ERROR:
                         dur_str = "[dim]—[/dim]"
                     else:
                         dur_str = f"{dur:.2f}s"
+
+                    if item['type'] == 'group_header':
+                        timeline_table.add_row(
+                            f"[bold cyan]{item['description']}[/bold cyan]",
+                            f"[cyan]{item['tool']}[/cyan]",
+                            "",
+                            "",
+                        )
+                        continue
 
                     if item['type'] == 'llm':
                         icon = "[dim]~[/dim]"

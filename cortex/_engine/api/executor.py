@@ -32,8 +32,8 @@ class APIExecutor:
         self,
         tool_name: str,
         compiled_tools: List[Dict[str, Any]],
-        auth_headers: Optional[Dict[str, str]] = None,
-        auth_params: Optional[Dict[str, str]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        params: Optional[Dict[str, str]] = None,
         sample: bool = False,
         compiler: Optional[Any] = None,
     ):
@@ -41,32 +41,32 @@ class APIExecutor:
         Args:
             tool_name:     Delfhos tool name (e.g., "petstore")
             compiled_tools: List of compiled tool dicts from OpenAPICompiler
-            auth_headers:  Headers injected into every request (e.g., {"Authorization": "Bearer ..."})
-            auth_params:   Query params injected into every request (e.g., {"api_key": "..."})
+            headers:       Headers injected into every request (e.g., {"Authorization": "Bearer ..."})
+            params:        Query params injected into every request (e.g., {"api_key": "..."})
             sample:        If True, capture response schemas in the background after each call.
             compiler:      OpenAPICompiler instance for saving sampled schemas.
         """
         self.tool_name = tool_name
         self._tools = {t["func_name"]: t for t in compiled_tools}
-        self._auth_headers = auth_headers or {}
-        self._auth_params = auth_params or {}
+        self._headers = headers or {}
+        self._params = params or {}
         self._sample = sample
         self._compiler = compiler
 
-        # Validate that no auth value is None — catches missing env vars early
-        for k, v in self._auth_headers.items():
+        # Validate that no header/param value is None — catches missing env vars early
+        for k, v in self._headers.items():
             if v is None:
                 raise ToolDefinitionError(
                     detail=(
-                        f"APITool '{tool_name}': auth header '{k}' is None. "
+                        f"APITool '{tool_name}': header '{k}' is None. "
                         f"Check that the environment variable holding the API key is set."
                     )
                 )
-        for k, v in self._auth_params.items():
+        for k, v in self._params.items():
             if v is None:
                 raise ToolDefinitionError(
                     detail=(
-                        f"APITool '{tool_name}': auth param '{k}' is None. "
+                        f"APITool '{tool_name}': param '{k}' is None. "
                         f"Check that the environment variable holding the API key is set."
                     )
                 )
@@ -91,9 +91,9 @@ class APIExecutor:
 
         # Classify which kwargs go where
         path_params = {}
-        query_params = dict(self._auth_params)
+        query_params = dict(self._params)
         body_params = {}
-        header_params = dict(self._auth_headers)
+        header_params = dict(self._headers)
 
         param_locations = {p["name"]: p["in"] for p in params_spec}
 

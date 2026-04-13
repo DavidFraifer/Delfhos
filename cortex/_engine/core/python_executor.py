@@ -31,6 +31,9 @@ from cortex._engine.tools.tool_libraries import create_tool_libraries
 # Initialize ContextVar to track parallel execution blocks
 _parallel_group_id: contextvars.ContextVar[str] = contextvars.ContextVar('parallel_group_id', default=None)
 
+# Maps group_id -> desc label for parallel asyncio.gather blocks that pass desc=
+_parallel_group_descs: dict = {}
+
 # --- Safe JSON helpers for agent-generated code --------------------------------
 
 _original_json_loads = _json.loads
@@ -614,10 +617,14 @@ class PythonExecutor:
         # Special interceptor for asyncio.gather to track parallel execution in the UI
         def _asyncio_getattr(name):
             if name == 'gather':
-                async def gather_wrapper(*coros_or_futures, return_exceptions=False):
+                async def gather_wrapper(*coros_or_futures, return_exceptions=False, desc=None):
                     # Generate a unique ID for this parallel block
                     group_id = f"group_{uuid.uuid4().hex[:8]}"
-                    
+
+                    # Store optional human-readable label for the timeline
+                    if desc:
+                        _parallel_group_descs[group_id] = desc
+
                     # We need to wrap each coroutine so it runs with the contextvar set
                     # asyncio.gather doesn't automatically propagate contextvars in all Python versions
                     async def coro_wrapper(coro):
@@ -627,10 +634,10 @@ class PythonExecutor:
                             return await coro
                         finally:
                             _parallel_group_id.reset(token)
-                    
+
                     wrapped_coros = [coro_wrapper(c) for c in coros_or_futures]
                     return await _asyncio.gather(*wrapped_coros, return_exceptions=return_exceptions)
-                
+
                 return gather_wrapper
             return getattr(_asyncio, name)
 

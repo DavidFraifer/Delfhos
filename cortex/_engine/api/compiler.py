@@ -163,7 +163,8 @@ class OpenAPICompiler:
     No LLM needed — pure deterministic schema transformation.
     """
 
-    def __init__(self, tool_name: str, spec_source: str, base_url: Optional[str] = None, cache: bool = False):
+    def __init__(self, tool_name: str, spec_source: str, base_url: Optional[str] = None, cache: bool = False,
+                 auth_param_names: Optional[set] = None):
         """
         Args:
             tool_name:   Delfhos tool name (e.g., "petstore", "stripe")
@@ -171,11 +172,15 @@ class OpenAPICompiler:
             base_url:    Override for the API base URL. If None, extracted from
                          spec's ``servers[0].url``.
             cache:       Whether to read/write the disk cache.
+            auth_param_names: Parameter names to strip from function signatures and
+                         docs (auto-injected by the executor). Derived from the user's
+                         ``headers=`` and ``params=`` keys plus OpenAPI security schemes.
         """
         self.tool_name = tool_name
         self.spec_source = spec_source
         self.base_url_override = base_url
         self.cache = cache
+        self.auth_param_names: set = auth_param_names or set()
         self._cache_dir = CACHE_DIR / self._cache_key()
         self.manifest: Optional[Dict[str, Any]] = None
 
@@ -220,6 +225,9 @@ class OpenAPICompiler:
 
         # Strip trailing slash for clean path joining
         base_url = base_url.rstrip("/")
+
+        # Auto-detect auth params from OpenAPI security schemes
+        self._detect_security_params(spec)
 
         limit = float("inf") if (max_endpoints is None or max_endpoints == 0) else max_endpoints
 
@@ -380,14 +388,17 @@ class OpenAPICompiler:
 
     # ── LLM Enrichment ────────────────────────────────────────────────────────
 
-    def enrich(self, llm: str) -> Dict[str, Any]:
+    def enrich(self, llm: str, tools: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         """Use an LLM to improve endpoint descriptions and infer response schemas.
 
         Runs once per spec version. Results are baked into the manifest and cached
         so subsequent calls return immediately with zero token cost.
 
         Args:
-            llm: Model identifier (e.g., "gemini-2.5-flash", "claude-sonnet-4-5-20241022").
+            llm:   Model identifier (e.g., "gemini-2.5-flash", "claude-sonnet-4-5-20241022").
+            tools: Subset of compiled tools to enrich. Defaults to all tools in the manifest.
+                   Pass ``selected_tools`` from ``compile()`` to only pay for the endpoints
+                   the agent will actually use.
 
         Returns:
             Dict with ``tokens_input``, ``tokens_output``, ``cost_usd``, ``cached``.
@@ -398,8 +409,11 @@ class OpenAPICompiler:
                 detail="No compiled manifest. Call compile() or load_cache() first.",
             )
 
-        # Already enriched — return cached result (zero cost)
-        if self.manifest.get("enriched"):
+        # Already enriched — check per-endpoint flags to avoid re-enriching
+        # (enrichment is now scoped to selected_tools, not the whole manifest)
+        enriched_funcs = set(self.manifest.get("enriched_funcs", []))
+        target_funcs = {t["func_name"] for t in (tools if tools is not None else self.manifest["tools"])}
+        if target_funcs and target_funcs.issubset(enriched_funcs):
             _log_compile("API ENRICH", f"{self.tool_name}: already enriched (cached) | 0 tokens | cost $0.000000")
             return {
                 "tokens_input": 0, "tokens_output": 0,
@@ -412,7 +426,8 @@ class OpenAPICompiler:
         from cortex._engine.internal.llm import llm_completion_async
         from cortex._engine.config.pricing import calculate_cost_usd
 
-        tools = self.manifest["tools"]
+        # Only enrich the tools the agent will actually use (respects allow= filter)
+        tools = tools if tools is not None else self.manifest["tools"]
         _log_compile("API ENRICH", f"{self.tool_name}: enriching {len(tools)} endpoint(s) with {llm}")
 
         # Build enrichment prompt with endpoint info
@@ -507,7 +522,11 @@ class OpenAPICompiler:
                 )
                 enriched_count += 1
 
-        self.manifest["enriched"] = True
+        # Track which func_names have been enriched so subsequent allow= subsets
+        # don't re-enrich already-processed endpoints.
+        already = set(self.manifest.get("enriched_funcs", []))
+        already.update(tool_map.keys())
+        self.manifest["enriched_funcs"] = sorted(already)
         self.manifest["enriched_with"] = llm
         self._save_cache()
 
@@ -750,7 +769,47 @@ class OpenAPICompiler:
                     "default": None,
                 })
 
+        # Strip auth-related parameters — these are auto-injected by the executor
+        if self.auth_param_names:
+            params = [p for p in params if p["name"] not in self.auth_param_names]
+
         return params
+
+    def _detect_security_params(self, spec: Dict[str, Any]) -> None:
+        """Auto-detect parameter names used for authentication from OpenAPI security schemes.
+
+        Examines ``components.securitySchemes`` (OpenAPI 3.x) and merges any
+        discovered header/query param names into ``self.auth_param_names`` so
+        they are stripped from function signatures and docs.
+        """
+        schemes = spec.get("components", {}).get("securitySchemes", {})
+        if not schemes:
+            # Swagger 2.0 fallback
+            schemes = spec.get("securityDefinitions", {})
+        if not schemes:
+            return
+
+        for scheme_name, scheme in schemes.items():
+            if not isinstance(scheme, dict):
+                continue
+            scheme = _deep_resolve(spec, scheme)
+            scheme_type = scheme.get("type", "")
+
+            if scheme_type == "apiKey":
+                # apiKey scheme: the "name" field is the header/query param name
+                param_name = scheme.get("name")
+                if param_name:
+                    self.auth_param_names.add(param_name)
+
+            elif scheme_type == "http":
+                # Bearer/Basic auth → Authorization header (already handled by headers=)
+                self.auth_param_names.add("Authorization")
+                self.auth_param_names.add("authorization")
+
+            elif scheme_type == "oauth2":
+                # OAuth2 → Authorization header
+                self.auth_param_names.add("Authorization")
+                self.auth_param_names.add("authorization")
 
     def _collect_response_schema(
         self, spec: Dict[str, Any], operation: Dict[str, Any],
@@ -946,6 +1005,10 @@ class OpenAPICompiler:
             f"# await {self.tool_name}.{signature}",
             f"# {method.upper()} {path} — {description}",
         ]
+
+        # Auth note — tell the LLM not to worry about credentials
+        if self.auth_param_names:
+            lines.append(f"# Auth: handled automatically — do NOT pass API keys or auth tokens")
 
         # Response format hint — critical for correct field access
         if response_hint:

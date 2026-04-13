@@ -1,6 +1,6 @@
 # Delfhos Documentation
 
-> **Version:** 0.6.3 · **License:** Apache-2.0 · **Python:** ≥ 3.9
+> **Version:** 0.6.7 · **License:** Apache-2.0 · **Python:** ≥ 3.9
 
 Delfhos is a Python SDK for building AI agents that use real tools — Gmail, SQL databases, Google Drive, Sheets, Docs, Calendar, web search, REST APIs, and your own custom functions — with clean orchestration and safe, human-in-the-loop execution.
 
@@ -434,13 +434,13 @@ agent.stop()
 internal = APITool(
     spec="./openapi.yaml",
     base_url="https://api.internal.corp/v1",
-    auth={"Authorization": "Bearer sk_..."},
+    headers={"Authorization": "Bearer sk_..."},
 )
 
 # With query-param auth
 external = APITool(
     spec="https://api.example.com/openapi.json",
-    auth_params={"api_key": "my-key"},
+    params={"api_key": "my-key"},
 )
 ```
 
@@ -462,7 +462,7 @@ For large specs (Stripe, GitHub, etc.) that rarely change, enable the disk cache
 ```python
 api = APITool(
     spec="https://api.stripe.com/openapi.json",
-    auth={"Authorization": "Bearer sk_live_..."},
+    headers={"Authorization": "Bearer sk_live_..."},
     cache=True,   # Saved to ~/delfhos/api_cache/
 )
 ```
@@ -474,7 +474,7 @@ Pass `enrich=True` and an `llm=` model to have an LLM rewrite every endpoint des
 ```python
 finnhub = APITool(
     spec="https://finnhub.io/static/swagger.json",
-    auth={"X-Finnhub-Token": os.environ["FINNHUB_API_KEY"]},
+    headers={"X-Finnhub-Token": os.environ["FINNHUB_API_KEY"]},
     cache=True,   # Required to persist enriched manifest
     enrich=True,  # Use LLM to improve descriptions
     llm="gemini-2.5-flash",  # Model used for enrichment
@@ -1297,17 +1297,17 @@ WebSearch(
 
 ```python
 APITool(
-    spec:        str,                              # URL or file path to OpenAPI 3.x spec
-    base_url:    Optional[str] = None,            # Override spec's servers[0].url
-    auth:        Optional[Dict[str, str]] = None, # HTTP headers (e.g. {"Authorization": "Bearer ..."})
-    auth_params: Optional[Dict[str, str]] = None, # Query params (e.g. {"api_key": "..."})
-    name:        Optional[str] = None,            # Override auto-derived tool name
-    allow:       Optional[Union[str, List[str]]] = None,
-    confirm:     Union[bool, List[str], None] = True,
-    cache:       bool = False,                    # Cache compiled manifest to ~/delfhos/api_cache/
-    enrich:      bool = False,                    # Use LLM to improve descriptions/schemas
-    llm:         Optional[str] = None,            # Model for enrichment (required if enrich=True)
-    sample:      bool = True,                     # Capture real response schemas in background
+    spec:     str,                              # URL or file path to OpenAPI 3.x spec
+    base_url: Optional[str] = None,            # Override spec's servers[0].url
+    headers:  Optional[Dict[str, str]] = None, # HTTP headers injected into every request
+    params:   Optional[Dict[str, str]] = None, # Query params injected into every request
+    name:     Optional[str] = None,            # Override auto-derived tool name
+    allow:    Optional[Union[str, List[str]]] = None,
+    confirm:  Union[bool, List[str], None] = True,
+    cache:    bool = False,                    # Cache compiled manifest to ~/delfhos/api_cache/
+    enrich:   bool = False,                    # Use LLM to improve descriptions/schemas
+    llm:      Optional[str] = None,            # Model for enrichment (required if enrich=True)
+    sample:   bool = True,                     # Capture real response schemas in background
 )
 ```
 
@@ -1315,8 +1315,8 @@ APITool(
 |-----------|------|---------|-------------|
 | `spec` | `str` | — | URL or file path to an OpenAPI 3.x JSON or YAML spec |
 | `base_url` | `str` | `None` | Override for the API base URL; auto-extracted from spec if absent |
-| `auth` | `dict` | `None` | Headers injected into every request (Bearer tokens, API key headers) |
-| `auth_params` | `dict` | `None` | Query params injected into every request (URL-based auth) |
+| `headers` | `dict` | `None` | HTTP headers injected into every request (e.g. `{"Authorization": "Bearer ..."}`, `{"X-API-Key": "..."}`) |
+| `params` | `dict` | `None` | Query params injected into every request (e.g. `{"api_key": "..."}`) |
 | `name` | `str` | `None` | Custom label for this connection; auto-derived from spec title/hostname |
 | `allow` | `list` | `None` | Restrict which endpoints the agent can use (function names from `inspect()`) |
 | `confirm` | `bool \| list` | `True` | Require approval before listed endpoints execute |
