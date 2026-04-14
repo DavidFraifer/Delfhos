@@ -545,6 +545,20 @@ agent = Agent(
     ),
 )
 
+# Enterprise server with multiple required auth headers
+agent = Agent(
+    tools=[...],
+    llm=LLMConfig(
+        model="llama-3-70b",
+        base_url="https://llm.corp.internal/v1",
+        headers={
+            "X-Tenant-ID": "acme-prod",
+            "X-User-Token": "tok_abc123",
+            "X-Request-Source": "delfhos",
+        },
+    ),
+)
+
 # Mix: cheap local model for prefilter, strong cloud model for generation
 agent = Agent(
     tools=[...],
@@ -554,6 +568,8 @@ agent = Agent(
 ```
 
 `LLMConfig` works wherever a model string is accepted: `llm`, `light_llm`, `heavy_llm`, `code_llm`, `vision_llm`.
+
+> **Note on `headers` vs `api_key`:** Use `api_key` for a single bearer token (`Authorization: Bearer ...`). Use `headers` when your server requires additional fields — tenant IDs, session tokens, routing keys, etc. You can use both together: `api_key` sets the `Authorization` header and `headers` adds anything else on top.
 
 ---
 
@@ -1406,10 +1422,11 @@ Use `LLMConfig` to connect Delfhos to any OpenAI-compatible endpoint — local m
 
 ```python
 LLMConfig(
-    model:    str,                  # Model name as the endpoint expects it
-    base_url: Optional[str] = None, # Base URL of the OpenAI-compatible API
-    api_key:  Optional[str] = None, # API key; falls back to OPENAI_API_KEY env var
-    provider: str = "openai",       # Only "openai" (OpenAI-compatible) is supported
+    model:    str,                           # Model name as the endpoint expects it
+    base_url: Optional[str] = None,          # Base URL of the OpenAI-compatible API
+    api_key:  Optional[str] = None,          # API key; falls back to OPENAI_API_KEY env var
+    headers:  Optional[Dict[str, str]] = None, # Extra HTTP headers for every request
+    provider: str = "openai",                # Only "openai" (OpenAI-compatible) is supported
 )
 ```
 
@@ -1418,6 +1435,7 @@ LLMConfig(
 | `model` | `str` | — | Model identifier (e.g. `"llama3.2"`, `"mistral-7b-instruct"`) |
 | `base_url` | `str` | `None` | API base URL; defaults to `OPENAI_BASE_URL` env var, then `https://api.openai.com/v1` |
 | `api_key` | `str` | `None` | Bearer token; defaults to `OPENAI_API_KEY`. Pass `"local"` for auth-free local servers |
+| `headers` | `Dict[str, str]` | `None` | Extra HTTP headers sent with every request. Use for enterprise servers that require tenant IDs, session tokens, or multiple auth values |
 | `provider` | `str` | `"openai"` | Protocol; only `"openai"` (OpenAI-compatible) is supported for custom endpoints |
 
 For native Google / Anthropic models pass a model string directly (`"gemini-2.5-flash"`, `"claude-3-5-sonnet"`) — `LLMConfig` is only needed for OpenAI-compatible custom endpoints.

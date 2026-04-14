@@ -24,6 +24,20 @@ Usage examples::
         )
     )
 
+    # Enterprise server with multiple required auth headers
+    agent = Agent(
+        tools=[...],
+        llm=LLMConfig(
+            model="llama-3-70b",
+            base_url="https://llm.corp.internal/v1",
+            headers={
+                "X-Tenant-ID": "acme-prod",
+                "X-User-Token": "tok_abc123",
+                "X-Request-Source": "delfhos",
+            }
+        )
+    )
+
     # Any OpenAI-compatible provider (Together AI, Groq, Anyscale, etc.)
     agent = Agent(
         tools=[...],
@@ -39,7 +53,7 @@ Usage examples::
 """
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Dict, Optional
 
 
 @dataclass
@@ -57,6 +71,10 @@ class LLMConfig:
                   Defaults to OPENAI_BASE_URL env var, then "https://api.openai.com/v1".
         api_key:  API key / bearer token. Defaults to OPENAI_API_KEY env var.
                   For local models that don't require auth, pass api_key="local" or omit it.
+        headers:  Extra HTTP headers sent with every request. Use this for enterprise servers
+                  that require tenant IDs, session tokens, or other custom auth headers in
+                  addition to (or instead of) a bearer token.
+                  Example: {"X-Tenant-ID": "acme", "X-User-Token": "tok_abc123"}
         provider: Underlying protocol to use. Currently only "openai" (OpenAI-compatible)
                   is supported for custom endpoints. Defaults to "openai".
 
@@ -74,15 +92,20 @@ class LLMConfig:
                   base_url="https://api.groq.com/openai/v1",
                   api_key="gsk_...")
 
-        # vLLM enterprise server
-        LLMConfig(model="mistral-7b-instruct",
+        # vLLM enterprise server with multiple auth headers
+        LLMConfig(model="llama-3-70b",
                   base_url="https://llm.corp.internal/v1",
-                  api_key="internal-token")
+                  headers={
+                      "X-Tenant-ID": "acme-prod",
+                      "X-User-Token": "tok_abc123",
+                      "X-Request-Source": "delfhos",
+                  })
     """
 
     model: str
     base_url: Optional[str] = None
     api_key: Optional[str] = None
+    headers: Optional[Dict[str, str]] = None
     provider: str = field(default="openai")
 
     def __post_init__(self):
@@ -104,4 +127,7 @@ class LLMConfig:
             parts.append(f"base_url={self.base_url!r}")
         if self.api_key:
             parts.append("api_key='***'")
+        if self.headers:
+            masked = {k: "***" for k in self.headers}
+            parts.append(f"headers={masked!r}")
         return f"LLMConfig({', '.join(parts)})"

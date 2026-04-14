@@ -51,10 +51,10 @@ def _raise_llm_api_error(provider: str, detail: str) -> None:
     )
 
 
-def resolve_model(model: Union[str, LLMConfig]) -> Tuple[str, str, Optional[str], Optional[str]]:
+def resolve_model(model: Union[str, LLMConfig]) -> Tuple[str, str, Optional[str], Optional[str], Optional[Dict[str, str]]]:
     """Resolve provider and model id from a model string or LLMConfig.
 
-    Returns: (provider, model_id, base_url, api_key)
+    Returns: (provider, model_id, base_url, api_key, headers)
 
     Supported string forms:
       - Auto-detected: gemini-2.5-flash, gpt-4.1, claude-3-7-sonnet
@@ -63,10 +63,11 @@ def resolve_model(model: Union[str, LLMConfig]) -> Tuple[str, str, Optional[str]
 
     For full control (custom base URL, local servers, enterprise endpoints):
       - LLMConfig(model="llama3.2", base_url="http://localhost:11434/v1")
+      - LLMConfig(model="llama3.2", base_url="https://llm.corp/v1", headers={"X-Tenant-ID": "acme"})
     """
-    # LLMConfig: always routes to openai-compatible backend with custom base_url/api_key
+    # LLMConfig: always routes to openai-compatible backend with custom base_url/api_key/headers
     if isinstance(model, LLMConfig):
-        return "openai", model.model, model.base_url, model.api_key
+        return "openai", model.model, model.base_url, model.api_key, model.headers
 
     if not model or not isinstance(model, str):
         raise_error("LLM-001", context={"model": model, "error": "Model identifier must be a non-empty string"})
@@ -84,12 +85,12 @@ def resolve_model(model: Union[str, LLMConfig]) -> Tuple[str, str, Optional[str]
                 continue
 
             if provider == "google" and candidate_lower.startswith("gemini"):
-                return provider, candidate, None, None
+                return provider, candidate, None, None, None
             if provider == "anthropic" and candidate_lower.startswith("claude"):
-                return provider, candidate, None, None
+                return provider, candidate, None, None, None
             # openai/ prefix: accept ANY model name (for openai-compatible endpoints)
             if provider == "openai":
-                return provider, candidate, None, None
+                return provider, candidate, None, None, None
 
             raise_error(
                 "LLM-001",
@@ -105,11 +106,11 @@ def resolve_model(model: Union[str, LLMConfig]) -> Tuple[str, str, Optional[str]
             )
 
     if lowered.startswith("gemini"):
-        return "google", model_text, None, None
+        return "google", model_text, None, None, None
     if lowered.startswith("claude"):
-        return "anthropic", model_text, None, None
+        return "anthropic", model_text, None, None, None
     if lowered.startswith(("gpt", "o1", "o3", "o4", "chatgpt")) or "gpt-" in lowered:
-        return "openai", model_text, None, None
+        return "openai", model_text, None, None, None
 
     raise_error(
         "LLM-001",
@@ -177,7 +178,7 @@ async def llm_completion_async(
         else:
             prompt = f"{current_context}\n\n{prompt}"
 
-    provider, provider_model, base_url_override, api_key_override = resolve_model(model)
+    provider, provider_model, base_url_override, api_key_override, extra_headers = resolve_model(model)
     api_key = _get_api_key(provider, api_key_override=api_key_override, base_url_override=base_url_override)
 
     if provider == "google":
@@ -211,6 +212,7 @@ async def llm_completion_async(
             api_key,
             images,
             base_url_override,
+            extra_headers,
         )
 
     if provider == "anthropic":
@@ -612,8 +614,9 @@ def _openai_sync(
     api_key: str,
     images: Optional[List[Union[str, Dict[str, Any]]]],
     base_url_override: Optional[str] = None,
+    extra_headers: Optional[Dict[str, str]] = None,
 ) -> tuple[str, dict]:
-    session = _get_openai_session(api_key, base_url_override=base_url_override)
+    session = _get_openai_session(api_key, base_url_override=base_url_override, extra_headers=extra_headers)
 
     user_content: Union[str, List[Dict[str, Any]]] = prompt
     if images:
@@ -825,9 +828,11 @@ def _get_anthropic_base_url() -> str:
     return os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1").rstrip("/")
 
 
-def _get_openai_session(api_key: str, base_url_override: Optional[str] = None) -> requests.Session:
+def _get_openai_session(api_key: str, base_url_override: Optional[str] = None, extra_headers: Optional[Dict[str, str]] = None) -> requests.Session:
     effective_base = (base_url_override or _get_openai_base_url()).rstrip("/")
-    cache_key = f"{effective_base}::{api_key}"
+    # Include extra_headers in the cache key so different header sets get separate sessions
+    headers_key = ":".join(f"{k}={v}" for k, v in sorted((extra_headers or {}).items()))
+    cache_key = f"{effective_base}::{api_key}::{headers_key}"
     if cache_key not in _openai_sessions:
         session = requests.Session()
         session.headers.update(
@@ -836,6 +841,8 @@ def _get_openai_session(api_key: str, base_url_override: Optional[str] = None) -
                 "Content-Type": "application/json",
             }
         )
+        if extra_headers:
+            session.headers.update(extra_headers)
         _openai_sessions[cache_key] = session
     return _openai_sessions[cache_key]
 

@@ -1901,19 +1901,16 @@ BEFORE CODING: If task is vague (missing names/dates/files), output ONLY a print
 
 RULES:
 - ONLY Python code. Minimal code. Async (await). NO asyncio.run(); define `async def main():...` & `await main()`.
-- API tools: use ONLY the namespace shown in `await <name>.method()` lines above. Do NOT invent or use any other variable name.
-- NEVER pass connection_name (auto-detected).
-- EVERY tool call MUST include `desc="..."` with a short, specific action text.
-- If you call `websearch.search`, `llm.call`, `sql.query`, `gmail.read`, `sheets.write`, etc., include `desc=` explicitly in that same call.
-- `desc` must describe intent (e.g., `desc="Searching AI news April 2026"`), not a generic label.
-- SELF-CHECK BEFORE OUTPUT: if any tool call is missing `desc=`, rewrite the code before returning it.
+- Use ONLY the namespaces shown above. Do NOT invent variable names. NEVER pass connection_name (auto-detected).
+- EVERY tool call MUST include `desc="<specific action>"` (e.g. `desc="Searching AI news April 2026"`). SELF-CHECK: if any call is missing `desc=`, rewrite before returning.
 - `files` tool ONLY reads Sandbox uploads.
-- User visibility: ONLY print() is visible. Print final answers. Use Markdown, `format_table()`. Match user language.
-- Order: Wait for tool output before generating text dependent on it.
-- Processing N items (emails, rows, files): ALWAYS `asyncio.gather(*[process(x) for x in items])`, NEVER sequential `for` loops with `await`.
+- Only print() is visible. Print final answers in Markdown, use `format_table()`. Match user language.
+- Wait for tool output before generating text that depends on it.
+- Processing N items: ALWAYS `asyncio.gather(*[process(x) for x in items])`, NEVER sequential `for` loops with `await`.
 - Libs: asyncio, json, re, datetime, time, math, statistics. NO pandas.
-- APITool responses are plain Python objects (dict/list/str). If a result is a string, parse it with `json.loads(result)` before calling dict/list methods on it.
-- WEBSEARCH: If value needed, ask "Return ONLY JSON: {{k:v}}" -> use `safe_json_loads(response)` (returns None on empty/invalid). If None, abort and print raw response. NEVER hardcode/guess facts.
+- APITool responses are dict/list/str. If str, parse with `json.loads(result)` before using as dict/list.
+- WEBSEARCH: ask "Return ONLY JSON: {{k:v}}" → `safe_json_loads(response)` (None if invalid → print raw, abort). NEVER hardcode facts.
+- Large data → `llm.call`: pre-process with Python first (filter/slice/summarise). Never pass raw bulks.
 {examples_section}
 
 OUTPUT: Python code ONLY. NO comments. Only print() is visible, use markdown."""
