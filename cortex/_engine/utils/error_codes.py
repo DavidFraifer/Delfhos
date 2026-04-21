@@ -133,7 +133,14 @@ class ErrorCodes:
         "Attempted to stop agent that is not running",
         _issues_hint("Check agent state with agent.info() before stopping. If unexpected,")
     )
-    
+
+    AGT_006 = CORTEXError(
+        "AGT-006", ErrorCategory.AGENT, ErrorSeverity.ERROR,
+        "Budget exceeded",
+        "Cumulative agent LLM cost has reached the configured budget_usd limit",
+        "Raise budget_usd, reset the counter with agent.reset_budget(), or stop the agent"
+    )
+
     # TOOL ERRORS (TOL-XXX)
     TOL_001 = CORTEXError(
         "TOL-001", ErrorCategory.TOOL, ErrorSeverity.ERROR,

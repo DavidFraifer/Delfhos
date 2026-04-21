@@ -124,7 +124,8 @@ def test_chat_append_and_compression_carry_forward():
         os.remove(chat_db)
 
     chat = Chat(keep=2, summarize=True, path=chat_db, namespace="chat_carry_forward")
-    chat.summary = "Previously: user asked about invoice #42."
+    # summary is a read-only property; seed the backing field directly
+    chat._summary = "Previously: user asked about invoice #42."
 
     # Simulate 5 rounds → 10 messages total
     for i in range(5):
@@ -269,7 +270,8 @@ def test_agent_stop_clears_non_persistent_chat():
     agent.stop()
 
     assert len(chat.messages) == 0
-    assert chat.summary == ""
+    # summary property returns None (not "") when the backing field is empty
+    assert not chat.summary
     print("  Non-persistent chat cleared on stop: OK")
 
 

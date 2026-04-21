@@ -24,8 +24,10 @@ from typing import List, Optional, Union, Dict, Any, Callable
 from cortex._engine.agent import Agent
 from cortex._engine.connection import Connection
 from cortex._engine.types import Response
+from rich.box import ROUNDED
 from rich.panel import Panel
-from rich.markdown import Markdown
+from rich.table import Table
+from rich.text import Text
 from delfhos.memory import Chat, Memory
 
 
@@ -99,6 +101,9 @@ class Cortex:
         verbose: bool = False,
         enable_prefilter: bool = False,
         retry_count: int = 1,
+        sandbox: str = "auto",
+        sandbox_config: Optional[Dict[str, Any]] = None,
+        budget_usd: Optional[float] = None,
     ):
         """Initialize an Agent (Cortex) with tools and language models.
 
@@ -120,6 +125,9 @@ class Cortex:
             enable_prefilter: If True, use LLM to pre-filter relevant tools before code generation (default: False, disabled).
             retry_count: Number of times to auto-retry execution on failure (default: 1).
             providers: Override API keys {"google": "...", "openai": "...", etc}.
+            budget_usd: Hard spending cap in USD. Once the cumulative LLM cost across all
+                        run() calls reaches this limit, new tasks are blocked until
+                        reset_budget() is called. Use agent.total_cost_usd to track spend.
 
         Example::
 
@@ -141,6 +149,7 @@ class Cortex:
                 code_llm="gemini-3.1-pro",        # override for code generation
                 vision_llm="gemini-3.1-pro-vision",  # override for image analysis
                 chat=Chat(summarizer_llm="gemini-3.1-flash-lite-preview"),  # auto-summarizes
+                budget_usd=0.50,                   # refuse new tasks after $0.50 spent
                 verbose=True
             )
         """
@@ -163,6 +172,9 @@ class Cortex:
             verbose=verbose,
             enable_prefilter=enable_prefilter,
             retry_count=retry_count,
+            sandbox=sandbox,
+            sandbox_config=sandbox_config,
+            budget_usd=budget_usd,
             _explicit_llms={
                 "light_llm": light_llm is not None,
                 "heavy_llm": heavy_llm is not None,
@@ -258,20 +270,25 @@ class Cortex:
             )
         
         from cortex._engine.utils.console import console as runtime_console
+        from delfhos import __version__
 
         chat_console = runtime_console.console
 
-        welcome = Panel(
-            "[bold cyan]Welcome to Delfhos[/bold cyan]\n\n"
-            "Type your request and press Enter\n"
-            "[dim]Type /help for commands[/dim]",
-            title="[bold cyan]Interactive Chat[/bold cyan]",
-            border_style="cyan",
-            expand=False,
-            padding=(1, 2),
-        )
-        chat_console.print(welcome)
-        chat_console.print()  # Blank line for spacing
+        def _render_welcome():
+            try:
+                tools = self._agent.get_available_tools()
+            except Exception:
+                tools = []
+            runtime_console.print_welcome_banner(
+                version=__version__,
+                llm_config=self._agent.get_llm_config_string(),
+                tools=tools,
+                agent_id=self._agent.agent_id,
+            )
+
+        _render_welcome()
+
+        prompt_str = "\x1b[1;96m❯\x1b[0m \x1b[96mYou\x1b[0m \x1b[90m›\x1b[0m "
 
         try:
             while True:
@@ -279,7 +296,7 @@ class Cortex:
                 # control bytes don't compete with the terminal prompt.
                 runtime_console.pause_live(clear_tasks=True)
                 try:
-                    user_input = input("You > ").strip()
+                    user_input = input(prompt_str).strip()
                 except (EOFError, KeyboardInterrupt):
                     runtime_console.loading_stop_all()
                     chat_console.print("\n[dim]Chat ended.[/dim]")
@@ -294,30 +311,45 @@ class Cortex:
                 lowered = user_input.lower()
                 if lowered in {"/exit", "/quit"}:
                     runtime_console.loading_stop_all()
-                    chat_console.print("[dim]Goodbye.[/dim]\n")
+                    chat_console.print(
+                        "  [gold1]✦[/gold1] [dim]Session ended. Goodbye.[/dim]\n"
+                    )
                     break
                 if lowered == "/help":
+                    cmd_table = Table.grid(padding=(0, 2))
+                    cmd_table.add_column(style="bold gold1", no_wrap=True)
+                    cmd_table.add_column(style="white")
+                    cmd_table.add_row("/help", "Show this help menu")
+                    cmd_table.add_row("/clear", "Clear the screen and re-print the banner")
+                    cmd_table.add_row("/stop", "Stop the underlying agent (auto-restarts next message)")
+                    cmd_table.add_row("/exit", "End the chat session")
+                    cmd_table.add_row("", "")
+                    cmd_table.add_row("[dim]Ctrl-C[/dim]", "[dim]Cancel current input[/dim]")
+                    cmd_table.add_row("[dim]Ctrl-D[/dim]", "[dim]End session[/dim]")
+
                     help_panel = Panel(
-                        "[bold cyan]/help[/bold cyan]   Show this help\n"
-                        "[bold cyan]/stop[/bold cyan]   Stop agent (will restart on next message)\n"
-                        "[bold cyan]/exit[/bold cyan]   Exit chat\n"
-                        "[bold cyan]/clear[/bold cyan]  Clear screen",
-                        title="[bold]Commands[/bold]",
-                        border_style="blue",
+                        cmd_table,
+                        title="[bold gold1]Commands[/bold gold1]",
+                        title_align="left",
+                        border_style="gold1",
+                        box=ROUNDED,
+                        expand=False,
                         padding=(1, 2),
                     )
                     chat_console.print(help_panel)
-                    chat_console.print()  # Spacing
+                    chat_console.print()
                     continue
                 if lowered == "/clear":
                     chat_console.clear()
-                    chat_console.print(welcome)
-                    chat_console.print()
+                    _render_welcome()
                     continue
                 if lowered == "/stop":
                     self.stop()
                     runtime_console.loading_stop_all()
-                    chat_console.print("[yellow]Agent stopped.[/yellow] [dim]Send a new message to resume.[/dim]\n")
+                    chat_console.print(
+                        "  [yellow]●[/yellow] [bold]Agent stopped.[/bold] "
+                        "[dim]Send a new message to resume.[/dim]\n"
+                    )
                     continue
 
                 response = None
@@ -328,9 +360,11 @@ class Cortex:
                         Panel(
                             f"[red]{exc}[/red]",
                             title="[bold red]✗ Error[/bold red]",
+                            title_align="left",
                             border_style="red",
+                            box=ROUNDED,
                             expand=False,
-                            padding=(1, 2),
+                            padding=(0, 2),
                         )
                     )
                 finally:
@@ -345,9 +379,11 @@ class Cortex:
                         Panel(
                             f"[red]{err}[/red]",
                             title="[bold red]✗ Error[/bold red]",
+                            title_align="left",
                             border_style="red",
+                            box=ROUNDED,
                             expand=False,
-                            padding=(1, 2),
+                            padding=(0, 2),
                         )
                     )
 
@@ -438,6 +474,24 @@ class Cortex:
         """Unique identifier for this agent instance."""
         return self._agent.agent_id
 
+    @property
+    def total_cost_usd(self) -> float:
+        """Cumulative LLM cost in USD across all run() calls on this agent."""
+        return self._agent.total_cost_usd
+
+    def reset_budget(self, budget_usd: Optional[float] = None) -> None:
+        """Reset accumulated cost to $0, optionally updating the spending limit.
+
+        Args:
+            budget_usd: New limit in USD. Pass None to keep the current limit.
+
+        Example::
+
+            agent.reset_budget()             # clear spend, keep same cap
+            agent.reset_budget(budget_usd=1.00)  # clear spend and raise cap to $1
+        """
+        self._agent.reset_budget(budget_usd=budget_usd)
+
     # ─── Context manager support ──────────────────────────────────────────────
 
     def __enter__(self) -> "Cortex":
@@ -475,5 +529,6 @@ class Cortex:
             error=error,
             cost_usd=res.get("cost_usd"),
             duration_ms=int(res.get("duration", 0) * 1000),
-            trace=res.get("trace")
+            trace=res.get("trace"),
+            files=res.get("output_files", {}),
         )

@@ -16,7 +16,7 @@ class TokenCount:
             return
         self.input += token_info.get("input_tokens", 0)
         self.output += token_info.get("output_tokens", 0)
-        
+
     def __str__(self) -> str:
         return f"{self.total} (in: {self.input}, out: {self.output})"
 
@@ -26,12 +26,12 @@ class TokenUsage:
     task: TokenCount = field(default_factory=TokenCount)
     summarizer: TokenCount = field(default_factory=TokenCount)
     extractor: TokenCount = field(default_factory=TokenCount)
-    
+
     @property
     def total(self) -> int:
         return self.task.total + self.summarizer.total + self.extractor.total
 
-from typing import Optional, Any
+from typing import Optional, Any, Dict
 
 @dataclass
 class Response:
@@ -42,3 +42,4 @@ class Response:
     cost_usd: Optional[float] = None
     duration_ms: int = 0
     trace: Any = None
+    files: Dict[str, str] = field(default_factory=dict)

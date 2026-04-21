@@ -55,8 +55,30 @@ from typing import TYPE_CHECKING
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 
+__version__ = "0.7.0"
+
 # Tool system (no circular deps — delfhos.tool uses only stdlib)
 from delfhos.tool import tool, ToolException, DelfhosToolWarning
+from delfhos.errors import (
+    DelfhosConfigError,
+    ModelConfigurationError,
+    AgentConfirmationError,
+    MemorySetupError,
+    MemoryRetrievalError,
+    ToolExecutionError,
+    EnvironmentKeyError,
+    ToolDefinitionError,
+    OptionalDependencyError,
+    ConnectionConfigurationError,
+    ConnectionFileNotFoundError,
+    LLMExecutionError,
+    CodeGenerationError,
+    PrefilterError,
+    SandboxExecutionError,
+    SQLSchemaError,
+    ConversationCompressionError,
+    ApprovalRejectedError,
+)
 
 # Service tools
 from delfhos.tools import (
@@ -76,6 +98,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     # Core
+    "__version__",
     "Agent",
     "tool",
     "ToolException",
@@ -92,6 +115,25 @@ __all__ = [
     "Docs",
     "WebSearch",
     "APITool",
+    # Errors
+    "DelfhosConfigError",
+    "ModelConfigurationError",
+    "AgentConfirmationError",
+    "MemorySetupError",
+    "MemoryRetrievalError",
+    "ToolExecutionError",
+    "EnvironmentKeyError",
+    "ToolDefinitionError",
+    "OptionalDependencyError",
+    "ConnectionConfigurationError",
+    "ConnectionFileNotFoundError",
+    "LLMExecutionError",
+    "CodeGenerationError",
+    "PrefilterError",
+    "SandboxExecutionError",
+    "SQLSchemaError",
+    "ConversationCompressionError",
+    "ApprovalRejectedError",
 ]
 
 

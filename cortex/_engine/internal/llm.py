@@ -51,10 +51,10 @@ def _raise_llm_api_error(provider: str, detail: str) -> None:
     )
 
 
-def resolve_model(model: Union[str, LLMConfig]) -> Tuple[str, str, Optional[str], Optional[str], Optional[Dict[str, str]]]:
+def resolve_model(model: Union[str, LLMConfig]) -> Tuple[str, str, Optional[str], Optional[str], Optional[Dict[str, str]], Dict[str, Any]]:
     """Resolve provider and model id from a model string or LLMConfig.
 
-    Returns: (provider, model_id, base_url, api_key, headers)
+    Returns: (provider, model_id, base_url, api_key, headers, settings)
 
     Supported string forms:
       - Auto-detected: gemini-2.5-flash, gpt-4.1, claude-3-7-sonnet
@@ -64,10 +64,53 @@ def resolve_model(model: Union[str, LLMConfig]) -> Tuple[str, str, Optional[str]
     For full control (custom base URL, local servers, enterprise endpoints):
       - LLMConfig(model="llama3.2", base_url="http://localhost:11434/v1")
       - LLMConfig(model="llama3.2", base_url="https://llm.corp/v1", headers={"X-Tenant-ID": "acme"})
+    For native providers with custom generation settings:
+      - LLMConfig(model="gemini-2.5-flash", settings={"temperature": 0.8})
     """
-    # LLMConfig: always routes to openai-compatible backend with custom base_url/api_key/headers
+    def _infer_provider_from_model_name(model_name: str) -> Optional[str]:
+        lowered_name = model_name.lower()
+        if lowered_name.startswith("gemini"):
+            return "google"
+        if lowered_name.startswith("claude"):
+            return "anthropic"
+        if lowered_name.startswith(("gpt", "o1", "o3", "o4", "chatgpt")) or "gpt-" in lowered_name:
+            return "openai"
+        return None
+
+    def _split_provider_prefix(model_name: str) -> Tuple[Optional[str], str]:
+        for sep in ("/", ":"):
+            if sep in model_name:
+                maybe_provider, maybe_model = model_name.split(sep, 1)
+                provider = PROVIDER_ALIASES.get(maybe_provider.strip().lower())
+                candidate = maybe_model.strip()
+                if provider and candidate:
+                    return provider, candidate
+        return None, model_name
+
+    # LLMConfig: without base_url use native provider inference; with base_url use openai-compatible route.
     if isinstance(model, LLMConfig):
-        return "openai", model.model, model.base_url, model.api_key, model.headers
+        settings = dict(model.settings or {})
+        explicit_provider, model_candidate = _split_provider_prefix(model.model)
+        forced_provider = model.provider if model.provider != "auto" else None
+
+        if model.base_url:
+            return "openai", model_candidate, model.base_url, model.api_key, model.headers, settings
+
+        provider = forced_provider or explicit_provider or _infer_provider_from_model_name(model_candidate)
+        if provider in {"google", "openai", "anthropic"}:
+            return provider, model_candidate, None, model.api_key, model.headers, settings
+
+        raise_error(
+            "LLM-001",
+            context={
+                "model": model.model,
+                "error": (
+                    "Cannot infer provider from LLMConfig.model without base_url. "
+                    "Use gemini-*, claude-*, gpt-* (or o1/o3/o4), set provider=..., "
+                    "or provide base_url for OpenAI-compatible custom endpoints."
+                ),
+            },
+        )
 
     if not model or not isinstance(model, str):
         raise_error("LLM-001", context={"model": model, "error": "Model identifier must be a non-empty string"})
@@ -85,12 +128,12 @@ def resolve_model(model: Union[str, LLMConfig]) -> Tuple[str, str, Optional[str]
                 continue
 
             if provider == "google" and candidate_lower.startswith("gemini"):
-                return provider, candidate, None, None, None
+                return provider, candidate, None, None, None, {}
             if provider == "anthropic" and candidate_lower.startswith("claude"):
-                return provider, candidate, None, None, None
+                return provider, candidate, None, None, None, {}
             # openai/ prefix: accept ANY model name (for openai-compatible endpoints)
             if provider == "openai":
-                return provider, candidate, None, None, None
+                return provider, candidate, None, None, None, {}
 
             raise_error(
                 "LLM-001",
@@ -106,11 +149,11 @@ def resolve_model(model: Union[str, LLMConfig]) -> Tuple[str, str, Optional[str]
             )
 
     if lowered.startswith("gemini"):
-        return "google", model_text, None, None, None
+        return "google", model_text, None, None, None, {}
     if lowered.startswith("claude"):
-        return "anthropic", model_text, None, None, None
+        return "anthropic", model_text, None, None, None, {}
     if lowered.startswith(("gpt", "o1", "o3", "o4", "chatgpt")) or "gpt-" in lowered:
-        return "openai", model_text, None, None, None
+        return "openai", model_text, None, None, None, {}
 
     raise_error(
         "LLM-001",
@@ -148,12 +191,27 @@ def _get_api_key(provider: str, api_key_override: Optional[str] = None, base_url
         is_default_openai = effective_base_url == "https://api.openai.com/v1"
         try:
             return get_cached_api_key(provider)
-        except Exception:
+        except (KeyError, OSError):
             if not is_default_openai:
                 return os.getenv("OPENAI_API_KEY", "local-dev-key")
             raise
 
     return get_cached_api_key(provider)
+
+
+def _resolve_generation_settings(
+    settings: Dict[str, Any],
+    temperature: float,
+    max_tokens: int,
+) -> Tuple[float, int, Dict[str, Any]]:
+    effective_temperature = settings.get("temperature", temperature)
+    effective_max_tokens = settings.get("max_tokens", max_tokens)
+    provider_optional = {
+        key: value
+        for key, value in settings.items()
+        if key not in {"temperature", "max_tokens"}
+    }
+    return float(effective_temperature), int(effective_max_tokens), provider_optional
 
 
 async def llm_completion_async(
@@ -178,7 +236,12 @@ async def llm_completion_async(
         else:
             prompt = f"{current_context}\n\n{prompt}"
 
-    provider, provider_model, base_url_override, api_key_override, extra_headers = resolve_model(model)
+    provider, provider_model, base_url_override, api_key_override, extra_headers, model_settings = resolve_model(model)
+    temperature, max_tokens, provider_optional_settings = _resolve_generation_settings(
+        settings=model_settings,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
     api_key = _get_api_key(provider, api_key_override=api_key_override, base_url_override=base_url_override)
 
     if provider == "google":
@@ -196,6 +259,7 @@ async def llm_completion_async(
             api_key,
             use_web_search,
             images,
+            provider_optional_settings,
         )
 
     if provider == "openai":
@@ -213,6 +277,7 @@ async def llm_completion_async(
             images,
             base_url_override,
             extra_headers,
+            provider_optional_settings,
         )
 
     if provider == "anthropic":
@@ -228,6 +293,7 @@ async def llm_completion_async(
             response_format,
             api_key,
             images,
+            provider_optional_settings,
         )
 
     if provider == "inception":
@@ -241,6 +307,7 @@ async def llm_completion_async(
             temperature,
             max_tokens,
             api_key,
+            provider_optional_settings,
         )
 
     raise_error("LLM-001", context={"model": model, "provider": provider, "function": "llm_completion_async"})
@@ -295,7 +362,7 @@ def _prepare_gemini_image_parts(images: List[Union[str, Dict[str, Any]]]) -> Lis
                         data=img_bytes,
                         mime_type=mime_type
                     ))
-                except Exception as e:
+                except (ValueError, binascii.Error, TypeError) as e:
                     print(f"Warning: Failed to decode image for Gemini: {e}")
         elif isinstance(img, str):
             # Accept data-URI, local file path, or base64 string.
@@ -322,7 +389,7 @@ def _prepare_gemini_image_parts(images: List[Union[str, Dict[str, Any]]]) -> Lis
                     data=img_bytes,
                     mime_type=mime_type
                 ))
-            except Exception as e:
+            except (ValueError, binascii.Error, OSError, TypeError) as e:
                 print(f"Warning: Failed to decode image string for Gemini: {e}")
     return image_parts
 
@@ -344,7 +411,7 @@ def _extract_gemini_tokens(response, prompt: str, system_message: str, content: 
             "total_tokens": input_tokens + output_tokens,
             "image_count": len(images) if images else 0,
         }
-    except Exception as e:
+    except (AttributeError, TypeError, ValueError) as e:
         print(f"Warning: Could not extract tokens for Gemini: {e}")
         total_input = prompt + (system_message or "")
         estimated_total = len(total_input + content) // 4
@@ -392,7 +459,18 @@ def _normalize_token_info(token_info: Optional[Dict[str, Any]], prompt: str, sys
         "image_count": image_count,
     }
 
-def _gemini_sync(model: str, prompt: str, system_message: str, temperature: float, max_tokens: int, response_format: str, api_key: str, use_web_search: bool, images: Optional[List[Union[str, Dict[str, Any]]]] = None) -> tuple[str, dict]:
+def _gemini_sync(
+    model: str,
+    prompt: str,
+    system_message: str,
+    temperature: float,
+    max_tokens: int,
+    response_format: str,
+    api_key: str,
+    use_web_search: bool,
+    images: Optional[List[Union[str, Dict[str, Any]]]] = None,
+    generation_settings: Optional[Dict[str, Any]] = None,
+) -> tuple[str, dict]:
     client = get_gemini_client(api_key)
     full_prompt = f"{system_message}\n\n{prompt}" if system_message else prompt
     
@@ -405,12 +483,17 @@ def _gemini_sync(model: str, prompt: str, system_message: str, temperature: floa
     
     content_for_tokens = [types.Content(role="user", parts=parts)]
     
+    settings = generation_settings or {}
+
     config_params = {
         "temperature": temperature,
         "max_output_tokens": max_tokens,
-        "top_p": 0.6,  # Further reduced for faster generation
-        "top_k": 20    # Further reduced for faster generation
+        "top_p": settings.get("top_p", 0.6),  # Keep historical defaults when not overridden
+        "top_k": settings.get("top_k", 20),
     }
+    if "stop" in settings:
+        stop_value = settings["stop"]
+        config_params["stop_sequences"] = [stop_value] if isinstance(stop_value, str) else stop_value
     if response_format == "json":
         config_params["response_mime_type"] = "application/json"
     
@@ -449,7 +532,7 @@ def _gemini_sync(model: str, prompt: str, system_message: str, temperature: floa
                 content = str(raw_text).strip()
             else:
                 content = raw_text.strip()
-    except Exception as e:
+    except (AttributeError, TypeError, IndexError) as e:
         print(f"Warning: Manual text extraction failed: {e}")
         try:
             content = str(response.text).strip()
@@ -461,7 +544,15 @@ def _gemini_sync(model: str, prompt: str, system_message: str, temperature: floa
     return content, token_info
 
 
-def _mercury_sync(model: str, prompt: str, system_message: str, temperature: float, max_tokens: int, api_key: str) -> tuple[str, dict]:
+def _mercury_sync(
+    model: str,
+    prompt: str,
+    system_message: str,
+    temperature: float,
+    max_tokens: int,
+    api_key: str,
+    generation_settings: Optional[Dict[str, Any]] = None,
+) -> tuple[str, dict]:
     """Call Inception Labs Mercury API (OpenAI-compatible)."""
     messages = []
     if system_message:
@@ -470,17 +561,33 @@ def _mercury_sync(model: str, prompt: str, system_message: str, temperature: flo
     
     session = _get_mercury_session(api_key)
     
+    settings = generation_settings or {}
+    optional_params = {
+        key: settings[key]
+        for key in ("top_k", "presence_penalty", "frequency_penalty", "stop")
+        if key in settings
+    }
+
     base_payload = {
         "model": model,
         "messages": messages,
-        "top_p": 0.6,  # Narrower sampling for faster generation
+        "top_p": settings.get("top_p", 0.6),
     }
-    payload_variants: List[Dict[str, Any]] = [
+    with_optional: List[Dict[str, Any]] = [
+        {"max_tokens": max_tokens, "temperature": temperature, **optional_params},
+        {"max_completion_tokens": max_tokens, "temperature": temperature, **optional_params},
+        {"max_tokens": max_tokens, **optional_params},
+        {"max_completion_tokens": max_tokens, **optional_params},
+    ]
+    without_optional: List[Dict[str, Any]] = [
         {"max_tokens": max_tokens, "temperature": temperature},
         {"max_completion_tokens": max_tokens, "temperature": temperature},
         {"max_tokens": max_tokens},
         {"max_completion_tokens": max_tokens},
     ]
+    payload_variants = with_optional if optional_params else without_optional
+    if optional_params:
+        payload_variants.extend(without_optional)
 
     response = None
     last_error = None
@@ -569,7 +676,7 @@ def _openai_extract_content(message_content: Any) -> str:
 def _openai_error_details(response: requests.Response) -> Dict[str, Any]:
     try:
         data = response.json()
-    except Exception:
+    except (ValueError, UnicodeDecodeError):
         return {
             "code": None,
             "param": None,
@@ -589,7 +696,7 @@ def _openai_error_details(response: requests.Response) -> Dict[str, Any]:
 def _anthropic_error_details(response: requests.Response) -> Dict[str, Any]:
     try:
         data = response.json()
-    except Exception:
+    except (ValueError, UnicodeDecodeError):
         return {
             "type": None,
             "message": response.text[:300],
@@ -615,6 +722,7 @@ def _openai_sync(
     images: Optional[List[Union[str, Dict[str, Any]]]],
     base_url_override: Optional[str] = None,
     extra_headers: Optional[Dict[str, str]] = None,
+    generation_settings: Optional[Dict[str, Any]] = None,
 ) -> tuple[str, dict]:
     session = _get_openai_session(api_key, base_url_override=base_url_override, extra_headers=extra_headers)
 
@@ -639,14 +747,30 @@ def _openai_sync(
     if response_format == "json":
         base_payload["response_format"] = {"type": "json_object"}
 
+    settings = generation_settings or {}
+    optional_params = {
+        key: settings[key]
+        for key in ("top_p", "top_k", "presence_penalty", "frequency_penalty", "stop")
+        if key in settings
+    }
+
     # OpenAI model families differ in accepted generation params.
     # Try modern names first, then gracefully fall back.
-    payload_variants: List[Dict[str, Any]] = [
+    with_optional: List[Dict[str, Any]] = [
+        {"max_completion_tokens": max_tokens, "temperature": temperature, **optional_params},
+        {"max_tokens": max_tokens, "temperature": temperature, **optional_params},
+        {"max_completion_tokens": max_tokens, **optional_params},
+        {"max_tokens": max_tokens, **optional_params},
+    ]
+    without_optional: List[Dict[str, Any]] = [
         {"max_completion_tokens": max_tokens, "temperature": temperature},
         {"max_tokens": max_tokens, "temperature": temperature},
         {"max_completion_tokens": max_tokens},
         {"max_tokens": max_tokens},
     ]
+    payload_variants = with_optional if optional_params else without_optional
+    if optional_params:
+        payload_variants.extend(without_optional)
 
     effective_base_url = (base_url_override or _get_openai_base_url()).rstrip("/")
     response = None
@@ -712,6 +836,7 @@ def _anthropic_sync(
     response_format: str,
     api_key: str,
     images: Optional[List[Union[str, Dict[str, Any]]]],
+    generation_settings: Optional[Dict[str, Any]] = None,
 ) -> tuple[str, dict]:
     session = _get_anthropic_session(api_key)
 
@@ -748,11 +873,25 @@ def _anthropic_sync(
     if system_prompt:
         base_payload["system"] = system_prompt
 
+    settings = generation_settings or {}
+    optional_all: Dict[str, Any] = {
+        "temperature": temperature,
+    }
+    if "top_p" in settings:
+        optional_all["top_p"] = settings["top_p"]
+    if "top_k" in settings:
+        optional_all["top_k"] = settings["top_k"]
+    if "stop" in settings:
+        stop_value = settings["stop"]
+        optional_all["stop_sequences"] = [stop_value] if isinstance(stop_value, str) else stop_value
+
     # Some Claude variants may reject optional generation params.
-    payload_variants: List[Dict[str, Any]] = [
-        {"temperature": temperature},
-        {},
-    ]
+    payload_variants: List[Dict[str, Any]] = [optional_all]
+    temp_only = {"temperature": temperature}
+    if temp_only not in payload_variants:
+        payload_variants.append(temp_only)
+    if {} not in payload_variants:
+        payload_variants.append({})
 
     response = None
     last_error = None

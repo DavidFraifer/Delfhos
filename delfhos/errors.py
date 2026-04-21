@@ -126,3 +126,71 @@ class ApprovalRejectedError(DelfhosConfigError):
     code = "ERR-APPROVAL-001"
     message_template = "Operation '{operation}' was rejected by human approval."
     resolution = "Review the operation parameters. If the operation is safe, request approval again with {'APPROVAL_UI=1'} environment variable to force interactive approval."
+
+
+# ── Engine-level errors ─────────────────────────────────────────────────────
+
+
+class MemoryRetrievalError(DelfhosConfigError):
+    """Raised when the embedding-based memory retrieval step fails."""
+    code = "ERR-MEM-002"
+    message_template = "Memory retrieval failed: {detail}"
+    resolution = (
+        "Check your memory backend configuration and verify the embedding model "
+        "is accessible. Set a valid path or ':memory:' for in-process storage."
+    )
+
+
+class CodeGenerationError(LLMExecutionError):
+    """Raised when the LLM returns no usable Python code for a task."""
+    code = "ERR-LLM-002"
+    message_template = "Code generation produced no executable output: {detail}"
+    resolution = (
+        "Verify the code-generation model is configured correctly and that "
+        "all required tools are available for the task. "
+        "Check '{env_var}' for the model provider."
+    )
+
+
+class PrefilterError(LLMExecutionError):
+    """Raised when the prefilter LLM call fails and cannot select tools."""
+    code = "ERR-LLM-003"
+    message_template = "Tool prefilter failed: {detail}"
+    resolution = (
+        "Check the prefilter model configuration. "
+        "You can disable prefiltering with enable_prefilter=False to fall back "
+        "to passing all available tools to code generation."
+    )
+
+
+class SandboxExecutionError(ToolExecutionError):
+    """Raised when generated Python code fails inside the execution sandbox."""
+    code = "ERR-SANDBOX-001"
+    message_template = "Sandbox execution failed: {detail}"
+    resolution = (
+        "Review the generated code for logic errors. "
+        "If the error repeats, increase retry_count or simplify the task. "
+        "Docker sandbox users: ensure the container image is built and accessible."
+    )
+
+
+class SQLSchemaError(ToolExecutionError):
+    """Raised when SQL schema introspection fails for a connection."""
+    code = "ERR-TOOL-003"
+    message_template = "SQL schema fetch failed for '{connection}': {detail}"
+    resolution = (
+        "Verify the SQL connection is active and the database user has "
+        "SELECT privilege on information_schema (or equivalent). "
+        "Check host, port, and credentials in the connection configuration."
+    )
+
+
+class ConversationCompressionError(LLMExecutionError):
+    """Raised when chat-history summarisation/compression fails."""
+    code = "ERR-LLM-004"
+    message_template = "Conversation compression failed: {detail}"
+    resolution = (
+        "Check the summarizer model configuration and ensure the model "
+        "supports long-context input. "
+        "Compression is non-critical; the conversation continues uncompressed."
+    )

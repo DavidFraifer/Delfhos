@@ -19,7 +19,7 @@ from delfhos.sandbox import MockEmail, MockDatabase
 
 agent = Agent(
     tools=[
-        MockEmail(confirm=False),
+        MockEmail(),
         MockDatabase(confirm=False),
     ],
     llm="gemini-3.1-flash-lite-preview",

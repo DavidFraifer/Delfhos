@@ -419,6 +419,15 @@ class SQLLibrary(ToolLibraryBase):
             str: Formatted schema description
         """
         conn_name = self._get_sql_connection()
+        await _request_unified_approval(
+            tool_tracker=self.tool_tracker,
+            task_id=self.task_id,
+            tool_name="sql",
+            action_name="schema",
+            confirm_policy=self._get_confirm_policy(conn_name),
+            connection_name=conn_name,
+            message=desc or "Approve reading database schema",
+        )
         result = await self._execute_tool(conn_name, {
             "action": "SCHEMA",
             "params": {}
@@ -444,8 +453,16 @@ class SQLLibrary(ToolLibraryBase):
             csv = await sql.query("SELECT * FROM tasks", as_csv=True, desc="Exporting all tasks")
         """
         conn_name = self._get_sql_connection()
-
-        # NO approval needed for read-only SELECT queries
+        await _request_unified_approval(
+            tool_tracker=self.tool_tracker,
+            task_id=self.task_id,
+            tool_name="sql",
+            action_name="query",
+            confirm_policy=self._get_confirm_policy(conn_name),
+            connection_name=conn_name,
+            message=desc or f"Approve SQL query: {sql[:80]}",
+            context_payload={"sql": sql},
+        )
         result = await self._execute_tool(conn_name, {
             "action": "QUERY",
             "params": {
@@ -752,7 +769,17 @@ class SheetsLibrary(ToolLibraryBase):
             List[List] - 2D array of cell values
         """
         conn_name = self._get_sheets_connection()
-        
+        await _request_unified_approval(
+            tool_tracker=self.tool_tracker,
+            task_id=self.task_id,
+            tool_name="sheets",
+            action_name="read",
+            confirm_policy=self._get_confirm_policy(conn_name),
+            connection_name=conn_name,
+            message=desc or f"Approve reading spreadsheet: {spreadsheet_id}",
+            context_payload={"spreadsheet_id": spreadsheet_id, "range": range},
+        )
+
         # Parse "Sheet1!A1:D10" into sheet_name and range_notation
         if "!" in range:
             sheet_name, range_notation = range.split("!", 1)
@@ -835,6 +862,7 @@ class SheetsLibrary(ToolLibraryBase):
             tool_tracker=self.tool_tracker,
             task_id=self.task_id,
             tool_name="sheets",
+            action_name="write",
             confirm_policy=self._get_confirm_policy(conn_name, default="write"),
             connection_name=conn_name,
             message=desc or f"Approve writing data to {sheet}!{cell}",
@@ -965,7 +993,17 @@ class GmailLibrary(ToolLibraryBase):
         default_desc = f"Reading {max_results} emails"
         if query:
             default_desc += f" matching '{query}'"
-        
+        await _request_unified_approval(
+            tool_tracker=self.tool_tracker,
+            task_id=self.task_id,
+            tool_name="gmail",
+            action_name="read",
+            confirm_policy=self._get_confirm_policy(conn_name),
+            connection_name=conn_name,
+            message=desc or default_desc,
+            context_payload={"query": query, "max_results": max_results},
+        )
+
         def generate_email_metadata(result):
             """Generate metadata for email widgets - one widget per email"""
             metadata = {}
@@ -1048,13 +1086,23 @@ class GmailLibrary(ToolLibraryBase):
         from ..tools.files import save_output_file
         
         conn_name = self._get_gmail_connection()
+        await _request_unified_approval(
+            tool_tracker=self.tool_tracker,
+            task_id=self.task_id,
+            tool_name="gmail",
+            action_name="download",
+            confirm_policy=self._get_confirm_policy(conn_name),
+            connection_name=conn_name,
+            message=desc or f"Approve downloading {len(email.get('attachments', []))} attachment(s)",
+            context_payload={"email_id": email.get("id"), "attachment_count": len(email.get("attachments", []))},
+        )
         connection = self.tool_manager.connections.get(conn_name)
         if not connection:
             raise ConnectionConfigurationError(tool_name="Gmail", detail=f"Gmail connection '{conn_name}' not found")
-        
+
         credentials = connection.get_credentials()
         gmail_client = GmailClient(credentials)
-        
+
         file_paths = []
         for att in email['attachments']:
             attachment_data = gmail_client.get_attachment(email['id'], att['attachment_id'])
@@ -1109,7 +1157,17 @@ class DriveLibrary(ToolLibraryBase):
         default_desc = f"Searching for file: {name}" if name else "Searching Drive"
         if mime_type:
             default_desc += f" ({mime_type})"
-        
+        await _request_unified_approval(
+            tool_tracker=self.tool_tracker,
+            task_id=self.task_id,
+            tool_name="drive",
+            action_name="search",
+            confirm_policy=self._get_confirm_policy(conn_name),
+            connection_name=conn_name,
+            message=desc or default_desc,
+            context_payload={"name": name, "mime_type": mime_type},
+        )
+
         def generate_drive_metadata(result):
             """Generate metadata for drive file widget"""
             metadata = {}
@@ -1597,7 +1655,17 @@ class DocsLibrary(ToolLibraryBase):
 
     async def read(self, document_id: str, desc: str = None) -> str:
         conn_name = self._get_docs_connection()
-        
+        await _request_unified_approval(
+            tool_tracker=self.tool_tracker,
+            task_id=self.task_id,
+            tool_name="docs",
+            action_name="read",
+            confirm_policy=self._get_confirm_policy(conn_name),
+            connection_name=conn_name,
+            message=desc or f"Approve reading document: {document_id}",
+            context_payload={"document_id": document_id},
+        )
+
         # Helper to generate metadata
         def generate_doc_metadata(result):
             metadata = {}
@@ -1688,6 +1756,16 @@ class CalendarLibrary(ToolLibraryBase):
             List[Dict] - each event dict has: id, summary, start, end, description, location, etc.
         """
         conn_name = self._get_calendar_connection()
+        await _request_unified_approval(
+            tool_tracker=self.tool_tracker,
+            task_id=self.task_id,
+            tool_name="calendar",
+            action_name="list",
+            confirm_policy=self._get_confirm_policy(conn_name),
+            connection_name=conn_name,
+            message=desc or f"Approve listing calendar events from {start} to {end}",
+            context_payload={"start": start, "end": end, "max_results": max_results},
+        )
         result = await self._execute_tool(conn_name, {
             "action": "LIST",
             "params": {
@@ -1806,7 +1884,16 @@ class WebSearchLibrary(ToolLibraryBase):
         tool_name = "websearch"
         description = desc or f"Searching: {query}"
         start_time = time.time()
-        
+        await _request_unified_approval(
+            tool_tracker=self.tool_tracker,
+            task_id=self.task_id,
+            tool_name=tool_name,
+            action_name="search",
+            confirm_policy=True,
+            message=description,
+            context_payload={"query": query},
+        )
+
         ws_meta = {"_tool_trace_args": {"query": query}, "_tool_action": "search"}
         if self.tool_tracker:
             await self.tool_tracker.track_start(tool_name, description, model=self.search_llm, ui_metadata=ws_meta)
@@ -1858,6 +1945,16 @@ class MemoryLibrary(ToolLibraryBase):
         text = (content or "").strip()
         if not text:
             return False
+
+        await _request_unified_approval(
+            tool_tracker=self.tool_tracker,
+            task_id=self.task_id,
+            tool_name="memory",
+            action_name="save",
+            confirm_policy=True,
+            message=desc or "Approve saving memory facts",
+            context_payload={"preview": text[:120]},
+        )
 
         start = time.time()
         description = desc or "Saving memory facts"
@@ -2197,6 +2294,34 @@ def _wrap_for_tracking(tool_name: str, tool_obj: Any, tool_tracker: Any) -> Any:
                         "_tool_trace_args": kwargs,
                         "_tool_action": name,
                     }
+
+                    # ── Confirmation gate ────────────────────────────────────
+                    # Resolve confirm policy from the APITool connection object.
+                    # Default to True so that if there is an active approval_manager
+                    # but no explicit policy, we ask for everything (fail-safe).
+                    _confirm_policy = True
+                    _orch = getattr(tool_tracker, "orchestrator", None)
+                    if _orch is not None:
+                        _tool_mgr = getattr(_orch, "tools", None)
+                        if _tool_mgr is not None and hasattr(_tool_mgr, "connections"):
+                            _conn = _tool_mgr.connections.get(call_name)
+                            if _conn is not None:
+                                _raw = getattr(_conn, "confirm", None)
+                                if _raw is not None:
+                                    _confirm_policy = _raw
+                    await _request_unified_approval(
+                        tool_tracker=tool_tracker,
+                        task_id=tool_tracker.task_id,
+                        tool_name=call_name,
+                        action_name=name,
+                        confirm_policy=_confirm_policy,
+                        connection_name=call_name,
+                        message=f"Approve {call_name}.{name}()",
+                        context_payload={"tool": call_name, "method": name, "params": kwargs},
+                        ui_metadata=ui_metadata,
+                    )
+                    # ────────────────────────────────────────────────────────
+
                     start_time = _time.time()
                     await tool_tracker.track_start(call_name, description, ui_metadata=ui_metadata)
                     try:
@@ -2353,7 +2478,14 @@ class FilesLibrary(ToolLibraryBase):
     async def list(self, desc: str = None) -> List[Dict[str, Any]]:
         """List all files uploaded for this task."""
         from .files import load_task_files
-        
+        await _request_unified_approval(
+            tool_tracker=self.tool_tracker,
+            task_id=self.task_id,
+            tool_name="files",
+            action_name="list",
+            confirm_policy=True,
+            message=desc or "Approve listing uploaded files",
+        )
         file_handlers = await load_task_files(self.task_id)
         return [f.to_dict() for f in file_handlers]
     
@@ -2378,7 +2510,16 @@ class FilesLibrary(ToolLibraryBase):
         """
         from .files import load_task_files
         from pathlib import Path as PathLib
-        
+        await _request_unified_approval(
+            tool_tracker=self.tool_tracker,
+            task_id=self.task_id,
+            tool_name="files",
+            action_name="read",
+            confirm_policy=True,
+            message=desc or f"Approve reading file: {filename}",
+            context_payload={"filename": filename},
+        )
+
         # If filename is a full path, extract just the filename
         if "/" in filename or "\\" in filename:
             # It's a path, extract the filename

@@ -1,6 +1,6 @@
 # Delfhos Documentation
 
-> **Version:** 0.6.7 · **License:** Apache-2.0 · **Python:** ≥ 3.9
+> **Version:** 0.6.8 · **License:** Apache-2.0 · **Python:** ≥ 3.9
 
 Delfhos is a Python SDK for building AI agents that use real tools — Gmail, SQL databases, Google Drive, Sheets, Docs, Calendar, web search, REST APIs, and your own custom functions — with clean orchestration and safe, human-in-the-loop execution.
 
@@ -11,6 +11,9 @@ Delfhos is a Python SDK for building AI agents that use real tools — Gmail, SQ
 1. [Tutorials](#tutorials) — Learn by doing
 2. [How-to Guides](#how-to-guides) — Solve specific problems
    → [How to control tool permissions with `allow` and `confirm`](#how-to-control-what-a-tool-can-do-with-allow-and-confirm)
+   → [How to configure the execution sandbox](#how-to-configure-the-execution-sandbox)
+   → [How to pass input files to the agent workspace](#how-to-pass-input-files-to-the-agent-workspace)
+   → [How to extract output files from a task result](#how-to-extract-output-files-from-a-task-result)
 3. [Reference](#reference) — Complete API documentation
 4. [Explanation](#explanation) — Understand how it works
 
@@ -86,7 +89,7 @@ When you called `agent.run(...)`, Delfhos:
 
 1. Sent your task to the LLM for code generation
 2. Generated Python code that calls the WebSearch tool
-3. Executed that code in a sandboxed environment
+3. Executed that code in an isolated sandbox environment
 4. Returned the result to the LLM to compose a final answer
 5. Returned a `Response` object with the answer, cost, and timing
 
@@ -437,10 +440,19 @@ internal = APITool(
     headers={"Authorization": "Bearer sk_..."},
 )
 
-# With query-param auth
+# With query-param auth (appended to every request URL)
 external = APITool(
     spec="https://api.example.com/openapi.json",
     params={"api_key": "my-key"},
+)
+
+# With fixed path parameters (substituted into URL templates)
+# e.g. spec has paths like /api/{globalCompanyId}/orders
+multitenant = APITool(
+    spec="https://api.example.com/openapi.json",
+    headers={"Authorization": "Bearer sk_..."},
+    path_params={"globalCompanyId": "acme-corp"},
+    # The LLM never sees globalCompanyId — it's auto-injected into every URL
 )
 ```
 
@@ -565,11 +577,34 @@ agent = Agent(
     light_llm=LLMConfig(model="qwen2.5:7b", base_url="http://localhost:11434/v1"),
     heavy_llm="gemini-2.5-flash",
 )
+
+# Per-model generation settings (temperature, top_k, max_tokens, etc.)
+agent = Agent(
+    tools=[...],
+    llm=LLMConfig(
+        model="gemini-2.5-flash",
+        settings={
+            "temperature": 0.8,
+            "top_k": 40,
+            "max_tokens": 1200,
+        },
+    ),
+)
+
+# Pythonic helper form
+cfg = LLMConfig(model="gemini-2.5-flash")
+cfg.with_settings(temperature=0.8, top_k=40, max_tokens=1200)
+
+agent = Agent(tools=[...], llm=cfg)
 ```
 
 `LLMConfig` works wherever a model string is accepted: `llm`, `light_llm`, `heavy_llm`, `code_llm`, `vision_llm`.
 
 > **Note on `headers` vs `api_key`:** Use `api_key` for a single bearer token (`Authorization: Bearer ...`). Use `headers` when your server requires additional fields — tenant IDs, session tokens, routing keys, etc. You can use both together: `api_key` sets the `Authorization` header and `headers` adds anything else on top.
+
+> **Note on `settings` keys:** Use Python keys like `top_k` and `max_tokens`. Aliases like `"top-k"` and `"max-tokens"` are also accepted.
+
+> **Provider inference:** If `base_url` is not set, `LLMConfig` infers native provider from the model name (`gemini-*` → Google, `gpt-*`/`o*` → OpenAI, `claude-*` → Anthropic). If `base_url` is set, it uses OpenAI-compatible protocol for custom endpoints.
 
 ---
 
@@ -591,6 +626,18 @@ Rules:
 - If you specify only `llm`, it is used for everything.
 - `light_llm` and `heavy_llm` must be specified together.
 - `code_llm` and `vision_llm` are optional overrides on top of `heavy_llm`.
+
+Task routing map:
+
+| Model field | Used for these tasks | Fallback behavior |
+|-------------|----------------------|-------------------|
+| `llm` | Simple mode shortcut. Handles all tasks when you do not split models. | Internally sets both `light_llm` and `heavy_llm` to the same model. |
+| `light_llm` | Lightweight tasks: tool prefilter/routing (`enable_prefilter=True`), small parsing/classification helpers, and chat summarization when `Chat.summarizer_llm` is not set. | No fallback at config time: it must be provided together with `heavy_llm` (unless you use `llm`). |
+| `heavy_llm` | Main reasoning model: Python code generation, retry/fix loops after execution errors, and text-only calls through `llm.call(...)`. | Base default for specialized models. |
+| `code_llm` | Code-generation-specific path only (the model that writes tool-execution Python code). | Falls back to `heavy_llm` if not set. |
+| `vision_llm` | Image/multimodal analysis (for example `llm.call(file_data=[...], prompt=...)`). | Falls back to `heavy_llm` if not set. |
+
+In short: keep `light_llm` cheap/fast for routing, keep `heavy_llm` strong for reasoning, and override `code_llm` or `vision_llm` only when a specialized model improves those specific workloads.
 
 ---
 
@@ -923,6 +970,46 @@ print(f"${result.cost_usd:.5f}")    # Cost for this task
 print(agent.usage)                   # Cumulative token counts
 ```
 
+### Cost Guardrails and Budgets
+
+You can set a hard limit on the amount of money an `Agent` instance can spend.
+
+1. **At Initialization:** Pass `budget_usd` when instantiating the `Agent`. Cost estimations are computed locally against `~/delfhos/pricing.json`.
+
+```python
+agent = Agent(
+    tools=[...],
+    llm="gpt-4o",
+    budget_usd=0.50, # Block new tasks if accumulated cost reaches $0.50 USD
+)
+
+# Performs multiple calls...
+result = agent.run("Perform an expensive multi-step task")
+
+# If the total agent spend reaches the limit, new .run() calls will
+# be immediately rejected, raising an AGT-006 error.
+print(f"Total spent so far: ${agent.total_cost_usd:.5f}")
+```
+
+2. **Dynamic Resets:** If a task runs out of budget or you want to give the agent more allowance mid-execution (or between requests), you can reset the counter or increase the limit:
+
+```python
+# Reset the accumulated cost to $0, keeping the current $0.50 limit
+agent.reset_budget()
+
+# Reset the accumulated cost to $0 AND assign a new $1.00 limit
+agent.reset_budget(1.00)
+```
+
+3. **Status Checks:** You can query the current budget status programmatically prior to or after tasks:
+
+```python
+status = agent.status()
+print(status["budget"]["limit_usd"])      # Configured budget limit
+print(status["budget"]["remaining_usd"])  # Limit minus total_cost_usd
+print(status["budget"]["is_exhausted"])   # True if remaining <= 0
+```
+
 ---
 
 ## How to pass API keys programmatically
@@ -961,6 +1048,215 @@ The system prompt is injected into every LLM call.
 
 ---
 
+## How to configure the execution sandbox
+
+Delfhos executes LLM-generated code in an isolated sandbox. By default it automatically picks the strongest isolation available on your machine.
+
+### Sandbox modes
+
+| Mode | Behaviour |
+|------|-----------|
+| `"auto"` (default) | Use Docker if available, fall back to local process sandbox |
+| `"docker"` | Require Docker — raise an error if Docker is not running |
+| `"local"` | Always use the in-process sandbox (current behaviour before v0.6.8) |
+
+```python
+from delfhos import Agent, SQL
+
+# Default — auto-detects Docker, falls back gracefully
+agent = Agent(tools=[SQL(url="...")], llm="gemini-2.0-flash")
+
+# Force Docker (fails if Docker is not running)
+agent = Agent(
+    tools=[SQL(url="...")],
+    llm="gemini-2.0-flash",
+    sandbox="docker",
+)
+
+# Pin to local sandbox (no Docker required)
+agent = Agent(
+    tools=[SQL(url="...")],
+    llm="gemini-2.0-flash",
+    sandbox="local",
+)
+```
+
+### Resource limits (Docker mode only)
+
+Override the defaults with `sandbox_config`:
+
+```python
+agent = Agent(
+    tools=[...],
+    llm="gemini-2.0-flash",
+    sandbox="docker",
+    sandbox_config={
+        "memory_limit": "1g",      # Default: "512m"
+        "cpu_limit":    2.0,       # Default: 1.0 CPU core
+        "timeout":      600,       # Default: 300 seconds
+        "network":      False,     # Default: False (no outbound network)
+        "pids_limit":   128,       # Default: 64 (fork-bomb protection)
+    },
+)
+```
+
+### What Docker mode enforces
+
+When Docker is available and `sandbox="docker"` or `sandbox="auto"`, each task execution runs in a disposable container with:
+
+- **No network access** — the container cannot make outbound connections (all API calls go through the host via a Unix socket bridge)
+- **Read-only filesystem** — the container rootfs is immutable; only `/tmp` (50 MB, `noexec`) and the task upload directory are writable
+- **Memory cap** — the kernel kills the process if it exceeds the limit
+- **CPU quota** — prevents runaway computation from starving the host
+- **PID limit** — prevents fork bombs
+- **No Linux capabilities** — `ALL` capabilities dropped; `no-new-privileges` set
+- **Unprivileged user** — agent code runs as a non-root `sandbox` user
+
+Even if generated code escapes the Python-level sandbox (e.g. via object introspection), the container boundary contains the damage.
+
+### Building the Docker image
+
+The sandbox image is built automatically the first time a task runs with Docker enabled. To pre-build it manually (recommended for CI or production deployments):
+
+```python
+from cortex._engine.core.sandbox.docker_sandbox import build_image
+
+build_image()          # Skips if image already exists
+build_image(force=True)  # Rebuild unconditionally
+```
+
+The image is version-tagged to match the installed Delfhos version (e.g. `delfhos-sandbox:0.7.0`) so upgrades automatically use a fresh image.
+
+### Checking sandbox status
+
+```python
+from cortex._engine.core.sandbox.executor import _docker_available
+
+print("Docker available:", _docker_available())
+```
+
+---
+
+## How to pass input files to the agent workspace
+
+Pass a list of absolute host paths via `files=` when constructing the agent. The files are injected into the sandbox as read-only workspace files so the agent's generated code can read them directly.
+
+```python
+from delfhos import Agent, SQL
+
+agent = Agent(
+    tools=[SQL(url="postgresql://...")],
+    llm="gemini-2.0-flash",
+    files=[
+        "/data/sales_q3.csv",
+        "/data/product_catalog.xlsx",
+        "/config/mapping.json",
+    ],
+)
+
+result = agent.run(
+    "Read the sales CSV, join it with the product catalog, "
+    "and write a summary to the database."
+)
+agent.stop()
+```
+
+**How the paths are exposed to generated code:**
+
+| Sandbox mode | Path seen by the agent |
+|---|---|
+| `"docker"` (or `"auto"` with Docker) | `/workspace/<filename>` (e.g. `/workspace/sales_q3.csv`) |
+| `"local"` | Original host path (e.g. `/data/sales_q3.csv`) |
+
+The exact paths are injected into the code-generation prompt automatically — the LLM knows which files are available and uses the correct path for the active sandbox mode.
+
+Files can be opened with standard Python I/O or through the built-in `files` tool:
+
+```python
+# Both work inside generated agent code:
+import csv
+with open("/workspace/sales_q3.csv") as f:
+    reader = csv.DictReader(f)
+    rows = list(reader)
+
+# Or via the files tool:
+data = await files.read("sales_q3.csv")   # → List[Dict] for CSV/Excel
+```
+
+> **Important:** Files passed via `files=` are **read-only**. The agent cannot modify them. To produce new files, use `add_to_output_files()` (see the next guide).
+
+---
+
+## How to extract output files from a task result
+
+When the agent needs to return a file (a CSV export, a generated report, a transformed dataset), it calls `add_to_output_files(name, content)` inside the generated code. After the task completes, the files are available on `result.files` as a `{label: host_path}` mapping.
+
+```python
+from delfhos import Agent, SQL
+
+agent = Agent(
+    tools=[SQL(url="postgresql://...")],
+    llm="gemini-2.0-flash",
+)
+
+result = agent.run(
+    "Query the top 100 customers by revenue last month "
+    "and export the data as a CSV file."
+)
+
+# Access the generated files
+if result.files:
+    for label, path in result.files.items():
+        print(f"{label}: {path}")
+        # → top_customers: /tmp/delfhos_out_abc123/top_customers.csv
+
+agent.stop()
+```
+
+**Instructing the agent to produce a file**
+
+Mention the desired output format in your task description. The LLM is pre-instructed to use `add_to_output_files` when it needs to return data too large to print or when a file format is requested:
+
+```python
+agent.run("Generate a monthly sales report as an Excel file.")
+agent.run("Export all user records to a CSV.")
+agent.run("Produce a JSON summary of the API response.")
+```
+
+You can also ask for multiple files in one task:
+
+```python
+result = agent.run(
+    "Export the raw orders to orders.csv and the summary stats to summary.json."
+)
+for label, path in result.files.items():
+    print(f"{label} → {path}")
+# → orders → /tmp/.../orders.csv
+# → summary → /tmp/.../summary.json
+```
+
+**Auto-conversion rules**
+
+The `add_to_output_files` function applies these conversions automatically when the agent code calls it:
+
+| Content type | Output format |
+|---|---|
+| `str` | Written as-is; extension inferred from the label |
+| `bytes` | Written as binary |
+| `dict` | Serialized as JSON |
+| `list` | JSON, unless the label ends in `.csv`/`.xlsx` and items are dicts — then CSV or Excel |
+| pandas `DataFrame` | CSV (`.csv`) or Excel (`.xlsx`) based on the label extension |
+
+**`response.files` structure**
+
+```python
+result.files   # Dict[str, str] — {label: absolute_host_path}
+```
+
+Keys are the logical labels the agent chose (e.g. `"report"`, `"orders.csv"`). Values are absolute paths to the files on the host machine. Files persist for the lifetime of the process; copy them to a permanent location if you need to keep them.
+
+---
+
 ## How to retry on failure
 
 ```python
@@ -991,20 +1287,23 @@ On each failure, the error message is fed back to the LLM so it can generate cor
 
 ```python
 Agent(
-    tools:          Optional[List[Union[Connection, Callable, Any]]] = None,
-    chat:           Optional[Chat] = None,
-    memory:         Optional[Memory] = None,
-    llm:            Optional[str] = None,
-    light_llm:      Optional[str] = None,
-    heavy_llm:      Optional[str] = None,
-    code_llm:       Optional[str] = None,
-    vision_llm:     Optional[str] = None,
-    system_prompt:  Optional[str] = None,
-    on_confirm:     Optional[Callable] = None,
-    providers:      Optional[Dict[str, str]] = None,
-    verbose:        bool = False,
+    tools:            Optional[List[Union[Connection, Callable, Any]]] = None,
+    chat:             Optional[Chat] = None,
+    memory:           Optional[Memory] = None,
+    llm:              Optional[str] = None,
+    light_llm:        Optional[str] = None,
+    heavy_llm:        Optional[str] = None,
+    code_llm:         Optional[str] = None,
+    vision_llm:       Optional[str] = None,
+    system_prompt:    Optional[str] = None,
+    on_confirm:       Optional[Callable] = None,
+    providers:        Optional[Dict[str, str]] = None,
+    verbose:          bool = False,
     enable_prefilter: bool = False,
-    retry_count:    int = 1,
+    retry_count:      int = 1,
+    sandbox:          str = "auto",
+    sandbox_config:   Optional[Dict[str, Any]] = None,
+    files:            Optional[List[str]] = None,
 )
 ```
 
@@ -1024,6 +1323,9 @@ Agent(
 | `verbose` | `bool` | `False` | Print full execution traces |
 | `enable_prefilter` | `bool` | `False` | Use `light_llm` to pre-select tools |
 | `retry_count` | `int` | `1` | Max retries on non-fatal execution errors |
+| `sandbox` | `str` | `"auto"` | Execution isolation mode: `"auto"` \| `"docker"` \| `"local"` |
+| `sandbox_config` | `dict` | `None` | Resource limit overrides for Docker mode (see [sandbox guide](#how-to-configure-the-execution-sandbox)) |
+| `files` | `list[str]` | `None` | Absolute host paths to inject as read-only workspace files. In Docker mode each file is bind-mounted at `/workspace/<filename>`; in local mode the original paths are used. See [input file guide](#how-to-pass-input-files-to-the-agent-workspace). |
 
 ### Methods
 
@@ -1074,7 +1376,18 @@ class Response:
     cost_usd:   Optional[float]        # Estimated USD cost
     duration_ms: int                   # Wall-clock time in milliseconds
     trace:      Any                    # Full execution trace object
+    files:      Dict[str, str]         # Output files: {label: absolute_host_path}
 ```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `text` | `str` | Final answer text produced by the agent |
+| `status` | `bool` | `True` if the task succeeded, `False` otherwise |
+| `error` | `str \| None` | Error message when `status` is `False` |
+| `cost_usd` | `float \| None` | Estimated USD cost for this task |
+| `duration_ms` | `int` | Wall-clock execution time in milliseconds |
+| `trace` | `Any` | Full execution trace object |
+| `files` | `Dict[str, str]` | Output files saved during execution. Keys are logical labels (e.g. `"report"`, `"orders.csv"`); values are absolute host paths. Empty dict if no files were produced. See [output file guide](#how-to-extract-output-files-from-a-task-result). |
 
 ---
 
@@ -1313,17 +1626,18 @@ WebSearch(
 
 ```python
 APITool(
-    spec:     str,                              # URL or file path to OpenAPI 3.x spec
-    base_url: Optional[str] = None,            # Override spec's servers[0].url
-    headers:  Optional[Dict[str, str]] = None, # HTTP headers injected into every request
-    params:   Optional[Dict[str, str]] = None, # Query params injected into every request
-    name:     Optional[str] = None,            # Override auto-derived tool name
-    allow:    Optional[Union[str, List[str]]] = None,
-    confirm:  Union[bool, List[str], None] = True,
-    cache:    bool = False,                    # Cache compiled manifest to ~/delfhos/api_cache/
-    enrich:   bool = False,                    # Use LLM to improve descriptions/schemas
-    llm:      Optional[str] = None,            # Model for enrichment (required if enrich=True)
-    sample:   bool = True,                     # Capture real response schemas in background
+    spec:        str,                              # URL or file path to OpenAPI 3.x spec
+    base_url:    Optional[str] = None,            # Override spec's servers[0].url
+    headers:     Optional[Dict[str, str]] = None, # HTTP headers injected into every request
+    params:      Optional[Dict[str, str]] = None, # Query params injected into every request
+    path_params: Optional[Dict[str, str]] = None, # Path params injected into every request URL
+    name:        Optional[str] = None,            # Override auto-derived tool name
+    allow:       Optional[Union[str, List[str]]] = None,
+    confirm:     Union[bool, List[str], None] = True,
+    cache:       bool = False,                    # Cache compiled manifest to ~/delfhos/api_cache/
+    enrich:      bool = False,                    # Use LLM to improve descriptions/schemas
+    llm:         Optional[str] = None,            # Model for enrichment (required if enrich=True)
+    sample:      bool = True,                     # Capture real response schemas in background
 )
 ```
 
@@ -1332,7 +1646,8 @@ APITool(
 | `spec` | `str` | — | URL or file path to an OpenAPI 3.x JSON or YAML spec |
 | `base_url` | `str` | `None` | Override for the API base URL; auto-extracted from spec if absent |
 | `headers` | `dict` | `None` | HTTP headers injected into every request (e.g. `{"Authorization": "Bearer ..."}`, `{"X-API-Key": "..."}`) |
-| `params` | `dict` | `None` | Query params injected into every request (e.g. `{"api_key": "..."}`) |
+| `params` | `dict` | `None` | Query params appended to every request URL (e.g. `{"api_key": "..."}`) |
+| `path_params` | `dict` | `None` | URL path variables injected into every request. Values are substituted into path templates like `/api/{globalCompanyId}/...` and stripped from the agent-visible function signature so the LLM never sees or passes them. |
 | `name` | `str` | `None` | Custom label for this connection; auto-derived from spec title/hostname |
 | `allow` | `list` | `None` | Restrict which endpoints the agent can use (function names from `inspect()`) |
 | `confirm` | `bool \| list` | `True` | Require approval before listed endpoints execute |
@@ -1418,7 +1733,7 @@ for msg in chat:   # Iterate
 
 **Import:** `from delfhos import LLMConfig`
 
-Use `LLMConfig` to connect Delfhos to any OpenAI-compatible endpoint — local models (Ollama, LM Studio, vLLM), open-source providers (Groq, Together AI, Anyscale), or private enterprise servers. Pass a `LLMConfig` wherever a model string is accepted.
+Use `LLMConfig` to configure native providers (Google/OpenAI/Anthropic) and any OpenAI-compatible custom endpoint — local models (Ollama, LM Studio, vLLM), open-source providers (Groq, Together AI, Anyscale), or private enterprise servers. Pass a `LLMConfig` wherever a model string is accepted.
 
 ```python
 LLMConfig(
@@ -1426,7 +1741,8 @@ LLMConfig(
     base_url: Optional[str] = None,          # Base URL of the OpenAI-compatible API
     api_key:  Optional[str] = None,          # API key; falls back to OPENAI_API_KEY env var
     headers:  Optional[Dict[str, str]] = None, # Extra HTTP headers for every request
-    provider: str = "openai",                # Only "openai" (OpenAI-compatible) is supported
+    settings: Optional[Dict[str, Any]] = None, # Per-model generation params
+    provider: str = "auto",                  # auto|google|openai|anthropic
 )
 ```
 
@@ -1436,9 +1752,37 @@ LLMConfig(
 | `base_url` | `str` | `None` | API base URL; defaults to `OPENAI_BASE_URL` env var, then `https://api.openai.com/v1` |
 | `api_key` | `str` | `None` | Bearer token; defaults to `OPENAI_API_KEY`. Pass `"local"` for auth-free local servers |
 | `headers` | `Dict[str, str]` | `None` | Extra HTTP headers sent with every request. Use for enterprise servers that require tenant IDs, session tokens, or multiple auth values |
-| `provider` | `str` | `"openai"` | Protocol; only `"openai"` (OpenAI-compatible) is supported for custom endpoints |
+| `settings` | `Dict[str, Any]` | `None` | Per-model generation settings applied everywhere this config is used. Supported keys: `temperature`, `top_p`, `top_k`, `max_tokens`, `presence_penalty`, `frequency_penalty`, `stop` |
+| `provider` | `str` | `"auto"` | Provider routing mode: `"auto"`, `"google"`, `"openai"`, `"anthropic"` |
 
-For native Google / Anthropic models pass a model string directly (`"gemini-2.5-flash"`, `"claude-3-5-sonnet"`) — `LLMConfig` is only needed for OpenAI-compatible custom endpoints.
+### `settings` examples
+
+```python
+# Dict style
+LLMConfig(
+    model="gemini-2.5-flash",
+    settings={
+        "temperature": 0.8,
+        "top_k": 40,
+        "max_tokens": 1200,
+    },
+)
+
+# Custom endpoint style (OpenAI-compatible)
+LLMConfig(
+    model="llama3.2",
+    base_url="http://localhost:11434/v1",
+    settings={"temperature": 0.2},
+)
+
+# Fluent style
+cfg = LLMConfig(model="gemini-2.5-flash")
+cfg.with_settings(temperature=0.8, top_k=40, max_tokens=1200)
+```
+
+Aliases like `"top-k"` and `"max-tokens"` are normalized automatically.
+
+You can use native model strings directly, or use `LLMConfig` when you want per-model `settings` while still using native providers.
 
 ---
 
@@ -1516,14 +1860,21 @@ All errors extend `DelfhosConfigError` and display a structured message with an 
 |-------------|-------------|-------------|
 | `ModelConfigurationError` | `ERR-MODEL-*` | Invalid or missing LLM configuration |
 | `AgentConfirmationError` | `ERR-AGENT-*` | Invalid `confirm` or `on_confirm` value |
-| `MemorySetupError` | `ERR-MEM-*` | Memory database initialization failure |
-| `ToolExecutionError` | `ERR-TOOL-*` | Unhandled error during tool execution |
+| `MemorySetupError` | `ERR-MEM-001` | Memory database initialization failure |
+| `MemoryRetrievalError` | `ERR-MEM-002` | Embedding-based memory retrieval failed at runtime |
+| `ToolExecutionError` | `ERR-TOOL-001` | Unhandled error during tool execution |
+| `ToolDefinitionError` | `ERR-TOOL-002` | `@tool` function has an invalid schema |
+| `SQLSchemaError` | `ERR-TOOL-003` | SQL schema introspection failed for a connection |
 | `EnvironmentKeyError` | `ERR-ENV-*` | Required environment variable missing |
-| `ConnectionConfigurationError` | `ERR-CONN-*` | Invalid connection parameters (also raised by `APITool`) |
-| `LLMExecutionError` | `ERR-LLM-*` | LLM API call failed |
+| `ConnectionConfigurationError` | `ERR-CONN-001` | Invalid connection parameters (also raised by `APITool`) |
+| `ConnectionFileNotFoundError` | `ERR-CONN-002` | Required credentials file not found |
+| `LLMExecutionError` | `ERR-LLM-001` | LLM API call failed |
+| `CodeGenerationError` | `ERR-LLM-002` | LLM returned no executable code for the task |
+| `PrefilterError` | `ERR-LLM-003` | Prefilter LLM call failed; tool selection unavailable |
+| `ConversationCompressionError` | `ERR-LLM-004` | Chat-history summarization/compression failed |
+| `SandboxExecutionError` | `ERR-SANDBOX-001` | Generated Python code failed inside the execution sandbox |
 | `OptionalDependencyError` | `ERR-REQ-*` | Optional package not installed |
 | `ApprovalRejectedError` | `ERR-APPROVAL-*` | Human rejected the approval request |
-| `ToolDefinitionError` | `ERR-TOOL-*` | `@tool` function has an invalid schema |
 
 ---
 
@@ -1651,6 +2002,7 @@ When you call `agent.run("task")`, the following pipeline executes:
          - The task description
          - API documentation for the selected tools
          - The actions allowed by each connection's `allow` list
+         - Workspace file paths (if files= was provided)
        It responds with a Python code block.
 
 5. Approval gate (optional)
@@ -1659,10 +2011,17 @@ When you call `agent.run("task")`, the following pipeline executes:
        request is created. The agent waits until a human approves or rejects.
 
 6. Sandboxed execution
-   └── The generated code runs inside a restricted Python environment.
-       Only the tool library objects are available in the namespace.
-       Filesystem access, network access, and dangerous builtins are blocked.
-       A timeout is enforced.
+   └── The generated code runs inside an isolated execution environment.
+       If Docker is available (sandbox="auto" or sandbox="docker"), the code
+       runs in a disposable container with no network, read-only filesystem,
+       memory/CPU caps, and zero Linux capabilities.
+       All tool calls (gmail.send, sql.query, etc.) are proxied back to the
+       host process via a Unix socket, so API credentials never enter the container.
+       Workspace files (from files=) are bind-mounted at /workspace/<filename>:ro.
+       Output files written via add_to_output_files() are collected from /output/.
+       If Docker is unavailable, the local sandbox is used: restricted builtins,
+       import whitelist, and a timeout are enforced in-process.
+       A timeout is always enforced regardless of sandbox mode.
 
 7. Retry loop
    └── If execution raises an exception, the error is fed back to the LLM
@@ -1670,6 +2029,8 @@ When you call `agent.run("task")`, the following pipeline executes:
 
 8. Result composition and return
    └── The final output (stdout, return value, or error) is collected.
+       Any output files registered via add_to_output_files() are resolved to
+       host paths and stored in Response.files.
        Token counts and cost are calculated.
        The result is added to Chat history (if enabled).
        A Response object is returned.
@@ -1744,7 +2105,7 @@ This approach has several advantages:
 - **Retry with context:** When code fails, the error traceback is fed back to the LLM, which often generates a correct fix on the next attempt.
 - **Flexibility:** The LLM is not constrained to predefined call patterns; it can use any Python construct to accomplish the task.
 
-The sandbox restricts the execution environment: only the tool library objects are in scope, dangerous builtins are removed, and a timeout is enforced.
+The sandbox restricts the execution environment: only the tool library objects are in scope, dangerous builtins are removed, and a timeout is enforced. When Docker is available, the sandbox runs as a disposable container with full OS-level isolation (see [sandbox configuration](#how-to-configure-the-execution-sandbox)).
 
 ---
 
@@ -1790,7 +2151,12 @@ This keeps context size bounded at `~keep` messages regardless of conversation l
 
 3. **Registration:** Compiled (and optionally enriched) entries are registered into three internal stores — `TOOL_REGISTRY` (for the prefilter LLM), `TOOL_ACTION_SUMMARIES` (for prefilter ranking), and `COMPRESSED_API_DOCS` (for code generation prompts).
 
-4. **Execution:** The `APIExecutor` receives calls from the agent's generated code, maps function arguments to path/query/body parameters, injects auth headers or query params, and makes the HTTP request via `httpx`.
+4. **Execution:** The `APIExecutor` receives calls from the agent's generated code and maps every argument to the correct HTTP location based on the spec (`path`, `query`, `header`, or `body`). Before sending, it injects the three categories of auth/config values supplied at construction time:
+   - `headers` → merged into the request headers
+   - `params` → merged into the query string
+   - `path_params` → substituted into `{placeholder}` segments in the URL template (URL-encoded automatically)
+
+   The `desc` keyword argument used internally by the approval system is stripped before the request is built. The HTTP call is made via `httpx` with a 30-second timeout and redirect following enabled.
 
 5. **Background Schema Sampling** *(optional, `sample=True`, default):* After each successful API call that returns JSON, a daemon thread infers the exact response schema from the real data using `_infer_schema()` and saves it to `sampled_schemas.json` in the cache directory. On the next compile or cache load, sampled schemas are merged back into the manifest's `response_hint` fields — the agent's knowledge of each endpoint's output improves automatically with use, at zero token cost and zero latency.
 
@@ -1804,6 +2170,68 @@ When `enrich=True` is set on any `APITool`, the execution trace separates setup 
 Both are visible in the `Trace.summary()` output and accessible on `trace.api_enrichment` (`EnrichmentTrace`) and `trace.total_cost_usd`.
 
 The result: any API with an OpenAPI spec is fully usable as an agent tool with zero hand-written adapter code, progressively better response-schema knowledge, and transparent cost attribution.
+
+---
+
+## How the execution sandbox works
+
+Delfhos uses a layered sandbox with a pluggable backend system. The `SandboxExecutor` selects the strongest isolation available at runtime.
+
+### Two backends
+
+**Local backend (process-level)**
+
+Used when Docker is not available (or `sandbox="local"`). The generated code is compiled and `exec()`'d inside the host Python process with:
+
+- Restricted `__builtins__` — only a safe subset of built-in functions is exposed; `eval`, `exec`, `compile`, `open`, `__import__`, and other dangerous functions are removed or replaced
+- Import whitelist — only `asyncio`, `datetime`, `json`, `math`, `pathlib`, `re`, `statistics`, and `time` may be imported; any other `import` raises an error
+- Tool library injection — `gmail`, `sql`, `sheets`, etc. are pre-injected as async objects; the LLM code calls them directly
+- Timeout enforcement via `asyncio.wait_for()`
+
+**Docker backend (container-level)**
+
+Used when Docker is available (or `sandbox="docker"`). The generated code runs in a disposable container:
+
+```
+┌─────────────────── Host Process ────────────────────────┐
+│                                                          │
+│  Orchestrator ──▶ SandboxExecutor ──▶ DockerSandbox     │
+│       ↑                                      │          │
+│       │                          Unix Socket │          │
+│       │                          (RPC bridge)│          │
+│       │                                      ▼          │
+│       │                  ┌── Docker Container ──────┐   │
+│       │                  │  agent_runner.py          │   │
+│       │                  │    exec(agent_code)       │   │
+│       │◄─── tool result  │    proxy.gmail.send() ───┼───┘
+│       │                  │                           │
+│       │                  │  Resource limits:         │
+│       │                  │  • No network             │
+│       │                  │  • Read-only filesystem   │
+│       │                  │  • 512 MB RAM cap         │
+│       │                  │  • 1 CPU core             │
+│       │                  │  • PID limit 64           │
+│       │                  └───────────────────────────┘
+└──────────────────────────────────────────────────────────┘
+```
+
+The key architectural point: **API credentials never enter the container**. When agent code calls `await gmail.send(...)`, the call travels over a Unix socket to the host process, where the real Gmail library executes it (including any human approval step). The container receives only the serialized result.
+
+This means:
+- A container escape cannot exfiltrate OAuth tokens or database credentials
+- All existing approval flows work unchanged — the host pauses mid-execution as usual
+- The container can be fully network-isolated even though the agent makes API calls
+
+### Backend selection
+
+```python
+# At runtime: picks best available
+SandboxExecutor(mode="auto")   # Docker → local fallback
+SandboxExecutor(mode="docker") # Docker required
+SandboxExecutor(mode="local")  # Always in-process
+```
+
+The selection is logged: when Docker is unavailable in `"auto"` mode, a warning is emitted (`Docker unavailable — falling back to local backend`) so you can see which isolation level is active.
 
 ---
 

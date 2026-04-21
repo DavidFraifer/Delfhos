@@ -2,6 +2,7 @@ from typing import List, Union, Optional, Dict, Any, Literal, Callable
 from .core.orchestrator import Orchestrator
 from .types import TokenUsage
 from delfhos.memory import Chat, Memory
+from delfhos.errors import ConversationCompressionError, LLMExecutionError, MemoryRetrievalError
 from .config import configure_api_keys
 from .utils.logger import CORTEXLogger
 from .utils.console import console
@@ -102,6 +103,10 @@ class Agent:
                  verbose: bool = False,
                  enable_prefilter: bool = False,
                  retry_count: int = 1,
+                 sandbox: str = "auto",
+                 sandbox_config: Optional[Dict] = None,
+                 budget_usd: Optional[float] = None,
+                 files: Optional[List[str]] = None,
                  _explicit_llms: Optional[Dict[str, bool]] = None):
         """Initialize an Agent with tools and language models.
         
@@ -117,6 +122,8 @@ class Agent:
             auto_stop_timeout: Auto-stop after N seconds of inactivity (None = never auto-stop).
             on_confirm: Callback fn(request_id, message) for custom approval handling.
             system_prompt: Custom system instructions for code generation.
+            files: List of absolute host paths to inject as read-only workspace files (e.g. ["/data/report.csv"]).
+                   In Docker mode each file is bind-mounted at /workspace/<filename>; in local mode the host paths are used directly.
             chat: Chat instance for session memory with auto-summarization (set Chat.summarizer_llm for compression).
             memory: Memory instance for persistent semantic storage.
             enable_prefilter: If True, use LLM to pre-filter relevant tools before code generation (default: False, disabled).
@@ -245,9 +252,20 @@ class Agent:
         self.chat = chat
         self.memory = memory
         self.retry_count = retry_count
+        self.files = files or []
         
-        self.logger = CORTEXLogger() 
+        self.logger = CORTEXLogger()
         self.usage = TokenUsage()
+
+        # Budget guardrail: cumulative USD cost across every LLM call this agent makes.
+        # When total_cost_usd reaches budget_usd, run()/run_async() refuse to start new tasks.
+        if budget_usd is not None and budget_usd <= 0:
+            raise_error("AGT-002", context={"reason": "budget_usd must be > 0", "value": budget_usd})
+        self.budget_usd: Optional[float] = budget_usd
+        self.total_cost_usd: float = 0.0
+        self._budget_lock = threading.Lock()
+        self._budget_warned = False
+        self.logger.on_cost_accrued = self._on_cost_accrued
         
         self.orchestrator = Orchestrator(
             logger=self.logger,
@@ -267,7 +285,10 @@ class Agent:
             llm_config=self.get_llm_config_string(),
             verbose="high" if self.verbose else "low",
             enable_prefilter=enable_prefilter,
-            retry_count=self.retry_count
+            retry_count=self.retry_count,
+            sandbox=sandbox,
+            sandbox_config=sandbox_config,
+            files=self.files,
         )
         self.running = False
         self.last_called = None  # Track when the agent was last used
@@ -291,6 +312,51 @@ class Agent:
 
     def _update_trace(self, trace: Trace):
         self._last_trace = trace
+
+    def _on_cost_accrued(self, cost_usd: float):
+        """Accumulate per-call cost reported by the logger and warn once if over budget."""
+        if not cost_usd:
+            return
+        with self._budget_lock:
+            self.total_cost_usd += float(cost_usd)
+            if (
+                self.budget_usd is not None
+                and not self._budget_warned
+                and self.total_cost_usd >= self.budget_usd
+            ):
+                self._budget_warned = True
+                console.warning(
+                    "Budget exceeded",
+                    f"Spent ${self.total_cost_usd:.4f} of ${self.budget_usd:.4f} limit; new runs will be blocked until reset.",
+                    agent_id=self.agent_id,
+                )
+
+    def _check_budget(self):
+        """Block starting a new task if the cumulative budget has been consumed."""
+        if self.budget_usd is None:
+            return
+        with self._budget_lock:
+            spent = self.total_cost_usd
+        if spent >= self.budget_usd:
+            raise_error("AGT-006", context={
+                "agent_id": self.agent_id,
+                "budget_usd": round(self.budget_usd, 6),
+                "spent_usd": round(spent, 6),
+            })
+
+    def reset_budget(self, budget_usd: Optional[float] = None):
+        """Reset accumulated cost, optionally updating the limit.
+
+        Args:
+            budget_usd: New budget limit in USD. Pass None to keep the current limit.
+        """
+        with self._budget_lock:
+            self.total_cost_usd = 0.0
+            self._budget_warned = False
+            if budget_usd is not None:
+                if budget_usd <= 0:
+                    raise_error("AGT-002", context={"reason": "budget_usd must be > 0", "value": budget_usd})
+                self.budget_usd = budget_usd
 
     @property
     def retry_count(self) -> int:
@@ -673,7 +739,7 @@ class Agent:
             new_summary = result.strip()
             self.chat.apply_compression(new_summary, compressed_count)
                 
-        except Exception as e:
+        except (LLMExecutionError, ConversationCompressionError, RuntimeError, ValueError) as e:
             console.error("CHAT COMPRESSION", f"Summarization failed: {str(e)}", agent_id=self.agent_id)
 
     async def _session_close_boundary(self):
@@ -758,7 +824,7 @@ Never return null, "none", or plain text."""
             except json.JSONDecodeError:
                 console.error("MEMORY EXTRACTION", "Failed to parse JSON response", agent_id=self.agent_id)
                 
-        except Exception as e:
+        except (LLMExecutionError, MemoryRetrievalError, RuntimeError, ValueError) as e:
             console.error("MEMORY EXTRACTION", f"Extraction failed: {str(e)}", agent_id=self.agent_id)
 
     async def run_async(self, message: Union[str, List[Dict[str, str]]], max_history: int = 10):
@@ -796,7 +862,9 @@ Never return null, "none", or plain text."""
         # Auto-start agent if not already running (suppress startup message since task box already printed)
         if not self.running:
             self.start(suppress_startup_message=True)
-        
+
+        self._check_budget()
+
         task_id = self._prepare_run_task()
         
         if self.chat is not None:
@@ -864,7 +932,9 @@ Never return null, "none", or plain text."""
         # Auto-start agent if not already running (suppress startup message since task box already printed)
         if not self.running:
             self.start(suppress_startup_message=True)
-        
+
+        self._check_budget()
+
         task_id = self._prepare_run_task()
         
         if self.chat is not None:
@@ -934,7 +1004,18 @@ Never return null, "none", or plain text."""
                 "heavy_llm": self.heavy_llm,
                 "summarizer_llm": self._get_summarizer_llm()
             },
-            "logging_enabled": self.logger is not None
+            "logging_enabled": self.logger is not None,
+            "budget": {
+                "limit_usd": self.budget_usd,
+                "spent_usd": round(self.total_cost_usd, 6),
+                "remaining_usd": (
+                    round(max(self.budget_usd - self.total_cost_usd, 0.0), 6)
+                    if self.budget_usd is not None else None
+                ),
+                "exceeded": (
+                    self.budget_usd is not None and self.total_cost_usd >= self.budget_usd
+                ),
+            }
         }
         
         # Tool information

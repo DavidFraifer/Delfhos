@@ -17,8 +17,9 @@ from questionary import Style
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+from rich.rule import Rule
 from delfhos.errors import ApprovalRejectedError
-from ..utils.console import console
+from ..utils.console import console, BRAND_ZINC, BRAND_ZINC_BRIGHT, BRAND_STARK, BRAND_AMBER
 
 
 class ApprovalRequest:
@@ -118,7 +119,7 @@ class ApprovalManager:
             return text[:max_len - 3] + "..."
         return text
 
-    def _build_stdin_preview(self, request: ApprovalRequest) -> Dict[str, str]:
+    def _build_stdin_preview(self, request: ApprovalRequest) -> Dict[str, Any]:
         tool_name = "unknown"
         method_name = None
         args = {}
@@ -130,32 +131,27 @@ class ApprovalManager:
 
         if isinstance(context_obj, dict):
             tool_name = str(context_obj.get("tool") or tool_name)
-            method_name = context_obj.get("method")
+            method_name = context_obj.get("method") or context_obj.get("action_name")
 
             reserved_keys = {
-                "action",
-                "tool",
-                "method",
-                "operation_kind",
-                "confirm_policy",
-                "connection",
+                "action", "tool", "method", "action_name", "operation_kind",
+                "confirm_policy", "agent_confirm_policy", "tool_confirm_policy",
+                "hard_override", "connection",
             }
             args = {k: v for k, v in context_obj.items() if k not in reserved_keys}
 
-            # Prefer readable argument blocks when present.
+            # Prefer explicit readable blocks when present.
             if isinstance(context_obj.get("draft"), dict):
-                args = context_obj.get("draft")
+                args = context_obj["draft"]
             elif isinstance(context_obj.get("params"), dict):
-                args = context_obj.get("params")
+                args = context_obj["params"]
 
         target = f"{tool_name}.{method_name}" if method_name else tool_name
-        args_str = ", ".join(f"{k}={self._short_repr(v)}" for k, v in args.items())
-        code_preview = f"await {target}({args_str})" if args_str else f"await {target}(...)"
-
         return {
-            "tool": target,
-            "arguments": args_str or "(not provided)",
-            "code": code_preview,
+            "target": target,
+            "tool": tool_name,
+            "method": method_name,
+            "args": args,
         }
 
     async def _stdin_confirm(self, request: ApprovalRequest) -> bool:
@@ -164,21 +160,36 @@ class ApprovalManager:
         rich_console = console.console
         loop = asyncio.get_running_loop()
 
-        # Display approval details
-        details_table = Table.grid(padding=(0, 1))
-        details_table.add_column(style="bold cyan", justify="right")
-        details_table.add_column(style="white")
-        details_table.add_row("Tool", preview["tool"])
-        details_table.add_row("Arguments", preview["arguments"])
-        details_table.add_row("Code", preview["code"])
+        from rich.console import Group
+
+        # Header: operation being approved
+        header = Text()
+        header.append(preview["target"], style=f"bold {BRAND_STARK}")
+
+        # Per-parameter table — one row per argument
+        args = preview["args"]
+        if args:
+            params_table = Table.grid(padding=(0, 2))
+            params_table.add_column(style=f"bold {BRAND_ZINC_BRIGHT}", justify="right", no_wrap=True)
+            params_table.add_column(style=BRAND_STARK, overflow="fold")
+            for k, v in args.items():
+                raw = v if isinstance(v, str) else self._short_repr(v, max_len=200)
+                # Truncate very long values with a clear indicator
+                if len(raw) > 200:
+                    raw = raw[:197] + "…"
+                params_table.add_row(k, raw)
+            body = Group(header, Text(""), params_table)
+        else:
+            body = Group(header, Text(""), Text("(no parameters)", style=BRAND_ZINC))
 
         rich_console.print("")
         rich_console.print(
             Panel(
-                details_table,
-                title="[bold yellow]Approval Required[/bold yellow]",
-                border_style="yellow",
+                body,
+                title=f"[bold {BRAND_AMBER}]  Approval required[/bold {BRAND_AMBER}]",
+                border_style=BRAND_AMBER,
                 expand=False,
+                padding=(1, 2),
             )
         )
         rich_console.print("")
@@ -463,7 +474,7 @@ class ApprovalManager:
         
         if request.status == "approved":
             console.success(
-                "✅ APPROVED",
+                "APPROVED",
                 f"Request: {request.request_id} | Response: {request.response}",
                 task_id=request.task_id,
                 agent_id=request.agent_id

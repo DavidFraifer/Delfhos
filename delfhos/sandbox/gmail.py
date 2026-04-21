@@ -121,8 +121,5 @@ class MockEmail(BaseConnection):
         return None
         
     def mock_send_email(self, to: str, subject: str, body: str):
-        print(f"\\n[SANDBOX EMAIL] Pretending to send email to {to}...")
-        print(f"Subject: {subject}")
-        print(f"Body: {body[:100]}...\\n")
         self._sent_emails.append({"to": to, "subject": subject, "body": body})
         return f"Mock email sent to {to} successfully."

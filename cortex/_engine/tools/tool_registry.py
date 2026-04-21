@@ -927,7 +927,8 @@ def get_available_actions_for_connections(connections: List[Any], custom_tools: 
     result = {}
     
     for conn in connections:
-        tool_name = conn.tool_name.lower() if hasattr(conn, 'tool_name') else None
+        raw_tool_name = getattr(conn, 'tool_name', None)
+        tool_name = raw_tool_name.lower() if raw_tool_name else None
         if not tool_name:
             continue
         

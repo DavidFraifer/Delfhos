@@ -28,7 +28,10 @@ Custom tools::
 
 from typing import Any, Callable, Dict, List, Optional, Union
 
+__version__: str
+
 from delfhos.memory import Chat as Chat, Memory as Memory
+from delfhos.llm_config import LLMConfig as LLMConfig
 from delfhos.tool import (
     DelfhosToolWarning as DelfhosToolWarning,
     ToolException as ToolException,
@@ -42,6 +45,26 @@ from delfhos.tools import (
     SQL as SQL,
     Sheets as Sheets,
     WebSearch as WebSearch,
+)
+from delfhos.errors import (
+    DelfhosConfigError as DelfhosConfigError,
+    ModelConfigurationError as ModelConfigurationError,
+    AgentConfirmationError as AgentConfirmationError,
+    MemorySetupError as MemorySetupError,
+    MemoryRetrievalError as MemoryRetrievalError,
+    ToolExecutionError as ToolExecutionError,
+    EnvironmentKeyError as EnvironmentKeyError,
+    ToolDefinitionError as ToolDefinitionError,
+    OptionalDependencyError as OptionalDependencyError,
+    ConnectionConfigurationError as ConnectionConfigurationError,
+    ConnectionFileNotFoundError as ConnectionFileNotFoundError,
+    LLMExecutionError as LLMExecutionError,
+    CodeGenerationError as CodeGenerationError,
+    PrefilterError as PrefilterError,
+    SandboxExecutionError as SandboxExecutionError,
+    SQLSchemaError as SQLSchemaError,
+    ConversationCompressionError as ConversationCompressionError,
+    ApprovalRejectedError as ApprovalRejectedError,
 )
 
 class _Response:
@@ -119,6 +142,9 @@ class Agent:
         providers: Optional[Dict[str, str]] = None,
         verbose: bool = False,
         enable_prefilter: bool = False,
+        sandbox: str = "auto",
+        sandbox_config: Optional[Dict[str, Any]] = None,
+        budget_usd: Optional[float] = None,
     ) -> None:
         """Initialize an Agent with tools and language models.
 
@@ -281,6 +307,19 @@ class Agent:
         """Unique identifier for this agent instance."""
         ...
 
+    @property
+    def total_cost_usd(self) -> float:
+        """Cumulative LLM cost in USD across all run() calls on this agent."""
+        ...
+
+    def reset_budget(self, budget_usd: Optional[float] = None) -> None:
+        """Reset accumulated cost to $0, optionally updating the spending limit.
+
+        Args:
+            budget_usd: New limit in USD. Pass None to keep the current limit.
+        """
+        ...
+
     # ─── Context manager support ─────────────────────────────────────
 
     def __enter__(self) -> "Agent": ...
@@ -291,12 +330,14 @@ class Agent:
 
 
 __all__ = [
+    "__version__",
     "Agent",
     "tool",
     "ToolException",
     "DelfhosToolWarning",
     "Chat",
     "Memory",
+    "LLMConfig",
     "Gmail",
     "SQL",
     "Sheets",
@@ -304,4 +345,23 @@ __all__ = [
     "Calendar",
     "Docs",
     "WebSearch",
+    # Errors
+    "DelfhosConfigError",
+    "ModelConfigurationError",
+    "AgentConfirmationError",
+    "MemorySetupError",
+    "MemoryRetrievalError",
+    "ToolExecutionError",
+    "EnvironmentKeyError",
+    "ToolDefinitionError",
+    "OptionalDependencyError",
+    "ConnectionConfigurationError",
+    "ConnectionFileNotFoundError",
+    "LLMExecutionError",
+    "CodeGenerationError",
+    "PrefilterError",
+    "SandboxExecutionError",
+    "SQLSchemaError",
+    "ConversationCompressionError",
+    "ApprovalRejectedError",
 ]

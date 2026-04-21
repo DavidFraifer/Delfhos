@@ -70,6 +70,7 @@ class APITool(BaseConnection):
     Supported auth methods:
       - Header-based: ``headers={"Authorization": "Bearer ..."}``
       - Query param-based: ``params={"api_key": "..."}``
+      - Path param injection: ``path_params={"globalCompanyId": "myco"}``
 
     Args:
         spec:        URL or file path to an OpenAPI 3.x JSON/YAML specification.
@@ -81,6 +82,12 @@ class APITool(BaseConnection):
         params:      Dict of query parameters injected into every request
                      (e.g., ``{"api_key": "..."}``). Use this for APIs that
                      authenticate via URL params rather than headers.
+        path_params: Dict of URL path parameters injected into every request.
+                     Use this for path variables whose value is fixed at
+                     configuration time (e.g., ``{"globalCompanyId": "myco"}``).
+                     These are substituted into URL templates like
+                     ``/api/{globalCompanyId}/...`` and stripped from the
+                     agent-visible function signature.
         name:        Custom label for this connection (default: auto-derived from spec title).
         allow:       Restrict which endpoints are exposed to the agent.
                      Pass a list of function names as shown by ``APITool.inspect()``.
@@ -129,6 +136,7 @@ class APITool(BaseConnection):
         base_url: Optional[str] = None,
         headers: Optional[Dict[str, str]] = None,
         params: Optional[Dict[str, str]] = None,
+        path_params: Optional[Dict[str, str]] = None,
         name: Optional[str] = None,
         allow: Optional[Union[str, List[str]]] = None,
         confirm: Union[bool, List[str], None] = True,
@@ -141,6 +149,7 @@ class APITool(BaseConnection):
         self.base_url_override = base_url
         self.headers = headers or {}
         self.params = params or {}
+        self.path_params = path_params or {}
         self.cache = cache
         self.enrich = enrich
         self.llm = llm
@@ -200,7 +209,7 @@ class APITool(BaseConnection):
         started = time.perf_counter()
         _log_connection("API INSPECT", f"{self.api_tool_name}: preparing manifest")
 
-        auth_param_names = set(self.headers.keys()) | set(self.params.keys())
+        auth_param_names = set(self.headers.keys()) | set(self.params.keys()) | set(self.path_params.keys())
 
         compiler = OpenAPICompiler(
             tool_name=self.api_tool_name,
@@ -283,7 +292,7 @@ class APITool(BaseConnection):
 
         # Collect auth param names so they're stripped from LLM-visible signatures.
         # The executor auto-injects these — the LLM should never see or pass them.
-        auth_param_names = set(self.headers.keys()) | set(self.params.keys())
+        auth_param_names = set(self.headers.keys()) | set(self.params.keys()) | set(self.path_params.keys())
 
         compiler = OpenAPICompiler(
             tool_name=self.api_tool_name,
@@ -368,6 +377,7 @@ class APITool(BaseConnection):
             compiled_tools=selected_tools,
             headers=self.headers,
             params=self.params,
+            path_params=self.path_params,
             sample=self.sample,
             compiler=compiler if self.sample else None,
         )

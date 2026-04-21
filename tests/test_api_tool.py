@@ -308,12 +308,12 @@ class TestCaching:
     def test_cache_roundtrip(self, tmp_path, monkeypatch):
         monkeypatch.setattr("cortex._engine.api.compiler.CACHE_DIR", tmp_path)
 
-        compiler = OpenAPICompiler("petstore", "inline")
+        compiler = OpenAPICompiler("petstore", "inline", cache=True)
         compiler._cache_dir = tmp_path / "petstore_test"
         manifest = compiler.compile(spec=PETSTORE_SPEC)
 
         # Load from cache
-        compiler2 = OpenAPICompiler("petstore", "inline")
+        compiler2 = OpenAPICompiler("petstore", "inline", cache=True)
         compiler2._cache_dir = tmp_path / "petstore_test"
         cached = compiler2.load_cache()
 
@@ -322,7 +322,7 @@ class TestCaching:
         assert len(cached["tools"]) == len(manifest["tools"])
 
     def test_clear_cache(self, tmp_path):
-        compiler = OpenAPICompiler("petstore", "inline")
+        compiler = OpenAPICompiler("petstore", "inline", cache=True)
         compiler._cache_dir = tmp_path / "petstore_test"
         compiler.compile(spec=PETSTORE_SPEC)
 

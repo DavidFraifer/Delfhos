@@ -2,7 +2,7 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Callable
 from ..config.pricing import calculate_cost_usd, get_user_pricing_path, has_pricing_for_model
 from .console import console
 
@@ -15,6 +15,9 @@ class CORTEXLogger:
             self.log_file.parent.mkdir(parents=True, exist_ok=True)
         self.active_tasks: Dict[str, Dict[str, Any]] = {}
         self._warned_unpriced_models = set()
+        # Optional callback fired each time an LLM call accrues cost (USD).
+        # Used by Agent to enforce budget guardrails across tasks.
+        self.on_cost_accrued: Optional[Callable[[float], None]] = None
         
     def start_task(self, task_id: str, message: str, agent_id: str = "unknown"):
         if task_id in self.active_tasks:
@@ -70,6 +73,11 @@ class CORTEXLogger:
                 if self.active_tasks[task_id]["total_cost_usd"] is None:
                     self.active_tasks[task_id]["total_cost_usd"] = 0.0
                 self.active_tasks[task_id]["total_cost_usd"] += call_cost_usd
+                if self.on_cost_accrued is not None:
+                    try:
+                        self.on_cost_accrued(call_cost_usd)
+                    except Exception:
+                        pass
             if image_count:
                 self.active_tasks[task_id].setdefault("image_calls", 0)
                 self.active_tasks[task_id].setdefault("images_used", 0)

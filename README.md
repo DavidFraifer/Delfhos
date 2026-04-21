@@ -64,6 +64,38 @@ Or just run the included example:
 python examples/hello_delfhos.py
 ```
 
+**What it looks like end-to-end:**
+
+```
+Input ──────────────────────────────────────────────────────────
+"Read my unread emails. If any mention a support ticket,
+ look it up in the database and reply with a short summary of
+ the customer's name, their open tickets, and their total order value."
+
+Agent ──────────────────────────────────────────────────────────
+  [tool]  MockEmail.list_unread_emails()
+  [tool]  MockDatabase.query("SELECT * FROM tickets WHERE id = 'TCK8843'")
+  [tool]  MockDatabase.query("SELECT * FROM users WHERE email = 'alice@example.com'")
+  [tool]  MockDatabase.query("SELECT SUM(amount) FROM orders WHERE user_id = 1")
+  [tool]  MockEmail.send_email(to="alice@example.com", subject="Re: Overdue invoice")
+
+Output ─────────────────────────────────────────────────────────
+Sent a reply to alice@example.com.
+
+Summary:
+  Customer:     Alice (alice@example.com)
+  Open tickets: TCK8843 — "Invoice #1042 overdue" (open)
+  Total orders: $2,340.00
+```
+
+```python
+r = agent.run("...")
+print(r.text)        # "Sent a reply to alice@example.com. Summary: ..."
+print(r.status)      # True
+print(r.cost_usd)    # 0.00021
+print(r.duration_ms) # 3847
+```
+
 ---
 
 ## Custom tools
@@ -127,6 +159,14 @@ internal = APITool(
     headers={"Authorization": "Bearer sk_..."},
 )
 
+# Auto-inject fixed path variables (e.g., company/org IDs baked into URLs)
+adobe = APITool(
+    spec="./adobe_analytics.json",
+    base_url="https://analytics.adobe.io",
+    headers={"Authorization": "Bearer ...", "x-api-key": "..."},
+    path_params={"globalCompanyId": "mycompany"},  # injected into /api/{globalCompanyId}/...
+)
+
 # Inspect available endpoints
 print(petstore.inspect())  # Compact: endpoint names
 print(petstore.inspect(verbose=True))  # Detailed: methods, paths, descriptions
@@ -138,7 +178,7 @@ agent.run("List all pets and create a new one named 'Buddy'")
 **Features:**
 - Automatic endpoint compilation from OpenAPI specs (no LLM needed)
 - Path, query, and request body parameters extracted and typed
-- `headers=` and `params=` injected automatically — agent never sees credentials
+- `headers=`, `params=`, and `path_params=` injected automatically — agent never sees credentials or fixed path variables
 - `$ref` resolution for complex schemas
 - `allow=` and `confirm=` support for fine-grained access control
 - Caching: specs compiled once and cached to `~/delfhos/api_cache/`

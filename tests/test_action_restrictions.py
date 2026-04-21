@@ -17,7 +17,7 @@ def test_native_methods_are_discoverable_via_inspect_only():
     assert not hasattr(WebSearch, "allowed_actions")
 
     # Native method discovery should flow through inspect().
-    ws = WebSearch()
+    ws = WebSearch(llm="gemini-2.0-flash")
     assert ws.inspect()["methods"] == ["search"]
 
 
@@ -44,7 +44,7 @@ def test_dynamic_action_mapping_for_dynamic_tools():
 
 
 def test_native_inspect_structure_and_printing():
-    ws = WebSearch()
+    ws = WebSearch(llm="gemini-2.0-flash")
 
     compact = ws.inspect()
     assert compact["tool"] == "websearch"

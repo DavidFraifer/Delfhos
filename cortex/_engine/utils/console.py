@@ -6,12 +6,30 @@ from contextlib import contextmanager
 from enum import Enum
 from typing import Optional, Dict
 
-from rich.console import Console, Group
-from rich.progress import Progress, SpinnerColumn, TextColumn
-from rich.panel import Panel
-from rich.table import Table
-from rich.markdown import Markdown
+from rich.align import Align
+from rich.box import ROUNDED
 from rich.columns import Columns
+from rich.console import Console, Group
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.table import Table
+from rich.text import Text
+
+
+# ── Delfhos brand palette (Code-act Framework v2.0.0) ─────────────
+# Monochrome metallic finish: carbon / graphite / stark white / muted zinc.
+# Soft amber is the sole warm accent, reserved for warnings & cursors.
+# Mint green is the success accent, reserved for ticks and completions.
+BRAND_CARBON      = "#050505"  # Forged Carbon Matte  (backgrounds)
+BRAND_GRAPHITE    = "#121212"  # Graphite Anodized    (panels)
+BRAND_STARK       = "#FFFFFF"  # Stark Matte White    (primary text, logo, brand accent)
+BRAND_ZINC        = "#717983"  # Muted Zinc Neutral   (metadata, annotations, dim)
+BRAND_ZINC_BRIGHT = "#A8ADB5"  # brighter zinc        (secondary text)
+BRAND_AMBER       = "#FF7983"  # Soft Amber           (warnings, cursors)
+BRAND_ERROR       = "#E05561"  # desaturated red      (errors — stays tonally close to amber)
+BRAND_SUCCESS     = "#D4D7DB"  # near-stark silver    (success, subtle)
+BRAND_MINT        = "#4EC994"  # Mint Green           (ticks, success accents)
 
 
 DEFAULT_ERROR_HINT = (
@@ -102,8 +120,8 @@ class ProfessionalConsole:
 
         self.progress = Progress(
             TextColumn("  "),
-            SpinnerColumn(spinner_name="dots", style="bright_cyan", speed=1.2),
-            TextColumn("{task.description}"),
+            SpinnerColumn(spinner_name="dots", style=BRAND_AMBER, speed=1.2),
+            TextColumn(f"[{BRAND_ZINC_BRIGHT}]{{task.description}}[/{BRAND_ZINC_BRIGHT}]"),
             console=self.console,
             transient=True
         )
@@ -151,17 +169,20 @@ class ProfessionalConsole:
             self._progress_running = False
 
     def _get_color(self, level: LogLevel) -> str:
+        # Monochrome metallic palette. Only warnings/errors carry warm hue
+        # (soft amber / desaturated red) — everything else lives on the
+        # carbon → zinc → stark-white axis, matching the brand system.
         colors = {
-            LogLevel.INFO: "cyan",
-            LogLevel.SUCCESS: "green",
-            LogLevel.WARNING: "yellow",
-            LogLevel.ERROR: "red",
-            LogLevel.DEBUG: "bright_black",
-            LogLevel.TASK: "blue",
-            LogLevel.SYSTEM: "magenta",
-            LogLevel.TOOL: "bright_yellow"
+            LogLevel.INFO:    BRAND_ZINC_BRIGHT,
+            LogLevel.SUCCESS: BRAND_MINT,
+            LogLevel.WARNING: BRAND_AMBER,
+            LogLevel.ERROR:   BRAND_ERROR,
+            LogLevel.DEBUG:   BRAND_ZINC,
+            LogLevel.TASK:    BRAND_STARK,
+            LogLevel.SYSTEM:  BRAND_ZINC_BRIGHT,
+            LogLevel.TOOL:    BRAND_ZINC_BRIGHT,
         }
-        return colors.get(level, "white")
+        return colors.get(level, BRAND_STARK)
 
     def print(self, level: LogLevel, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None):
         with self._lock:
@@ -185,12 +206,12 @@ class ProfessionalConsole:
                 time_str = f"+{elapsed_ms}ms"
             else:
                 time_str = f"+{elapsed_ms / 1000:.2f}s"
-            parts.append(f"[grey50]{time_str:>10}[/grey50]")
+            parts.append(f"[#717983]{time_str:>10}[/#717983]")
 
         parts.append(f"  [{color}]{symbol}[/{color}] {message}")
 
         if details:
-            parts.append(f"  [grey50]{details}[/grey50]")
+            parts.append(f"  [#717983]{details}[/#717983]")
 
         self.console.print("".join(parts))
 
@@ -329,14 +350,21 @@ class ProfessionalConsole:
         self.print(LogLevel.TOOL, message, details, task_id, agent_id)
 
     def print_task_box(self, task_message: str):
-        """Display the user's task in a clean, minimal box."""
-        display_msg = task_message if len(task_message) < 200 else task_message[:197] + "..."
+        """Display the user's task in a clean, accented box."""
+        display_msg = task_message if len(task_message) < 400 else task_message[:397] + "..."
+
+        body = Text()
+        body.append("❯ ", style=f"bold {BRAND_STARK}")
+        body.append(display_msg, style=BRAND_STARK)
+
         task_panel = Panel(
-            display_msg,
-            title="[bold]Task[/bold]",
-            border_style="dim",
+            body,
+            title=f"[bold {BRAND_STARK}]Task[/bold {BRAND_STARK}]",
+            title_align="left",
+            border_style=BRAND_ZINC,
+            box=ROUNDED,
             expand=False,
-            padding=(0, 2)
+            padding=(0, 2),
         )
         with self._lock:
             self.console.print()
@@ -348,13 +376,118 @@ class ProfessionalConsole:
             sys.stdout.flush()
             sys.stderr.flush()
 
+    # Delfhos ASCII logo (matches delfhosLogo.png)
+    _LOGO_LINES = [
+        "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
+        "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
+        "@@@@@@              @@@@@@@@@@@@@@",
+        "@@@@@@@@              @@@@@@@@@@@@",
+        "@@@@@@@@@@              @@@@@@@@@@",
+        "@@@@@@@@@@@ @@@@@        @@@@@@@@@",
+        "@@@@@@@@@   @@@@@@@        @@@@@@@",
+        "@@@@@@@     @@@@@@@@@        @@@@@",
+        "@@@@@       @@@@@@@@@@@        @@@",
+        "@@@@@@@     @@@@@@@@@        @@@@@",
+        "@@@@@@@@@   @@@@@@@        @@@@@@@",
+        "@@@@@@@@@@@ @@@@@         @@@@@@@@",
+        "@@@@@@@@@@              @@@@@@@@@@",
+        "@@@@@@@@              @@@@@@@@@@@@",
+        "@@@@@@              @@@@@@@@@@@@@@",
+        "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
+        "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
+    ]
+
+    def print_welcome_banner(
+        self,
+        version: str,
+        llm_config: Optional[str] = None,
+        tools: Optional[list] = None,
+        agent_id: Optional[str] = None,
+        cwd: Optional[str] = None,
+    ):
+        """Render a Claude-Code-style welcome banner with the Delfhos ASCII logo."""
+        tool_list = tools or []
+        tool_count = len(tool_list)
+        model_str = (llm_config or "not configured").strip()
+
+        # ── Left column: ASCII logo ───────────────────────────────────
+        logo_text = Text()
+        for i, line in enumerate(self._LOGO_LINES):
+            if i > 0:
+                logo_text.append("\n")
+            logo_text.append(line, style=f"bold {BRAND_STARK}")
+
+        # ── Right column: name chip + info rows ───────────────────────
+        header = Text()
+        header.append("Delfhos", style=f"bold {BRAND_STARK}")
+        header.append("  ")
+        # Stark-white chip on graphite — matches the "Stark Matte White" swatch.
+        header.append(f" v{version} ", style=f"bold {BRAND_CARBON} on {BRAND_STARK}")
+
+        if tool_count == 0:
+            tools_line = "none"
+        elif tool_count <= 5:
+            tools_line = ", ".join(tool_list)
+        else:
+            tools_line = ", ".join(tool_list[:5]) + f"  +{tool_count - 5} more"
+
+        info_rows = Table.grid(padding=(0, 2))
+        info_rows.add_column(style=BRAND_ZINC, no_wrap=True)
+        info_rows.add_column(style=BRAND_STARK, overflow="fold")
+        info_rows.add_row("Model", model_str)
+        info_rows.add_row("Tools", f"{tool_count} connected  [{BRAND_ZINC}]·[/{BRAND_ZINC}]  {tools_line}")
+        if agent_id:
+            info_rows.add_row("Agent", f"[dim]{agent_id}[/dim]")
+        if cwd:
+            info_rows.add_row("Cwd", f"[dim]{cwd}[/dim]")
+
+        # Vertically center the info block beside the logo.
+        # Logo is 17 lines; info block ~5 lines → pad ~6 lines from top.
+        logo_height = len(self._LOGO_LINES)
+        info_height = 2 + info_rows.row_count + (1 if agent_id else 0) + (1 if cwd else 0)
+        top_pad = max(0, (logo_height - info_height) // 2)
+        right_col = Group(Text("\n" * (top_pad - 1)) if top_pad > 0 else Text(""), header, Text(""), info_rows)
+
+        # ── Side-by-side: logo | info ─────────────────────────────────
+        side_by_side = Table.grid(padding=(0, 4))
+        side_by_side.add_column(no_wrap=True)
+        side_by_side.add_column()
+        side_by_side.add_row(logo_text, right_col)
+
+        # ── Bottom hint bar ───────────────────────────────────────────
+        hint = Text()
+        sep_style = BRAND_ZINC
+        cmd_style = f"bold {BRAND_STARK}"
+        hint.append("/help", style=cmd_style)
+        hint.append("  ·  ", style=sep_style)
+        hint.append("/clear", style=cmd_style)
+        hint.append("  ·  ", style=sep_style)
+        hint.append("/stop", style=cmd_style)
+        hint.append("  ·  ", style=sep_style)
+        hint.append("/exit", style=cmd_style)
+
+        body = Group(side_by_side, Text(""), hint)
+
+        banner = Panel(
+            body,
+            border_style=BRAND_ZINC,
+            box=ROUNDED,
+            expand=False,
+            padding=(1, 2),
+        )
+
+        with self._lock:
+            self.console.print()
+            self.console.print(banner)
+            self.console.print()
+
     def task_summary(self, task_id: str, duration: float, tokens: dict, status: str, final_message: str = None, computational_time: float = None, wait_time: float = None, agent_id: Optional[str] = None, task_status: str = "success", tools: list = None, llm_config: Optional[str] = None):
         # Stop all spinners before printing so the progress renderer doesn't
         # race with console.print() calls and cause ghost spinner lines.
         self.loading_stop_all()
 
         status_symbol = "✓" if task_status == "success" else "✗"
-        status_color = "green" if task_status == "success" else "red"
+        status_color = BRAND_MINT if task_status == "success" else BRAND_ERROR
         status_word = "Completed" if task_status == "success" else "Failed"
 
         def _as_int(value) -> int:
@@ -378,7 +511,13 @@ class ProfessionalConsole:
         if cost_val is not None:
             stats.append(f"${float(cost_val):.4f}")
 
-        compact_line = f"  [{status_color}]{status_symbol}[/{status_color}] [bold]{status_word}[/bold]  [grey50]{'  ·  '.join(stats)}[/grey50]"
+        sep = f"  [{BRAND_ZINC}]·[/{BRAND_ZINC}]  "
+        compact_line = (
+            f"  [{status_color}]{status_symbol}[/{status_color}] "
+            f"[bold {status_color}]{status_word}[/bold {status_color}]"
+            f"  [{BRAND_ZINC}]│[/{BRAND_ZINC}]  "
+            f"[{BRAND_ZINC_BRIGHT}]{sep.join(stats)}[/{BRAND_ZINC_BRIGHT}]"
+        )
         self.console.print(compact_line)
 
         # Verbose: show detailed breakdown
@@ -407,13 +546,18 @@ class ProfessionalConsole:
         # Result panel
         if final_message:
             rich_result = convert_markdown_links_to_rich(final_message)
-            markdown_content = Markdown(rich_result, style="white")
+            markdown_content = Markdown(rich_result, style=BRAND_STARK)
+            result_color = BRAND_MINT if task_status == "success" else BRAND_ERROR
+            border_color = BRAND_MINT if task_status == "success" else BRAND_ERROR
+            result_icon = "✓" if task_status == "success" else "✗"
             result_panel = Panel(
                 markdown_content,
-                title="[bold]Result[/bold]",
-                border_style="green" if task_status == "success" else "red",
+                title=f"[bold {result_color}]{result_icon} Result[/bold {result_color}]",
+                title_align="left",
+                border_style=border_color,
+                box=ROUNDED,
                 expand=False,
-                padding=(0, 2)
+                padding=(0, 2),
             )
             self.console.print(result_panel)
 
@@ -439,18 +583,18 @@ class ProfessionalConsole:
             tb = Traceback.from_exception(type(exc), exc, exc.__traceback__, show_locals=False)
 
         group = Group(
-            Text(f"Delfhos encountered an error during: {title}", style="bold red"),
+            Text(f"Delfhos encountered an error during: {title}", style=f"bold {BRAND_ERROR}"),
             Text(""),
             tb,
             Text(""),
-            Text(f"Message: {message}", style="white"),
-            Text(f"Hint: {hint}", style="bold yellow")
+            Text(f"Message: {message}", style=BRAND_STARK),
+            Text(f"Hint: {hint}", style=f"bold {BRAND_AMBER}")
         )
 
         panel = Panel(
             group,
-            title=f"[bold red][{code}] Error[/bold red]",
-            border_style="red",
+            title=f"[bold {BRAND_ERROR}][{code}] Error[/bold {BRAND_ERROR}]",
+            border_style=BRAND_ERROR,
             expand=False
         )
         self.console.print(panel)
@@ -470,17 +614,17 @@ def _delfhos_excepthook(exc_type, exc_val, tb_obj):
     code, message, hint = extract_error_payload(exc_val)
 
     group = Group(
-        Text("Delfhos encountered an error:", style="bold red"),
+        Text("Delfhos encountered an error:", style=f"bold {BRAND_ERROR}"),
         Text(""),
         tb,
         Text(""),
-        Text(f"Message: {message}", style="white"),
-        Text(f"Hint: {hint}", style="bold yellow")
+        Text(f"Message: {message}", style=BRAND_STARK),
+        Text(f"Hint: {hint}", style=f"bold {BRAND_AMBER}")
     )
     panel = Panel(
         group,
-        title=f"[bold red][{code}] Error[/bold red]",
-        border_style="red",
+        title=f"[bold {BRAND_ERROR}][{code}] Error[/bold {BRAND_ERROR}]",
+        border_style=BRAND_ERROR,
         expand=False
     )
 

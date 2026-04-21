@@ -459,9 +459,10 @@ class PythonExecutor:
                 "result": final_result,
                 "output": output,
                 "error": None,
-                "execution_time": execution_time
+                "execution_time": execution_time,
+                "output_files": dict(getattr(self, "_output_registry", {})),
             }
-        
+
         except asyncio.TimeoutError:
             execution_time = time.time() - start_time
             error_msg = f"Execution timeout after {self.execution_timeout}s"
@@ -476,9 +477,10 @@ class PythonExecutor:
                 "result": None,
                 "output": stdout_capture.getvalue(),
                 "error": error_msg,
-                "execution_time": execution_time
+                "execution_time": execution_time,
+                "output_files": dict(getattr(self, "_output_registry", {})),
             }
-        
+
         except Exception as e:
             execution_time = time.time() - start_time
             error_msg = self._format_error(e, stderr_capture.getvalue())
@@ -493,7 +495,8 @@ class PythonExecutor:
                 "result": None,
                 "output": stdout_capture.getvalue(),
                 "error": error_msg,
-                "execution_time": execution_time
+                "execution_time": execution_time,
+                "output_files": dict(getattr(self, "_output_registry", {})),
             }
     
     async def _execute_async(self, code: str, namespace: dict) -> Any:
@@ -578,6 +581,51 @@ class PythonExecutor:
             raise ToolExecutionError(tool_name="python_executor", detail="Failed to create async task function")
 
     
+    def _make_add_to_output_files(self) -> tuple:
+        """Create add_to_output_files and return (function, registry_dict)."""
+        import os as _o
+        import json as _j
+
+        output_dir = _o.path.join(_o.getcwd(), "uploads", self.task_id, "output")
+        _o.makedirs(output_dir, exist_ok=True)
+        registry: dict = {}
+
+        def add_to_output_files(name: str, content) -> str:
+            """Save content to a file and expose it in Response.files. Returns host path."""
+            has_ext = "." in _o.path.basename(name)
+            is_df = False
+            try:
+                import pandas as _pd
+                is_df = isinstance(content, _pd.DataFrame)
+            except ImportError:
+                pass
+
+            if is_df:
+                ext = "" if has_ext else ".csv"
+                data = content.to_csv(index=False).encode("utf-8")
+            elif isinstance(content, (dict, list)):
+                ext = "" if has_ext else ".json"
+                data = _j.dumps(content, indent=2, default=str).encode("utf-8")
+            elif isinstance(content, bytes):
+                ext = ""
+                data = content
+            elif isinstance(content, str):
+                ext = "" if has_ext else ".txt"
+                data = content.encode("utf-8")
+            else:
+                ext = "" if has_ext else ".txt"
+                data = str(content).encode("utf-8")
+
+            filename = name + ext
+            path = _o.path.join(output_dir, filename)
+            with open(path, "wb") as f:
+                f.write(data)
+            registry[name] = path
+            print(f"[output] '{name}' saved → {filename}")
+            return path
+
+        return add_to_output_files, registry
+
     def _build_namespace(self, libraries: dict) -> dict:
         """
         Build the execution namespace with safe builtins and tool libraries.
@@ -766,6 +814,9 @@ class PythonExecutor:
         _restricted_builtins = dict(namespace)
         self._restricted_builtins = _restricted_builtins
 
+        # Create add_to_output_files and store registry on the instance
+        _add_to_output_files, self._output_registry = self._make_add_to_output_files()
+
         # Build namespace
         namespace.update({
             "__builtins__": _restricted_builtins,  # non-circular, protected from mutation
@@ -774,6 +825,7 @@ class PythonExecutor:
             "task_id": self.task_id,  # Make task_id available for use in code (though files.save() handles paths automatically)
             "__name__": "__agent_execution__",  # Define __name__ to prevent NameErrors and skip if __name__ == "__main__" blocks
             "__file__": "agent_script.py",  # Define __file__ for completeness
+            "add_to_output_files": _add_to_output_files,
         })
 
         return namespace

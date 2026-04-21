@@ -34,6 +34,7 @@ class APIExecutor:
         compiled_tools: List[Dict[str, Any]],
         headers: Optional[Dict[str, str]] = None,
         params: Optional[Dict[str, str]] = None,
+        path_params: Optional[Dict[str, str]] = None,
         sample: bool = False,
         compiler: Optional[Any] = None,
     ):
@@ -43,6 +44,9 @@ class APIExecutor:
             compiled_tools: List of compiled tool dicts from OpenAPICompiler
             headers:       Headers injected into every request (e.g., {"Authorization": "Bearer ..."})
             params:        Query params injected into every request (e.g., {"api_key": "..."})
+            path_params:   Path parameters injected into every request URL
+                           (e.g., {"globalCompanyId": "myco"}).  Substituted into
+                           URL templates like ``/api/{globalCompanyId}/...``.
             sample:        If True, capture response schemas in the background after each call.
             compiler:      OpenAPICompiler instance for saving sampled schemas.
         """
@@ -50,10 +54,11 @@ class APIExecutor:
         self._tools = {t["func_name"]: t for t in compiled_tools}
         self._headers = headers or {}
         self._params = params or {}
+        self._path_params = path_params or {}
         self._sample = sample
         self._compiler = compiler
 
-        # Validate that no header/param value is None — catches missing env vars early
+        # Validate that no header/param/path_param value is None — catches missing env vars early
         for k, v in self._headers.items():
             if v is None:
                 raise ToolDefinitionError(
@@ -68,6 +73,14 @@ class APIExecutor:
                     detail=(
                         f"APITool '{tool_name}': param '{k}' is None. "
                         f"Check that the environment variable holding the API key is set."
+                    )
+                )
+        for k, v in self._path_params.items():
+            if v is None:
+                raise ToolDefinitionError(
+                    detail=(
+                        f"APITool '{tool_name}': path_param '{k}' is None. "
+                        f"Check that the environment variable holding the value is set."
                     )
                 )
 
@@ -90,7 +103,7 @@ class APIExecutor:
         params_spec = tool_def.get("params_spec", [])
 
         # Classify which kwargs go where
-        path_params = {}
+        path_params = dict(self._path_params)  # Pre-seed with auto-injected path params
         query_params = dict(self._params)
         body_params = {}
         header_params = dict(self._headers)
@@ -114,7 +127,9 @@ class APIExecutor:
                     query_params[key] = value
 
         # Build URL with path parameters (use re.sub for exact matches only)
-        path = path_template
+        # Normalise URL-encoded braces (%7B / %7D) that some specs use
+        from urllib.parse import unquote
+        path = unquote(path_template)
         for param_name, param_value in path_params.items():
             from urllib.parse import quote
             safe_value = quote(str(param_value), safe="")
@@ -262,8 +277,9 @@ def build_api_tools(
         # Capture func_name in closure
         def _make_func(name: str):
             async def _execute(**kwargs):
+                import asyncio as _asyncio
                 kwargs.pop("desc", None)
-                return executor.call(name, **kwargs)
+                return await _asyncio.to_thread(executor.call, name, **kwargs)
             _execute.__name__ = name
             _execute.__doc__ = description
             return _execute
