@@ -43,6 +43,7 @@ from ..trace import (
 from .orchestrator_timing import OrchestratorTimingMixin
 from .orchestrator_scheduler import OrchestratorSchedulerMixin
 from .orchestrator_codegen import OrchestratorCodegenMixin
+from ..trace import RerunTrace
 
 
 def _has_confirm_policy(confirm_policy: Any) -> bool:
@@ -96,6 +97,7 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
         sandbox: str = "auto",
         sandbox_config: Optional[Dict] = None,
         files: Optional[List[str]] = None,
+        rerun_count: int = 2,
     ):
         approval_enabled = on_confirm is not None or approval_enabled
 
@@ -111,6 +113,7 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
         self.verbose = verbose
         self.enable_prefilter = enable_prefilter
         self.retry_count = retry_count
+        self.rerun_count = rerun_count
 
         # ── Model overrides ────────────────────────────────────────────────
         self.prefilter_llm = prefilter_llm or self.light_llm
@@ -405,7 +408,7 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
             return None
 
     async def _execute_code(self, task_id: str, payload, python_code: str) -> dict:
-        """Execute generated code in sandbox, with optional verbose display and auto-retry."""
+        """Execute generated code in sandbox, with optional verbose display, rerun loop, and auto-retry."""
         if self.verbose == "high":
             from rich.panel import Panel
             from rich.syntax import Syntax
@@ -453,6 +456,79 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
             self.current_trace.add_event(
                 "exec_complete", "success" if result.get("success") else "error"
             )
+
+        # ── Rerun loop ─────────────────────────────────────────────────────
+        accumulated_output = result.get("output", "")
+        for rerun_iter in range(self.rerun_count):
+            if not result.get("rerun_requested"):
+                break
+
+            learned_context = result.get("rerun_context", "")
+            remaining = result.get("rerun_remaining", "")
+            console.info(
+                "Rerun",
+                f"Iteration {rerun_iter + 1}/{self.rerun_count} — replanning remaining work",
+                task_id=task_id, agent_id=self.agent_id,
+            )
+
+            rerun_start = time.time()
+            rerun_code = await self.llm_generate_rerun(
+                task_id=task_id,
+                original_task=payload,
+                prior_code=python_code,
+                learned_context=learned_context,
+                remaining=remaining,
+                executor=executor,
+                partial_output=accumulated_output,
+            )
+            if not rerun_code or not rerun_code.strip():
+                result["rerun_requested"] = False
+                break
+
+            if self.verbose == "high":
+                from rich.panel import Panel
+                from rich.syntax import Syntax
+                code_panel = Panel(
+                    Syntax(rerun_code, "python", theme="github-dark", line_numbers=True),
+                    title=f"[bold]Rerun #{rerun_iter + 1} Code[/bold]",
+                    border_style="dim", expand=False,
+                )
+                console.console.print(code_panel)
+                console.console.print()
+
+            python_code = rerun_code
+            rerun_exec_start = time.time()
+            result = await executor.execute(rerun_code)
+            rerun_exec_duration = time.time() - rerun_exec_start
+            rerun_total_duration = time.time() - rerun_start
+
+            new_output = result.get("output", "")
+            if accumulated_output and new_output:
+                accumulated_output = accumulated_output.rstrip() + "\n" + new_output
+            elif new_output:
+                accumulated_output = new_output
+            result["output"] = accumulated_output
+
+            if self.current_trace:
+                self.current_trace.reruns.append(RerunTrace(
+                    attempt=rerun_iter + 1,
+                    started_at=datetime.fromtimestamp(rerun_start),
+                    duration_ms=int(rerun_total_duration * 1000),
+                    model_used=self.code_generation_llm,
+                    learned_context=learned_context,
+                    remaining_task=remaining,
+                ))
+                if self.current_trace.execution:
+                    self.current_trace.execution.duration_ms += int(rerun_exec_duration * 1000)
+                    self.current_trace.execution.stdout = accumulated_output
+                    self.current_trace.execution.outcome = (
+                        "success" if result.get("success") else "error"
+                    )
+                    self.current_trace.execution.error_message = result.get("error")
+                self.current_trace.add_event(
+                    f"rerun_{rerun_iter + 1}_complete",
+                    "success" if result.get("success") else "error",
+                )
 
         result = await self._auto_retry(task_id, payload, python_code, result, executor)
         return result
@@ -787,7 +863,7 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
         console.debug("LLM Calls Summary", "\n".join(summary_lines), task_id=task_id, agent_id=self.agent_id)
 
         if self.current_trace and self.current_trace.execution:
-            reserved = {"prefilter", "llm_connection_filtering", "llm_rag_retrieval", "llm_code_generation", "llm_retry"}
+            reserved = {"prefilter", "llm_connection_filtering", "llm_rag_retrieval", "llm_code_generation", "llm_retry", "llm_rerun"}
             exec_calls = [c for c in llm_breakdown if c.get("function_name") not in reserved]
             self.current_trace.execution.tokens_input = sum(c.get("input_tokens", 0) for c in exec_calls)
             self.current_trace.execution.tokens_output = sum(c.get("output_tokens", 0) for c in exec_calls)
@@ -879,9 +955,11 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
                 "prefilter", "llm_connection_filtering", "llm_rag_retrieval"
             )
         if self.current_trace.code_generation:
-            self.current_trace.code_generation.cost_usd = _sum("llm_code_generation", "llm_retry")
+            self.current_trace.code_generation.cost_usd = _sum(
+                "llm_code_generation", "llm_retry", "llm_rerun"
+            )
         if self.current_trace.execution:
-            reserved = {"prefilter", "llm_connection_filtering", "llm_rag_retrieval", "llm_code_generation", "llm_retry"}
+            reserved = {"prefilter", "llm_connection_filtering", "llm_rag_retrieval", "llm_code_generation", "llm_retry", "llm_rerun"}
             self.current_trace.execution.cost_usd = _sum(
                 *[fn for fn in cost_by_fn if fn not in reserved]
             )
@@ -903,7 +981,7 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
                     return 0.0
             return 0.0
 
-        duplicated = {"prefilter", "llm_code_generation", "llm_connection_filtering", "llm_rag_retrieval"}
+        duplicated = {"prefilter", "llm_code_generation", "llm_connection_filtering", "llm_rag_retrieval", "llm_rerun"}
         hidden_fn = {"llm", "web_search", "gmail_dsl_parsing"}
         llm_fn_names = {c.get("function_name", "") for c in llm_breakdown if isinstance(c, dict)} - hidden_fn
 
@@ -913,6 +991,13 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
             "llm_connection_filtering": "Connection filter",
             "llm_rag_retrieval": "RAG retrieval",
         }
+
+        # Build ordered token queue for websearch entries (matched FIFO to tool calls)
+        ws_token_queue = iter([
+            (c.get("input_tokens", 0), c.get("output_tokens", 0))
+            for c in llm_breakdown
+            if c.get("function_name") == "web_search"
+        ])
 
         timeline_items = []
 
@@ -928,6 +1013,8 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
                 "params": f"model={model}" if model else "",
                 "duration": call.get("duration", 0) or 0,
                 "wait_time": 0, "status": "ok",
+                "tokens_in": call.get("input_tokens", 0),
+                "tokens_out": call.get("output_tokens", 0),
             })
 
         seen_group_headers: set = set()
@@ -946,6 +1033,7 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
                     "type": "group_header", "timestamp": _ts(entry.get("timestamp", 0)) - 0.0001,
                     "tool": "⟳ parallel", "description": _parallel_group_descs[group_id],
                     "params": "", "duration": 0, "wait_time": 0, "status": "ok",
+                    "tokens_in": 0, "tokens_out": 0,
                 })
 
             param_parts = []
@@ -957,6 +1045,7 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
                     v_s = v_s[:77] + "…"
                 param_parts.append(f"{k}={v_s}")
 
+            tok_in, tok_out = next(ws_token_queue, (0, 0)) if tn == "websearch" else (0, 0)
             timeline_items.append({
                 "type": "tool", "timestamp": _ts(entry.get("timestamp", 0)),
                 "tool": tn, "description": entry.get("description", ""),
@@ -964,9 +1053,13 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
                 "duration": entry.get("duration", 0) or 0,
                 "wait_time": entry.get("wait_time", 0) or 0,
                 "status": entry.get("status", "unknown"),
+                "tokens_in": tok_in, "tokens_out": tok_out,
             })
 
         timeline_items.sort(key=lambda x: x["timestamp"])
+
+        def _fmt_tokens(n: int) -> str:
+            return f"{n/1000:.1f}k" if n >= 1000 else str(n)
 
         table = Table(
             title="[bold]Execution Timeline[/bold]",
@@ -976,15 +1069,22 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
         table.add_column("Description", ratio=4)
         table.add_column("Tool", min_width=12, style="bright_yellow", no_wrap=True)
         table.add_column("Params", ratio=5, style="dim")
+        table.add_column("Tokens", min_width=14, no_wrap=True)
         table.add_column("Duration", min_width=8, no_wrap=True)
 
         for item in timeline_items:
             dur = item["duration"]
             dur_str = f"{dur:.2f}s" if dur > 0 else "[dim]—[/dim]"
+            tok_in = item.get("tokens_in", 0)
+            tok_out = item.get("tokens_out", 0)
+            if tok_in or tok_out:
+                tok_str = f"[green]↑{_fmt_tokens(tok_in)}[/green] [yellow]↓{_fmt_tokens(tok_out)}[/yellow]"
+            else:
+                tok_str = "[dim]—[/dim]"
             if item["type"] == "group_header":
                 table.add_row(
                     f"[bold cyan]{item['description']}[/bold cyan]",
-                    f"[cyan]{item['tool']}[/cyan]", "", "",
+                    f"[cyan]{item['tool']}[/cyan]", "", "", "",
                 )
                 continue
             icon = (
@@ -995,6 +1095,7 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
                 item["description"] or "[dim]—[/dim]",
                 f"{icon} {item['tool']}",
                 item["params"] or "[dim]—[/dim]",
+                tok_str,
                 dur_str,
             )
 

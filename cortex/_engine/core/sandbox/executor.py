@@ -98,6 +98,14 @@ class SandboxExecutor(BaseSandbox):
     # BaseSandbox interface
     # ------------------------------------------------------------------
 
+    @property
+    def namespace(self):
+        return getattr(self._backend, "namespace", None)
+
+    @property
+    def _baseline_keys(self):
+        return getattr(self._backend, "_baseline_keys", set())
+
     async def execute(self, code: str) -> Dict[str, Any]:
         if self._backend is None:
             self._backend = self._resolve_backend()

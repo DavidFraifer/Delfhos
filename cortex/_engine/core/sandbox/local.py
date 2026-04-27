@@ -39,6 +39,14 @@ class LocalSandbox(BaseSandbox):
             vision_model=vision_model,
         )
 
+    @property
+    def namespace(self):
+        return self._executor.namespace
+
+    @property
+    def _baseline_keys(self):
+        return getattr(self._executor, "_baseline_keys", set())
+
     async def execute(self, code: str) -> Dict[str, Any]:
         return await self._executor.execute(code)
 

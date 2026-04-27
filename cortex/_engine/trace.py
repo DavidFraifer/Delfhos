@@ -106,6 +106,22 @@ class ExecutionTrace:
         return self.tokens_input + self.tokens_output
 
 @dataclass
+class RerunTrace:
+    attempt: int
+    started_at: datetime
+    duration_ms: int = 0
+    model_used: str = ""
+    learned_context: str = ""
+    remaining_task: str = ""
+    tokens_input: int = 0
+    tokens_output: int = 0
+    cost_usd: Optional[float] = None
+
+    @property
+    def tokens_total(self) -> int:
+        return self.tokens_input + self.tokens_output
+
+@dataclass
 class ChatCompressionTrace:
     triggered_at: datetime
     model_used: str = ""
@@ -167,6 +183,7 @@ class Trace:
     merge: Optional[MergeTrace] = None
     code_generation: Optional[CodeGenTrace] = None
     execution: Optional[ExecutionTrace] = None
+    reruns: List[RerunTrace] = field(default_factory=list)
     tool_calls: List[ToolCallTrace] = field(default_factory=list)
     chat_compression: Optional[ChatCompressionTrace] = None
     session_close: Optional[SessionCloseTrace] = None
@@ -252,6 +269,16 @@ class Trace:
             lines.append(f"║   Model                   {self.code_generation.model_used}".ljust(60)+"║")
             lines.append(f"║   Tokens in/out           {self.code_generation.tokens_input:,} / {self.code_generation.tokens_output:,}".ljust(60)+"║")
             lines.append(f"║   Cost USD                {'None' if self.code_generation.cost_usd is None else f'${self.code_generation.cost_usd:.6f}'}".ljust(60)+"║")
+            lines.append(f"║".ljust(60)+"║")
+
+        for rerun in self.reruns:
+            lines.append(f"║ RERUN #{rerun.attempt}                   {rerun.duration_ms:,}ms".ljust(60)+"║")
+            lines.append(f"║   Model                   {rerun.model_used}".ljust(60)+"║")
+            ctx_preview = rerun.learned_context.replace("\n", " ")[:30]
+            lines.append(f"║   Context learned         {ctx_preview}".ljust(60)+"║")
+            rem_preview = rerun.remaining_task[:30]
+            lines.append(f"║   Remaining               {rem_preview}".ljust(60)+"║")
+            lines.append(f"║   Tokens in/out           {rerun.tokens_input:,} / {rerun.tokens_output:,}".ljust(60)+"║")
             lines.append(f"║".ljust(60)+"║")
 
         if self.execution:

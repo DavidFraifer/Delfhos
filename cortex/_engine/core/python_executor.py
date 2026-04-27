@@ -352,6 +352,21 @@ class ToolExecutionTracker:
             )
 
 
+class _RerunSignal(Exception):
+    """
+    Raised by rerun() inside generated code to request a replanning pass.
+
+    Not treated as an execution error — the orchestrator catches this and
+    runs a fresh code-generation step with the provided context.
+    """
+
+    def __init__(self, context: str, remaining: str, carry: list):
+        super().__init__("rerun requested")
+        self.context = context
+        self.remaining = remaining
+        self.carry = carry
+
+
 class PythonExecutor:
     """
     Executes agent-generated Python code in a controlled environment.
@@ -477,6 +492,27 @@ class PythonExecutor:
                 "result": None,
                 "output": stdout_capture.getvalue(),
                 "error": error_msg,
+                "execution_time": execution_time,
+                "output_files": dict(getattr(self, "_output_registry", {})),
+            }
+
+        except _RerunSignal as rs:
+            execution_time = time.time() - start_time
+            console.info(
+                "Rerun requested",
+                f"remaining: {rs.remaining[:80]}",
+                task_id=self.task_id,
+                agent_id=self.agent_id,
+            )
+            return {
+                "success": True,
+                "rerun_requested": True,
+                "rerun_context": rs.context,
+                "rerun_remaining": rs.remaining,
+                "rerun_carry": rs.carry,
+                "result": None,
+                "output": stdout_capture.getvalue(),
+                "error": None,
                 "execution_time": execution_time,
                 "output_files": dict(getattr(self, "_output_registry", {})),
             }
@@ -697,7 +733,9 @@ class PythonExecutor:
 
         allowed_import_roots = {
             "asyncio",
+            "csv",
             "datetime",
+            "io",
             "json",
             "math",
             "pathlib",
@@ -795,6 +833,8 @@ class PythonExecutor:
         # Standard library modules (safe subset)
         safe_modules = {
             "json": _json,
+            "csv": __import__("csv"),
+            "io": __import__("io"),
             "re": __import__("re"),
             "datetime": __import__("datetime"),
             "time": __import__("time"),
@@ -818,6 +858,17 @@ class PythonExecutor:
         _add_to_output_files, self._output_registry = self._make_add_to_output_files()
 
         # Build namespace
+        def _rerun(context: str = "", remaining: str = "", carry: list = None):
+            if not isinstance(remaining, str) or not remaining.strip():
+                raise ValueError(
+                    "rerun() requires a non-empty 'remaining' argument describing the work still left to do."
+                )
+            raise _RerunSignal(
+                context=str(context),
+                remaining=remaining.strip(),
+                carry=list(carry) if carry else [],
+            )
+
         namespace.update({
             "__builtins__": _restricted_builtins,  # non-circular, protected from mutation
             "ctx": self.orchestrator.agent_context if self.orchestrator else {},
@@ -826,6 +877,7 @@ class PythonExecutor:
             "__name__": "__agent_execution__",  # Define __name__ to prevent NameErrors and skip if __name__ == "__main__" blocks
             "__file__": "agent_script.py",  # Define __file__ for completeness
             "add_to_output_files": _add_to_output_files,
+            "rerun": _rerun,
         })
 
         return namespace

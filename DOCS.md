@@ -14,6 +14,7 @@ Delfhos is a Python SDK for building AI agents that use real tools — Gmail, SQ
    → [How to configure the execution sandbox](#how-to-configure-the-execution-sandbox)
    → [How to pass input files to the agent workspace](#how-to-pass-input-files-to-the-agent-workspace)
    → [How to extract output files from a task result](#how-to-extract-output-files-from-a-task-result)
+   → [How to use `rerun()` for adaptive replanning](#how-to-use-rerun-for-adaptive-replanning)
 3. [Reference](#reference) — Complete API documentation
 4. [Explanation](#explanation) — Understand how it works
 
@@ -1271,6 +1272,99 @@ On each failure, the error message is fed back to the LLM so it can generate cor
 
 ---
 
+## How to use `rerun()` for adaptive replanning
+
+`rerun()` is a built-in function available inside every generated agent script. It lets the script stop mid-way, hand back what it learned at runtime, and ask for a fresh code-generation pass that handles the remaining work — all without raising an error.
+
+### When to use it
+
+Use `rerun()` when the agent cannot write correct code for the next step without first inspecting a tool's response. Common cases:
+
+- **Dynamic column names** — a reporting API returns column headers that vary by region, period, or data availability.
+- **Unknown nesting depth** — an API can return flat or nested objects depending on the record type.
+- **Response-driven routing** — the next tool to call depends on a field in the first response (e.g. `type`, `category`, `format`).
+
+Do **not** use `rerun()` for retries, error recovery, loops, or any situation that standard Python control flow handles correctly. Normal `if/elif`, `.get()`, and `isinstance()` checks are almost always sufficient.
+
+### Signature
+
+```python
+rerun(
+    context:   str,           # What you learned — paste actual keys, a sample row, or a schema snippet
+    remaining: str,           # What work is still left — be specific, not the full original task
+    carry:     list = None,   # Optional: variable names you want to highlight as preserved
+)
+```
+
+`rerun()` exits the current script immediately. No code after the call runs. The sandbox namespace — including any variables already assigned — is preserved and made available to the next generated script.
+
+### Basic pattern
+
+```python
+# Pass 1: fetch to discover structure, then hand off
+async def main():
+    data = await my_api(params, desc="fetching report to inspect format")
+
+    sample = data["rows"][0] if data.get("rows") else {}
+    rerun(
+        context=f"columns={data['columns']}, sample_row={repr(sample)[:400]}",
+        remaining="Format data['rows'] as a markdown table using the exact columns listed above, "
+                  "then print it with a totals row.",
+    )
+
+await main()
+```
+
+```python
+# Pass 2 (auto-generated with your context injected):
+# The LLM now knows the exact columns and row format.
+cols = ["month", "revenue_eur", "units_sold", "support_tickets_opened", "csat_score"]
+rows = report["rows"]          # preserved from Pass 1
+totals = report["totals"]
+
+header = "| " + " | ".join(cols) + " |"
+sep    = "| " + " | ".join(["---"] * len(cols)) + " |"
+body   = "\n".join("| " + " | ".join(str(r[i]) for i in range(len(cols))) + " |" for r in rows)
+total  = "| **Total** | " + " | ".join(str(totals.get(c, "")) for c in cols[1:]) + " |"
+print(f"### Sales Report\n\n{header}\n{sep}\n{body}\n{total}")
+```
+
+### Full working example
+
+See `examples/rerun_example.py` in the repository for a self-contained runnable demo using a `@tool` that returns dynamic columns.
+
+### Inspecting rerun iterations in the trace
+
+```python
+result = agent.run("Fetch the EMEA sales report and format it as a table.")
+
+if result.trace and result.trace.reruns:
+    print(f"Rerun iterations used: {len(result.trace.reruns)}")
+    for r in result.trace.reruns:
+        print(f"  #{r.attempt}  {r.duration_ms}ms")
+        print(f"  context learned: {r.learned_context[:80]}")
+        print(f"  remaining:       {r.remaining_task[:80]}")
+else:
+    print("No rerun — model handled it in a single pass.")
+```
+
+### Limiting the number of rerun iterations
+
+By default the orchestrator allows up to 2 rerun iterations per task. Each rerun triggers a full LLM code-generation call, so keep the cap small.
+
+```python
+# The cap is set on the orchestrator, not on the public Agent constructor.
+# To change it, set it after construction:
+agent = Agent(tools=[...], llm="gemini-2.0-flash")
+agent.orchestrator.rerun_count = 1   # Allow at most 1 rerun per task
+```
+
+### How `rerun()` interacts with auto-retry
+
+The rerun loop runs first. If the code produced by a rerun pass itself raises a recoverable error (e.g. a `KeyError` or `AttributeError`), the normal `retry_count` auto-retry kicks in on top of it. The two mechanisms are independent and compose naturally.
+
+---
+
 ---
 
 # Reference
@@ -1324,6 +1418,7 @@ Agent(
 | `enable_prefilter` | `bool` | `False` | Use `light_llm` to pre-select tools |
 | `retry_count` | `int` | `1` | Max retries on non-fatal execution errors |
 | `sandbox` | `str` | `"auto"` | Execution isolation mode: `"auto"` \| `"docker"` \| `"local"` |
+| `rerun_count` | `int` | `2` | Max rerun iterations when generated code calls `rerun()`. Each iteration triggers a fresh code-generation pass. See [`rerun()` guide](#how-to-use-rerun-for-adaptive-replanning). |
 | `sandbox_config` | `dict` | `None` | Resource limit overrides for Docker mode (see [sandbox guide](#how-to-configure-the-execution-sandbox)) |
 | `files` | `list[str]` | `None` | Absolute host paths to inject as read-only workspace files. In Docker mode each file is bind-mounted at `/workspace/<filename>`; in local mode the original paths are used. See [input file guide](#how-to-pass-input-files-to-the-agent-workspace). |
 
@@ -1352,6 +1447,7 @@ Agent(
 | `chat` | `Chat \| None` | Attached Chat instance |
 | `memory` | `Memory \| None` | Attached Memory instance |
 | `retry_count` | `int` | Current retry setting |
+| `rerun_count` | `int` | Max rerun iterations (set on `agent.orchestrator.rerun_count`) |
 
 ### Context manager
 
@@ -2023,11 +2119,23 @@ When you call `agent.run("task")`, the following pipeline executes:
        import whitelist, and a timeout are enforced in-process.
        A timeout is always enforced regardless of sandbox mode.
 
-7. Retry loop
+7. Rerun loop (adaptive replanning)
+   └── If the generated code calls rerun(context=..., remaining=...) during execution,
+       the current script exits cleanly — no error, no failure.
+       The orchestrator runs a focused code-generation pass using the runtime context
+       the script reported and the remaining-work description it provided.
+       The same sandbox namespace is reused, so any variables already assigned
+       (fetched data, partial results) are available to the new script without re-fetching.
+       This repeats up to rerun_count times (default 2).
+       See the rerun() guide for when to use this vs. normal Python control flow.
+
+8. Retry loop
    └── If execution raises an exception, the error is fed back to the LLM
        for a corrected code generation. This repeats up to retry_count times.
+       The retry loop runs independently after the rerun loop — if a rerun pass
+       produces code that then raises an error, auto-retry applies to it as well.
 
-8. Result composition and return
+9. Result composition and return
    └── The final output (stdout, return value, or error) is collected.
        Any output files registered via add_to_output_files() are resolved to
        host paths and stored in Response.files.
@@ -2232,6 +2340,48 @@ SandboxExecutor(mode="local")  # Always in-process
 ```
 
 The selection is logged: when Docker is unavailable in `"auto"` mode, a warning is emitted (`Docker unavailable — falling back to local backend`) so you can see which isolation level is active.
+
+---
+
+## How `rerun()` works
+
+`rerun()` is a cooperative escape hatch built into the sandbox. It bridges a fundamental limitation of code generation: the LLM writes a complete script before any tool is called, but sometimes the correct code for step N cannot be written without first seeing the output of step N-1.
+
+### The mechanism
+
+When generated code calls `rerun(context, remaining)`, the sandbox raises an internal sentinel exception (`_RerunSignal`). This is caught before the normal error handler, so it is never treated as a failure. The execution result carries three new fields:
+
+```
+{ "rerun_requested": True, "rerun_context": "...", "rerun_remaining": "..." }
+```
+
+Back in the orchestrator's execution loop, this result triggers a second code-generation call. The prompt for this call is a focused continuation prompt — not a re-statement of the original task — with three key injections:
+
+1. **The original task** — so the LLM understands what was being accomplished.
+2. **The runtime context** — what the script learned (actual column names, a sample row, a schema snippet).
+3. **The preserved variables** — a list of variable names that are still in the sandbox namespace from the first pass. The LLM can reference them directly without re-fetching.
+
+The new code is executed on the **same `PythonExecutor` instance**, so the namespace (and all variables in it) is shared. Only the code changes; the data does not.
+
+### `rerun()` vs. auto-retry
+
+These two mechanisms solve different problems:
+
+| | `rerun()` | Auto-retry |
+|---|---|---|
+| Triggered by | Agent code calling `rerun()` proactively | An unhandled exception during execution |
+| Signal | Intentional, clean exit | Error |
+| Prompt style | Continuation: "here is what I learned, do the remaining work" | Fix: "here is the error, generate corrected code" |
+| Namespace | Preserved — script chose which data to keep | Preserved — error-recovery variables injected |
+| Token cost | One full code-gen call per iteration | One full code-gen call per retry |
+
+They compose: a rerun pass can be followed by an auto-retry if the rerun's code itself raises an error.
+
+### Why not just write more general code?
+
+In many cases the LLM can write generic handlers (`if isinstance(value, list): ...`, `.get(key, default)`) that work across all possible response shapes. When that is possible, it is preferable — no rerun needed.
+
+`rerun()` is the right choice when the response structure is genuinely unknowable at codegen time AND correct handling requires specific, non-generic code. A common example: building a markdown table where every column header must match an actual data key. Generic code would either fail or produce incorrect output; a targeted second pass gets it right.
 
 ---
 

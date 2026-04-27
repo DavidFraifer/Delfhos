@@ -1911,8 +1911,10 @@ class WebSearchLibrary(ToolLibraryBase):
             if self.tool_tracker:
                 await self.tool_tracker.track_end(tool_name, duration, success=True, description=description, model=self.search_llm, ui_metadata=ws_meta)
             if self.tool_tracker and self.tool_tracker.orchestrator:
-                self.tool_tracker.orchestrator.track_tool_usage(self.task_id, tool_name)
-            
+                orchestrator = self.tool_tracker.orchestrator
+                orchestrator.track_tool_usage(self.task_id, tool_name)
+                orchestrator._safe_add_tokens(self.task_id, token_info, self.search_llm, "web_search", duration=duration)
+
             return result if isinstance(result, str) else str(result)
         except Exception as e:
             duration = time.time() - start_time
@@ -2134,15 +2136,10 @@ class LLMLibrary(ToolLibraryBase):
             if self.tool_tracker and hasattr(self.tool_tracker, 'orchestrator') and self.tool_tracker.orchestrator:
                 self.tool_tracker.orchestrator.track_tool_usage(self.task_id, "llm")
             
-            # Track tokens and cost in orchestrator logger so they appear in summary
+            # Track tokens — route through orchestrator so both logger and usage counter are updated
             orchestrator = getattr(self.tool_tracker, "orchestrator", None) if self.tool_tracker else None
-            logger = getattr(orchestrator, "logger", None) if orchestrator else None
-            if logger and norm_token_info:
-                try:
-                    logger.add_tokens(self.task_id, norm_token_info, llm_model, "llm")
-                except Exception:
-                    # Never break execution if token logging fails
-                    pass
+            if orchestrator and norm_token_info:
+                orchestrator._safe_add_tokens(self.task_id, norm_token_info, llm_model, "llm", duration=duration)
             
             # Return only the content to the agent, never token info
             if isinstance(response_text, str):

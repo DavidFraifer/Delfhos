@@ -55,7 +55,7 @@ from typing import TYPE_CHECKING
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 # Tool system (no circular deps — delfhos.tool uses only stdlib)
 from delfhos.tool import tool, ToolException, DelfhosToolWarning

@@ -252,6 +252,7 @@ class Agent:
         self.chat = chat
         self.memory = memory
         self.retry_count = retry_count
+        self.rerun_count = 2
         self.files = files or []
         
         self.logger = CORTEXLogger()
@@ -286,6 +287,7 @@ class Agent:
             verbose="high" if self.verbose else "low",
             enable_prefilter=enable_prefilter,
             retry_count=self.retry_count,
+            rerun_count=self.rerun_count,
             sandbox=sandbox,
             sandbox_config=sandbox_config,
             files=self.files,

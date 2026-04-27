@@ -652,13 +652,23 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
                 f"- Follow: {guidelines}"
             )
 
-        python_prompt = (
-            f'Task: "{message}"{sql_schema_section}{connection_context_section}'
-            f"{agent_context_section}{workspace_files_section}{memory_context_section}\n"
-            f"Date: {current_date_str}\n\n"
-            "BEFORE CODING: If task is vague (missing names/dates/files), output ONLY a print() asking clarification. "
-            'E.g.: `print("Need keywords to find invoice")`\n\n'
-            f"{python_api_docs}{memory_tool_section}\n\n"
+        rerun_tool_section = (
+            "\n\nREPLAN HOOK — last resort only. Adds latency; avoid unless strictly necessary.\n"
+            "Use ONLY when: the task cannot be completed in one pass because a tool response contains "
+            "field names, schema, or structure that are impossible to know without fetching first, "
+            "AND standard Python (.get(), isinstance(), try/except, conditionals) cannot handle all possible shapes.\n"
+            "Skip when: you can write robust code that handles the response regardless of its exact shape.\n"
+            '`rerun(context="<actual schema + sample>", remaining="<specific remaining steps>")`\n'
+            "  data = await some_tool(..., desc=\"fetching to inspect format\")\n"
+            "  sample = data['rows'][0] if isinstance(data.get('rows'), list) and data['rows'] else data\n"
+            '  rerun(\n'
+            '      context=f"keys={list(data.keys()) if isinstance(data, dict) else type(data).__name__}, '
+            'sample={repr(sample)[:400]}",\n'
+            '      remaining="<what to do next>"\n'
+            "  )"
+        )
+
+        code_rules = (
             "RULES:\n"
             "- ONLY Python code. Minimal code. Async (await). NO asyncio.run(); define `async def main():...` & `await main()`.\n"
             "- Use ONLY the namespaces shown above. Do NOT invent variable names. NEVER pass connection_name (auto-detected).\n"
@@ -674,6 +684,25 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
             "- To return files/datasets/large text to the user: call `add_to_output_files(name, content)` (name=logical label, content=str/bytes/dict/list). The file is saved and accessible via Response.files after the task.\n"
             f"{examples_section}\n\n"
             "OUTPUT: Python code ONLY. NO comments. Only print() is visible, use markdown."
+        )
+
+        # Cache for rerun passes
+        self._rerun_context_cache = {
+            "sql_schema_section": sql_schema_section,
+            "connection_context_section": connection_context_section,
+            "python_api_docs": python_api_docs,
+            "code_rules": code_rules,
+            "rerun_tool_section": rerun_tool_section,
+        }
+
+        python_prompt = (
+            f'Task: "{message}"{sql_schema_section}{connection_context_section}'
+            f"{agent_context_section}{workspace_files_section}{memory_context_section}\n"
+            f"Date: {current_date_str}\n\n"
+            "BEFORE CODING: If task is vague (missing names/dates/files), output ONLY a print() asking clarification. "
+            'E.g.: `print("Need keywords to find invoice")`\n\n'
+            f"{python_api_docs}{memory_tool_section}{rerun_tool_section}\n\n"
+            f"{code_rules}"
         )
 
         # ── Call LLM ───────────────────────────────────────────────────────
@@ -765,6 +794,139 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
                 task_id=task_id, agent_id=self.agent_id,
             )
             raise CodeGenerationError(detail=str(e)) from e
+
+    # ------------------------------------------------------------------ #
+    #  Utilities                                                           #
+    # ------------------------------------------------------------------ #
+
+    # ------------------------------------------------------------------ #
+    #  Rerun code generation                                              #
+    # ------------------------------------------------------------------ #
+
+    async def llm_generate_rerun(
+        self,
+        task_id: str,
+        original_task: str,
+        prior_code: str,
+        learned_context: str,
+        remaining: str,
+        executor,
+        partial_output: str = "",
+    ) -> str:
+        """Generate code for the remaining work after a rerun() call."""
+        prompt = self._build_rerun_prompt(
+            original_task, prior_code, learned_context, remaining, executor, partial_output
+        )
+
+        await self.track_tool_timing_async(
+            task_id, "llm_code_generation", None, self.code_generation_llm,
+            description=self._ui_text("planning") + " (rerun)",
+            is_starting=True,
+        )
+        llm_start = time.time()
+        try:
+            llm_result = await llm_completion_async(
+                model=self.code_generation_llm,
+                prompt=prompt,
+                temperature=0.0,
+                max_tokens=4000,
+                response_format=None,
+            )
+        except (LLMExecutionError, RuntimeError, OSError) as e:
+            llm_duration = time.time() - llm_start
+            await self.track_tool_timing_async(
+                task_id, "llm_code_generation", llm_duration, self.code_generation_llm,
+                description=self._ui_text("planning") + " (rerun)",
+                is_starting=False,
+            )
+            console.error(
+                "Rerun code generation failed",
+                f"{type(e).__name__}: {e}",
+                task_id=task_id, agent_id=self.agent_id,
+            )
+            return ""
+
+        llm_duration = time.time() - llm_start
+        await self.track_tool_timing_async(
+            task_id, "llm_code_generation", llm_duration, self.code_generation_llm,
+            description=self._ui_text("planning") + " (rerun)",
+            is_starting=False,
+        )
+        self.track_tool_usage(task_id, "llm_code_generation", self.code_generation_llm)
+
+        response, token_info = normalize_llm_result(llm_result)
+        self._safe_add_tokens(
+            task_id, token_info, self.code_generation_llm, "llm_rerun", duration=llm_duration
+        )
+
+        if self.current_trace and self.current_trace.code_generation:
+            self.current_trace.code_generation.attempt += 1
+            self.current_trace.code_generation.tokens_input += token_info.get("input_tokens", 0)
+            self.current_trace.code_generation.tokens_output += token_info.get("output_tokens", 0)
+
+        return parse_python_code(response) or ""
+
+    def _build_rerun_prompt(
+        self,
+        original_task: str,
+        prior_code: str,
+        learned_context: str,
+        remaining: str,
+        executor,
+        partial_output: str,
+    ) -> str:
+        baseline_keys = getattr(executor, "_baseline_keys", set())
+        namespace = getattr(executor, "namespace", None) or {}
+        preserved_vars = sorted(
+            k for k in namespace
+            if k not in baseline_keys and not k.startswith("_")
+        )
+
+        vars_section = (
+            "\n\nPRESERVED VARIABLES (already in memory — use directly, do NOT re-fetch):\n"
+            + ", ".join(preserved_vars)
+            + "\nAny variable NOT listed does not exist and must be fetched/computed."
+            if preserved_vars
+            else "\n\nNO variables preserved — fetch everything needed."
+        )
+
+        output_section = (
+            f"\n\nOUTPUT ALREADY SHOWN TO USER (do NOT repeat this):\n{partial_output[:800]}"
+            if partial_output and partial_output.strip()
+            else ""
+        )
+
+        context_section = (
+            f"\n\nRUNTIME CONTEXT LEARNED:\n{learned_context}"
+            if learned_context and learned_context.strip()
+            else ""
+        )
+
+        cache = getattr(self, "_rerun_context_cache", {})
+        sql_schema_section = cache.get("sql_schema_section", "")
+        connection_context_section = cache.get("connection_context_section", "")
+        python_api_docs = cache.get("python_api_docs", "")
+        code_rules = cache.get("code_rules", "OUTPUT: Python code ONLY. NO comments. Only print() is visible, use markdown.")
+        rerun_tool_section = cache.get("rerun_tool_section", "")
+
+        current_date_str = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M %Z")
+
+        return (
+            f'ORIGINAL TASK: "{original_task}"\n'
+            f"Date: {current_date_str}"
+            f"{sql_schema_section}{connection_context_section}\n\n"
+            f"{python_api_docs}{rerun_tool_section}\n\n"
+            f"EXPLORATORY CODE THAT ALREADY RAN:\n```python\n{prior_code}\n```"
+            f"{context_section}"
+            f"{output_section}"
+            f"{vars_section}\n\n"
+            f"REMAINING WORK TO DO:\n{remaining}\n\n"
+            "INSTRUCTIONS:\n"
+            "- Generate ONLY the code for the remaining work listed above.\n"
+            "- Do NOT repeat steps already completed — use preserved variables directly.\n"
+            "- Only call rerun() again if the remaining work reveals a genuinely unknowable data shape — prefer completing the task directly.\n\n"
+            f"{code_rules}"
+        )
 
     # ------------------------------------------------------------------ #
     #  Utilities                                                           #
