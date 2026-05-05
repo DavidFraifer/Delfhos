@@ -236,7 +236,7 @@ class Cortex:
             time.sleep(poll_interval)
         return Response(text="Timeout", status=False, error="Timeout waiting for task")
 
-    def run_chat(self, timeout: float = 120.0) -> None:
+    def run_chat(self, message: None = None, timeout: float = 120.0) -> None:
         """
         Start a synchronous interactive chat loop in the console.
 
@@ -251,10 +251,15 @@ class Cortex:
 
         Args:
             timeout: Maximum seconds to wait per message (default: 120).
-        
+
         Raises:
+            RunChatMessageError: If a message argument is passed (use run() or run_async() instead).
             ValueError: If Chat was not provided when creating the Agent.
         """
+        if message is not None:
+            from delfhos.errors import RunChatMessageError
+            raise RunChatMessageError()
+
         # Validate that Chat was provided when creating the agent
         if self._agent.chat is None:
             raise ValueError(
@@ -273,6 +278,11 @@ class Cortex:
         from delfhos import __version__
 
         chat_console = runtime_console.console
+
+        # Ensure _configure_tools() has run so get_available_tools() reflects
+        # only the user's tools, not the 7 defaults pre-loaded in Orchestrator.__init__.
+        if not self._agent._tools_configured:
+            self._agent.start(suppress_startup_message=True)
 
         def _render_welcome():
             try:

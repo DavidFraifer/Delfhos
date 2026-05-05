@@ -194,3 +194,15 @@ class ConversationCompressionError(LLMExecutionError):
         "supports long-context input. "
         "Compression is non-critical; the conversation continues uncompressed."
     )
+
+
+class RunChatMessageError(DelfhosConfigError, TypeError):
+    """Raised when run_chat() is called with a message argument."""
+    code = "ERR-CHAT-001"
+    message_template = "run_chat() does not accept a 'message' argument."
+    resolution = (
+        "run_chat() opens an interactive terminal session — the user types messages live.\n"
+        "To run a single task programmatically, use run() or run_async() instead:\n\n"
+        "  agent.run('Your task here')          # blocking\n"
+        "  await agent.run_async('Your task')   # async"
+    )

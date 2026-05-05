@@ -250,6 +250,8 @@ class Agent:
         self.code_generation_llm = code_generation_llm or self.heavy_llm
         self.vision_llm = vision_llm or self.heavy_llm
         self.chat = chat
+        if self.chat is not None and not self.chat.summarizer_llm:
+            self.chat.summarizer_llm = self.light_llm
         self.memory = memory
         self.retry_count = retry_count
         self.rerun_count = 2
@@ -375,7 +377,9 @@ class Agent:
     def _get_summarizer_llm(self) -> str:
         """Get the LLM to use for chat summarization.
 
-        Returns the LLM from chat.summarizer_llm if set, otherwise defaults to light_llm.
+        chat.summarizer_llm is always populated at Agent init (defaults to light_llm),
+        so this is normally a direct read. The light_llm fallback guards against any
+        edge case where chat is wired up after init.
         """
         if self.chat and self.chat.summarizer_llm:
             return self.chat.summarizer_llm

@@ -696,11 +696,14 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
         }
 
         python_prompt = (
+            "You are a code-act executor inside an orchestration loop. Output Python code that accomplishes the task. "
+            "Do NOT explain, negotiate, or ask about approach — only generate code.\n\n"
             f'Task: "{message}"{sql_schema_section}{connection_context_section}'
             f"{agent_context_section}{workspace_files_section}{memory_context_section}\n"
             f"Date: {current_date_str}\n\n"
-            "BEFORE CODING: If task is vague (missing names/dates/files), output ONLY a print() asking clarification. "
-            'E.g.: `print("Need keywords to find invoice")`\n\n'
+            "Clarification: ONLY if a required literal value (specific name, email address, or file path) "
+            "is completely absent and impossible to infer — output a single print() and nothing else. "
+            "If the task can proceed with reasonable assumptions, proceed.\n\n"
             f"{python_api_docs}{memory_tool_section}{rerun_tool_section}\n\n"
             f"{code_rules}"
         )

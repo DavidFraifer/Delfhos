@@ -29,7 +29,7 @@ class Chat:
               If omitted, defaults to ~/delfhos/chat/<namespace>.db.
         namespace: Namespace key to isolate multiple chats in the same DB.
         summarizer_llm: LLM model used for chat compression (e.g., "gemini-3.1-flash-lite-preview").
-                        If not provided, must be set before the agent attempts compression.
+                        If not provided, defaults to the agent's light_llm (or llm in single-model mode).
     """
     def __init__(
         self,
