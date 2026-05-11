@@ -23,7 +23,8 @@ agent = Agent(
         MockDatabase(confirm=False),
     ],
     llm="gemini-3.1-flash-lite-preview",
-    verbose=True
+    sandbox="local",
+    verbose=True,
 )
 
 agent.run(

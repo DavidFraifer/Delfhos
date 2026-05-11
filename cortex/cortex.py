@@ -24,7 +24,7 @@ from typing import List, Optional, Union, Dict, Any, Callable
 from cortex._engine.agent import Agent
 from cortex._engine.connection import Connection
 from cortex._engine.types import Response
-from rich.box import ROUNDED
+from rich.box import SQUARE
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -298,7 +298,15 @@ class Cortex:
 
         _render_welcome()
 
-        prompt_str = "\x1b[1;96m❯\x1b[0m \x1b[96mYou\x1b[0m \x1b[90m›\x1b[0m "
+        # Prompt styled with the design tokens directly: stark caret, mono "you",
+        # faint separator. No bold (DESIGN.md §11.6), no bright accents.
+        # 38;2;R;G;B = truecolor foreground.
+        #   #ffffff (stark)  ·  #8e8e8e (text-mute)  ·  #4a4a4a (text-faint)
+        prompt_str = (
+            "\x1b[38;2;255;255;255m❯\x1b[0m "
+            "\x1b[38;2;142;142;142myou\x1b[0m "
+            "\x1b[38;2;74;74;74m›\x1b[0m "
+        )
 
         try:
             while True:
@@ -309,7 +317,7 @@ class Cortex:
                     user_input = input(prompt_str).strip()
                 except (EOFError, KeyboardInterrupt):
                     runtime_console.loading_stop_all()
-                    chat_console.print("\n[dim]Chat ended.[/dim]")
+                    chat_console.print("\n  [#8e8e8e]· chat ended.[/#8e8e8e]")
                     break
                 finally:
                     # Always restore live rendering (idempotent if _pause_depth already 0).
@@ -322,27 +330,30 @@ class Cortex:
                 if lowered in {"/exit", "/quit"}:
                     runtime_console.loading_stop_all()
                     chat_console.print(
-                        "  [gold1]✦[/gold1] [dim]Session ended. Goodbye.[/dim]\n"
+                        "  [#8e8e8e]· session ended.[/#8e8e8e]\n"
                     )
                     break
                 if lowered == "/help":
                     cmd_table = Table.grid(padding=(0, 2))
-                    cmd_table.add_column(style="bold gold1", no_wrap=True)
-                    cmd_table.add_column(style="white")
-                    cmd_table.add_row("/help", "Show this help menu")
-                    cmd_table.add_row("/clear", "Clear the screen and re-print the banner")
-                    cmd_table.add_row("/stop", "Stop the underlying agent (auto-restarts next message)")
-                    cmd_table.add_row("/exit", "End the chat session")
+                    # Eyebrow keys, primary values — matches DESIGN.md §3.3.
+                    cmd_table.add_column(style="#ffffff", no_wrap=True)
+                    cmd_table.add_column(style="#c8c8c8")
+                    cmd_table.add_row("/help",  "show this help")
+                    cmd_table.add_row("/clear", "clear the screen and re-print the banner")
+                    cmd_table.add_row("/stop",  "stop the underlying agent (resumes on next message)")
+                    cmd_table.add_row("/exit",  "end the chat session")
                     cmd_table.add_row("", "")
-                    cmd_table.add_row("[dim]Ctrl-C[/dim]", "[dim]Cancel current input[/dim]")
-                    cmd_table.add_row("[dim]Ctrl-D[/dim]", "[dim]End session[/dim]")
+                    cmd_table.add_row("[#8e8e8e]ctrl-c[/#8e8e8e]", "[#8e8e8e]cancel current input[/#8e8e8e]")
+                    cmd_table.add_row("[#8e8e8e]ctrl-d[/#8e8e8e]", "[#8e8e8e]end session[/#8e8e8e]")
+
+                    help_title = Text("commands", style="#8e8e8e")
 
                     help_panel = Panel(
                         cmd_table,
-                        title="[bold gold1]Commands[/bold gold1]",
+                        title=help_title,
                         title_align="left",
-                        border_style="gold1",
-                        box=ROUNDED,
+                        border_style="#2a2a2a",
+                        box=SQUARE,
                         expand=False,
                         padding=(1, 2),
                     )
@@ -357,8 +368,8 @@ class Cortex:
                     self.stop()
                     runtime_console.loading_stop_all()
                     chat_console.print(
-                        "  [yellow]●[/yellow] [bold]Agent stopped.[/bold] "
-                        "[dim]Send a new message to resume.[/dim]\n"
+                        "  [#f59e0b]![/#f59e0b]  agent stopped.  "
+                        "[#8e8e8e]send a new message to resume.[/#8e8e8e]\n"
                     )
                     continue
 
@@ -366,13 +377,14 @@ class Cortex:
                 try:
                     response = self.run(user_input, timeout=timeout)
                 except Exception as exc:
+                    err_title = Text("error", style="#fca5a5")
                     chat_console.print(
                         Panel(
-                            f"[red]{exc}[/red]",
-                            title="[bold red]✗ Error[/bold red]",
+                            Text(str(exc), style="#ffffff"),
+                            title=err_title,
                             title_align="left",
-                            border_style="red",
-                            box=ROUNDED,
+                            border_style="#fca5a5",
+                            box=SQUARE,
                             expand=False,
                             padding=(0, 2),
                         )
@@ -385,13 +397,14 @@ class Cortex:
                 # so we only need to handle explicit errors here.
                 if response is not None and not response.status:
                     err = response.error or "Unknown error"
+                    err_title = Text("error", style="#fca5a5")
                     chat_console.print(
                         Panel(
-                            f"[red]{err}[/red]",
-                            title="[bold red]✗ Error[/bold red]",
+                            Text(str(err), style="#ffffff"),
+                            title=err_title,
                             title_align="left",
-                            border_style="red",
-                            box=ROUNDED,
+                            border_style="#fca5a5",
+                            box=SQUARE,
                             expand=False,
                             padding=(0, 2),
                         )

@@ -762,7 +762,6 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
         final_message, task_status = self._build_final_message(result)
 
         status_label = task_status.upper()
-        console.info(status_label, "Task has being completed", task_id=task_id, agent_id=self.agent_id)
 
         tools_used = [
             entry.get("tool") if isinstance(entry, dict) else str(entry)
@@ -1061,42 +1060,72 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
         def _fmt_tokens(n: int) -> str:
             return f"{n/1000:.1f}k" if n >= 1000 else str(n)
 
-        table = Table(
-            title="[bold]Execution Timeline[/bold]",
-            show_header=True, header_style="bold",
-            box=rich_box.SIMPLE_HEAD, show_lines=True, expand=True, padding=(0, 1),
+        from rich.text import Text
+        from rich.box import SQUARE as _SQUARE
+        from cortex._engine.utils.console import (
+            FUNC, TEXT, TEXT_MUTE, TEXT_FAINT, NUMBER, SUCCESS_SOFT, ERROR_SOFT, RULE, OPERATOR,
         )
-        table.add_column("Description", ratio=4)
-        table.add_column("Tool", min_width=12, style="bright_yellow", no_wrap=True)
-        table.add_column("Params", ratio=5, style="dim")
-        table.add_column("Tokens", min_width=14, no_wrap=True)
-        table.add_column("Duration", min_width=8, no_wrap=True)
+
+        _dash = Text("—", style=TEXT_FAINT)
+
+        console.console.print()
+
+        table = Table(
+            title=Text("Execution Timeline", style="white"),
+            show_header=True, header_style=TEXT_MUTE,
+            box=_SQUARE, show_lines=False, expand=True, padding=(0, 1),
+            border_style=RULE,
+        )
+        table.add_column("description", ratio=4, style=TEXT)
+        table.add_column("tool", min_width=12, no_wrap=True)
+        table.add_column("params", ratio=5, style=TEXT_MUTE)
+        table.add_column("tokens", min_width=14, no_wrap=True)
+        table.add_column("duration", min_width=8, no_wrap=True)
 
         for item in timeline_items:
             dur = item["duration"]
-            dur_str = f"{dur:.2f}s" if dur > 0 else "[dim]—[/dim]"
+            if dur > 0:
+                dur_text = Text()
+                dur_text.append(f"{dur:.2f}", style=NUMBER)
+                dur_text.append("s", style=TEXT_MUTE)
+            else:
+                dur_text = _dash
+
             tok_in = item.get("tokens_in", 0)
             tok_out = item.get("tokens_out", 0)
             if tok_in or tok_out:
-                tok_str = f"[green]↑{_fmt_tokens(tok_in)}[/green] [yellow]↓{_fmt_tokens(tok_out)}[/yellow]"
+                tok_text = Text()
+                tok_text.append(f"↑{_fmt_tokens(tok_in)}", style=SUCCESS_SOFT)
+                tok_text.append("  ", style=TEXT_FAINT)
+                tok_text.append(f"↓{_fmt_tokens(tok_out)}", style=FUNC)
             else:
-                tok_str = "[dim]—[/dim]"
+                tok_text = _dash
+
             if item["type"] == "group_header":
-                table.add_row(
-                    f"[bold cyan]{item['description']}[/bold cyan]",
-                    f"[cyan]{item['tool']}[/cyan]", "", "", "",
-                )
+                desc_text = Text(item["description"], style=FUNC)
+                tool_text = Text(item["tool"], style=TEXT_FAINT)
+                table.add_row(desc_text, tool_text, Text(""), Text(""), Text(""))
                 continue
-            icon = (
-                "[dim]~[/dim]" if item["type"] == "llm"
-                else ("[green]✓[/green]" if item["status"] in ("ok", "success") else "[red]✗[/red]")
-            )
+
+            if item["type"] == "llm":
+                icon = Text("~", style=TEXT_FAINT)
+            elif item["status"] in ("ok", "success"):
+                icon = Text("✓", style=SUCCESS_SOFT)
+            else:
+                icon = Text("✗", style=ERROR_SOFT)
+
+            tool_text = Text()
+            tool_text.append_text(icon)
+            tool_text.append("  ")
+            tool_text.append(item["tool"], style=FUNC)
+
+            desc = item["description"] or ""
             table.add_row(
-                item["description"] or "[dim]—[/dim]",
-                f"{icon} {item['tool']}",
-                item["params"] or "[dim]—[/dim]",
-                tok_str,
-                dur_str,
+                Text(desc, style=TEXT) if desc else _dash,
+                tool_text,
+                Text(item["params"], style=TEXT_MUTE) if item["params"] else _dash,
+                tok_text,
+                dur_text,
             )
 
         console.console.print(table)

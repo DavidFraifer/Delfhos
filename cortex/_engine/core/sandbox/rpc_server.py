@@ -1,9 +1,13 @@
 """
-RPC Server — Host-side Unix-socket server for the Docker sandbox.
+RPC Server — Host-side TCP server for the Docker sandbox.
 
-Listens on a Unix Domain Socket, receives tool-call requests from the
-container's proxy libraries, dispatches them to the real tool library
-instances running in the host process, and streams results back.
+Listens on a TCP loopback port, receives tool-call requests from the
+container's proxy libraries (reaching the host via ``host.docker.internal``),
+dispatches them to the real tool library instances running in the host
+process, and streams results back.
+
+TCP is used instead of Unix sockets because bind-mounting Unix sockets is
+unreliable on macOS Docker Desktop (Errno 95 / Operation not supported).
 """
 
 from __future__ import annotations
@@ -11,8 +15,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-import tempfile
 from typing import Any, Callable, Coroutine, Dict, Optional
 
 from . import rpc_protocol as proto
@@ -22,21 +24,19 @@ logger = logging.getLogger(__name__)
 
 class RPCServer:
     """
-    Async Unix-socket server that bridges container ↔ host tool calls.
+    Async TCP server that bridges container ↔ host tool calls.
 
     Lifecycle
     ---------
-    1. ``await server.start()`` — creates socket, starts listening
+    1. ``await server.start()`` — binds a TCP port, starts listening
     2. Container connects and sends ``tool_call`` / ``print_output`` messages
-    3. Server dispatches each ``tool_call`` to ``tool_dispatch_fn``
-    4. ``await server.stop()`` — shuts down and removes socket file
+    3. Server dispatches each ``tool_call`` to the matching tool library
+    4. ``await server.stop()`` — shuts down
 
     Parameters
     ----------
     tool_libraries : dict[str, Any]
         The real host-side tool library instances (gmail, sql, …).
-    socket_path : str | None
-        Where to bind the Unix socket.  ``None`` → auto temp path.
     on_print : callable | None
         Called with ``(text: str)`` for each ``print_output`` from the container.
     """
@@ -44,13 +44,11 @@ class RPCServer:
     def __init__(
         self,
         tool_libraries: Dict[str, Any],
-        socket_path: Optional[str] = None,
         on_print: Optional[Callable[[str], None]] = None,
     ):
         self.tool_libraries = tool_libraries
-        self.socket_path = socket_path or os.path.join(
-            tempfile.mkdtemp(prefix="delfhos_rpc_"), "sandbox.sock"
-        )
+        self.host = "127.0.0.1"
+        self.port: int = 0
         self._on_print = on_print
         self._server: Optional[asyncio.AbstractServer] = None
         self._result_future: Optional[asyncio.Future] = None
@@ -62,22 +60,17 @@ class RPCServer:
     # Public API
     # ------------------------------------------------------------------
 
-    async def start(self) -> str:
-        """Start the server and return the socket path."""
-        # Ensure parent dir exists
-        os.makedirs(os.path.dirname(self.socket_path), exist_ok=True)
-        # Remove stale socket if present
-        if os.path.exists(self.socket_path):
-            os.unlink(self.socket_path)
-
+    async def start(self) -> int:
+        """Start the server and return the bound TCP port."""
         self._result_future = asyncio.get_running_loop().create_future()
-        self._server = await asyncio.start_unix_server(
-            self._handle_client, path=self.socket_path
+        self._server = await asyncio.start_server(
+            self._handle_client, host=self.host, port=0
         )
-        # Allow container user to connect
-        os.chmod(self.socket_path, 0o777)
-        logger.debug("RPC server listening on %s", self.socket_path)
-        return self.socket_path
+        # Capture the OS-assigned port
+        sock = self._server.sockets[0]
+        self.port = sock.getsockname()[1]
+        logger.debug("RPC server listening on %s:%d", self.host, self.port)
+        return self.port
 
     async def wait_for_result(self) -> Dict[str, Any]:
         """Block until the container sends ``execution_done``."""
@@ -86,19 +79,11 @@ class RPCServer:
         return await self._result_future
 
     async def stop(self) -> None:
-        """Shut down the server and clean up the socket file."""
+        """Shut down the server."""
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
-        if os.path.exists(self.socket_path):
-            os.unlink(self.socket_path)
-        # Try to remove the temp directory
-        parent = os.path.dirname(self.socket_path)
-        try:
-            os.rmdir(parent)
-        except OSError:
-            pass
 
     # ------------------------------------------------------------------
     # Connection handler

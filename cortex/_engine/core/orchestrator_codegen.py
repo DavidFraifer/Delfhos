@@ -424,9 +424,9 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
 
         selected_tools = {a.split(":")[0] if ":" in a else a for a in selected_actions}
         tool_label = "tool" if len(selected_tools) == 1 else "tools"
-        console.info(
-            "Prefiltering", f"— {len(selected_tools)} {tool_label} selected",
-            task_id=task_id, agent_id=self.agent_id,
+        console.tool(
+            "prefilter", f"{len(selected_tools)} {tool_label} selected",
+            task_id=task_id, agent_id=self.agent_id, scope="prefilter",
         )
 
         python_api_docs = build_filtered_api_docs(
@@ -464,12 +464,19 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
             "drive", "calendar", "docs", "websearch", "memory",
         }
 
+        from rich.box import SQUARE
+        from rich.text import Text
+
+        # Design-system tokens: no bold, no background colors, no rainbow (§11.6).
         actions_table = Table(
-            title="Available Actions for Agent", show_header=True, header_style="bold cyan"
+            show_header=True,
+            header_style="#8e8e8e",  # textMute — eyebrow keys
+            box=SQUARE,
+            border_style="#2a2a2a",
         )
-        actions_table.add_column("Tool", style="cyan", width=20)
-        actions_table.add_column("Actions", style="green")
-        actions_table.add_column("Type", style="dim yellow", width=12)
+        actions_table.add_column("TOOL", style="#7dd3fc", width=20, no_wrap=True)
+        actions_table.add_column("ACTIONS", style="#c8c8c8")
+        actions_table.add_column("TYPE", style="#8e8e8e", width=10)
 
         def _is_selected(tool_name: str) -> bool:
             return any(
@@ -484,33 +491,42 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
             if not user_tools_added:
                 user_tools_added = True
             acts_str = ", ".join(sorted(actions_by_tool[tool_name]))
-            style = "bold green" if _is_selected(tool_name) else "dim"
+            name_style = "#7dd3fc" if _is_selected(tool_name) else "#4a4a4a"
+            acts_style = "#c8c8c8" if _is_selected(tool_name) else "#4a4a4a"
             actions_table.add_row(
-                f"[{style}]{tool_name}[/{style}]",
-                f"[{style}]{acts_str}[/{style}]",
-                "[bold magenta]User[/bold magenta]",
+                Text(tool_name, style=name_style),
+                Text(acts_str, style=acts_style),
+                Text("user", style="#8e8e8e"),
             )
 
         if user_tools_added:
-            actions_table.add_row("[dim]─[/dim]", "[dim]─[/dim]", "[dim]─[/dim]")
+            actions_table.add_row(
+                Text("─", style="#2a2a2a"),
+                Text("─", style="#2a2a2a"),
+                Text("─", style="#2a2a2a"),
+            )
 
         for tool_name in sorted(actions_by_tool.keys()):
             if tool_name not in internal_tool_names:
                 continue
             acts_str = ", ".join(sorted(actions_by_tool[tool_name]))
-            style = "bold green" if _is_selected(tool_name) else "dim"
+            name_style = "#7dd3fc" if _is_selected(tool_name) else "#4a4a4a"
+            acts_style = "#c8c8c8" if _is_selected(tool_name) else "#4a4a4a"
             actions_table.add_row(
-                f"[{style}]{tool_name}[/{style}]",
-                f"[{style}]{acts_str}[/{style}]",
-                "[dim white]Internal[/dim white]",
+                Text(tool_name, style=name_style),
+                Text(acts_str, style=acts_style),
+                Text("internal", style="#4a4a4a"),
             )
 
-        actions_table.caption = (
-            "[bold]Legend:[/bold] "
-            "[bold magenta]User[/bold magenta] = Tools you provided (Native, APITool, Custom Tools) | "
-            "[dim white]Internal[/dim white] = Sandbox-only tools (files, llm)"
+        actions_table.caption = Text(
+            "user = your tools (Native, APITool, Custom)   ·   internal = sandbox-only (files, llm)",
+            style="#4a4a4a",
         )
-        console.console.print(Panel(actions_table, border_style="cyan", expand=False))
+
+        title = Text("actions", style="#8e8e8e")
+        console.console.print(
+            Panel(actions_table, title=title, title_align="left", border_style="#2a2a2a", box=SQUARE, expand=False)
+        )
         console.console.print()
 
     # ------------------------------------------------------------------ #
@@ -557,11 +573,6 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
                     )
             python_api_docs = build_filtered_api_docs(
                 all_actions, custom_descriptions=self.tool_descriptions
-            )
-            console.info(
-                "Code generation",
-                "Starting (prefilter disabled - using all tools)",
-                task_id=task_id, agent_id=self.agent_id,
             )
         else:
             result = await self._run_prefilter(

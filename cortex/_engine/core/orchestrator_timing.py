@@ -235,21 +235,18 @@ class OrchestratorTimingMixin:
         if tool_name == "awaiting_approval":
             return
 
-        # Planning spinner is handled specially
+        # Planning phase — internal, shown as a spinner then a completion line.
         if tool_name == "llm_code_generation":
             loading_key = f"{task_id}:llm_code_generation"
             if is_starting:
                 if loading_key not in self._active_phase_logs:
                     self._active_phase_logs[loading_key] = True
-                    console.loading_start(
-                        "[white]Planning[/white]  [bright_yellow]llm[/bright_yellow] [grey50]...[/grey50]",
-                        loading_key,
-                    )
+                    console.loading_start("planning", loading_key)
             else:
                 self._active_phase_logs.pop(loading_key, None)
                 console.loading_stop(loading_key)
                 if duration is not None:
-                    console.tool("[white]Planning[/white]  [bright_yellow]llm[/bright_yellow]", None, task_id=task_id)
+                    console.tool("planning", None, task_id=task_id, scope="llm")
             return
 
         is_internal = tool_name in self._VISIBLE_PHASES
@@ -257,9 +254,6 @@ class OrchestratorTimingMixin:
 
         if not is_internal and not description:
             return
-
-        tool_color = "bright_yellow" if not is_internal else "magenta"
-        formatted_label = f"[white]{label}[/white]  [{tool_color}]{tool_name}[/{tool_color}]"
 
         if is_internal:
             key = (task_id, tool_name)
@@ -273,7 +267,9 @@ class OrchestratorTimingMixin:
             if key in self._active_phase_logs:
                 return
             self._active_phase_logs[key] = True
-            console.loading_start(f"{formatted_label} [grey50]...[/grey50]", loading_key)
+            # Spinner label: plain text, no markup.
+            spinner_label = f"{label}  {tool_name}" if not is_internal else label
+            console.loading_start(spinner_label, loading_key)
             return
 
         # ── Completion ───────────────────────────────────────────────────────
@@ -313,7 +309,6 @@ class OrchestratorTimingMixin:
                 v_str = v_str[:39] + "…"
             param_parts.append(f"{k}={v_str}")
 
-        params_str = "  ".join(param_parts)
-        tool_color = "bright_yellow" if not is_internal else "magenta"
-        msg = f"[white]{label}[/white]  [{tool_color}]{tool_name}[/{tool_color}]"
-        console.tool(msg, params_str or None, task_id=task_id)
+        params_str = "  ".join(param_parts) or None
+        # scope=tool_name renders in #7dd3fc (func/actor color, DESIGN.md §4).
+        console.tool(label, params_str, task_id=task_id, scope=tool_name)

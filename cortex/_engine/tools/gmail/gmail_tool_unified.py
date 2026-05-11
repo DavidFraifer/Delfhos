@@ -195,13 +195,13 @@ async def gmail_tool_unified(
         else:
             # Format beautiful error with available actions
             error_msg = (
-                f"❌ Unknown Gmail action: '{action}'\n\n"
-                f"📋 Available actions for Gmail:\n"
-                f"    • READ - Fetch emails from inbox/sent/drafts/spam/trash\n"
-                f"    • SEND - Send an email\n\n"
-                f"💡 Use one of these actions in your next request."
+                f"unknown gmail action: '{action}'\n\n"
+                f"available actions:\n"
+                f"  · READ  fetch emails from inbox/sent/drafts/spam/trash\n"
+                f"  · SEND  send an email\n\n"
+                f"use one of these actions in your next request."
             )
-            console.error(f"[GMAIL ERROR]", error_msg, task_id=task_id, agent_id=agent_id)
+            console.error("gmail", error_msg, task_id=task_id, agent_id=agent_id)
             return error_msg
     
     except Exception as e:

@@ -261,9 +261,9 @@ async def execute_code(
 
 # ── Main entrypoint ──────────────────────────────────────────────────
 
-async def main(socket_path: str) -> None:
+async def main(endpoint: str) -> None:
     """Connect to host, receive code, execute, report result."""
-    rpc = RPCClient(socket_path)
+    rpc = RPCClient(endpoint)
     await rpc.connect()
 
     try:
@@ -313,6 +313,6 @@ async def main(socket_path: str) -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: agent_runner.py <socket_path>", file=sys.stderr)
+        print("Usage: agent_runner.py <host:port>", file=sys.stderr)
         sys.exit(1)
     asyncio.run(main(sys.argv[1]))

@@ -147,7 +147,7 @@ class CORTEXLogger:
                 f.write(json.dumps(log_entry) + "\n")
                 
         except Exception as e:
-            print(f"⚠️ [Logger] Failed to write log entry: {e}")
+            console.warning("logger", f"failed to write log entry: {e}")
     
     def get_log_stats(self) -> Dict[str, Any]:
         if not self.log_file:
@@ -187,7 +187,7 @@ class CORTEXLogger:
                         stats["completed_tasks"] += 1
                         
                 except (json.JSONDecodeError, Exception) as e:
-                    print(f"⚠️ [Logger] Skipping malformed log line: {e}")
+                    console.warning("logger", f"skipping malformed log line: {e}")
                     continue
             
             if stats["total_tasks"] == 0:
@@ -207,7 +207,7 @@ class CORTEXLogger:
             return stats
             
         except Exception as e:
-            print(f"⚠️ [Logger] Error reading log stats: {e}")
+            console.warning("logger", f"error reading log stats: {e}")
             return {"error": str(e), "total_tasks": 0, "total_tokens": 0, "log_file": str(self.log_file)}
     
     def _empty_stats(self) -> Dict[str, Any]:

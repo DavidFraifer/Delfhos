@@ -3,7 +3,7 @@ Proxy Libraries — Container-side stubs that forward tool calls to the host via
 
 These objects live *inside* the Docker container and are injected into the
 agent code's namespace in place of the real tool libraries.  Every method
-call is serialised to JSON and sent over the Unix socket to the host-side
+call is serialised to JSON and sent over a TCP socket to the host-side
 ``RPCServer``, which dispatches it to the real library.
 """
 
@@ -17,21 +17,27 @@ from typing import Any, Dict, Optional
 
 class RPCClient:
     """
-    Async client that talks to the host-side ``RPCServer`` over a Unix socket.
+    Async client that talks to the host-side ``RPCServer`` over TCP.
 
-    Used by :class:`ProxyToolLibrary` to forward tool calls.
+    The endpoint is given as ``host:port`` (e.g. ``host.docker.internal:54321``).
+    TCP is used instead of Unix sockets because bind-mounted Unix sockets are
+    unreliable on macOS Docker Desktop (Errno 95 / Operation not supported).
     """
 
-    def __init__(self, socket_path: str):
-        self._socket_path = socket_path
+    def __init__(self, endpoint: str):
+        host, _, port = endpoint.rpartition(":")
+        if not host or not port:
+            raise ValueError(f"Expected host:port endpoint, got {endpoint!r}")
+        self._host = host
+        self._port = int(port)
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
         self._pending: Dict[str, asyncio.Future] = {}
         self._listen_task: Optional[asyncio.Task] = None
 
     async def connect(self) -> None:
-        self._reader, self._writer = await asyncio.open_unix_connection(
-            self._socket_path
+        self._reader, self._writer = await asyncio.open_connection(
+            self._host, self._port
         )
         self._listen_task = asyncio.create_task(self._listen_loop())
 

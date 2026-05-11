@@ -19,7 +19,19 @@ from rich.table import Table
 from rich.text import Text
 from rich.rule import Rule
 from delfhos.errors import ApprovalRejectedError
-from ..utils.console import console, BRAND_ZINC, BRAND_ZINC_BRIGHT, BRAND_STARK, BRAND_AMBER
+from ..utils.console import (
+    console,
+    TEXT,
+    TEXT_SUB,
+    TEXT_MUTE,
+    TEXT_FAINT,
+    RULE,
+    WARNING,
+    KEYWORD,
+    FUNC,
+    NUMBER,
+    STRING,
+)
 
 
 class ApprovalRequest:
@@ -36,6 +48,7 @@ class ApprovalRequest:
         self.status = "pending"  # pending, approved, rejected
         self.response = None
         self.responded_at = None
+        self._was_interactive = False  # True when resolved via stdin questionary
         self._lock = threading.Lock()
     
     def approve(self, response: str = "Approved"):
@@ -162,32 +175,36 @@ class ApprovalManager:
 
         from rich.console import Group
 
-        # Header: operation being approved
+        # Header: tool.method, function-color per §4 (an actor / callable).
         header = Text()
-        header.append(preview["target"], style=f"bold {BRAND_STARK}")
+        header.append(preview["target"], style=FUNC)
 
-        # Per-parameter table — one row per argument
+        # Per-parameter table — keys mute, values stark.
         args = preview["args"]
         if args:
             params_table = Table.grid(padding=(0, 2))
-            params_table.add_column(style=f"bold {BRAND_ZINC_BRIGHT}", justify="right", no_wrap=True)
-            params_table.add_column(style=BRAND_STARK, overflow="fold")
+            params_table.add_column(style=TEXT_MUTE, justify="right", no_wrap=True)
+            params_table.add_column(style=TEXT, overflow="fold")
             for k, v in args.items():
                 raw = v if isinstance(v, str) else self._short_repr(v, max_len=200)
-                # Truncate very long values with a clear indicator
                 if len(raw) > 200:
                     raw = raw[:197] + "…"
                 params_table.add_row(k, raw)
             body = Group(header, Text(""), params_table)
         else:
-            body = Group(header, Text(""), Text("(no parameters)", style=BRAND_ZINC))
+            body = Group(header, Text(""), Text("(no parameters)", style=TEXT_FAINT))
+
+        from rich.box import SQUARE
+        title = Text("approval", style=WARNING)
 
         rich_console.print("")
         rich_console.print(
             Panel(
                 body,
-                title=f"[bold {BRAND_AMBER}]  Approval required[/bold {BRAND_AMBER}]",
-                border_style=BRAND_AMBER,
+                title=title,
+                title_align="left",
+                border_style=WARNING,
+                box=SQUARE,
                 expand=False,
                 padding=(1, 2),
             )
@@ -198,16 +215,19 @@ class ApprovalManager:
         sys.stdout.flush()
         sys.stderr.flush()
 
-        # Define questionary style (inspired by Claude's UI)
+        # Questionary style mapped to the Delfhos palette (DESIGN.md §2, §11).
+        # No bold (§11.6), no background fills (§11.6 — "No background colors. Ever.").
         approval_style = Style(
             [
-                ("qmark", "fg:#ff9d00 bold"),        # Question mark
-                ("question", "fg:#ffffff bold"),      # Question text
-                ("answer", "fg:#00d4ff bold"),        # Answer text
-                ("pointer", "fg:#00d4ff bold"),       # Pointer
-                ("highlighted", "fg:#ffffff bg:#1e40af"),  # Highlighted option
-                ("selected", "fg:#00d4ff"),           # Selected option
-                ("separator", "fg:#555555"),          # Separator
+                ("qmark",       "fg:#f59e0b"),   # warning amber
+                ("question",    "fg:#ffffff"),
+                ("answer",      "fg:#86efac"),   # chosen answer — string-soft
+                ("pointer",     "fg:#ffffff"),   # pointer arrow
+                ("highlighted", "fg:#ffffff"),   # focused choice — white
+                ("text",        "fg:#4a4a4a"),   # non-focused choices — faint
+                ("selected",    "fg:#86efac"),
+                ("separator",   "fg:#4a4a4a"),
+                ("instruction", "fg:#000000"),   # hide "(Use arrow keys)"
             ]
         )
 
@@ -223,13 +243,15 @@ class ApprovalManager:
                 sys.stderr = sys.__stderr__
                 
                 result = await questionary.select(
-                    "Approve this action?",
+                    "",
                     choices=[
                         questionary.Choice("✓ Approve", value=True),
                         questionary.Choice("✗ Reject", value=False),
                     ],
                     style=approval_style,
                     pointer="→",
+                    qmark="",
+                    instruction=" ",
                 ).ask_async()
                 
             finally:
@@ -353,6 +375,7 @@ class ApprovalManager:
                         try:
                             decision = await self._stdin_confirm(request)
                             self._apply_decision(request, decision, "stdin")
+                            request._was_interactive = True
                         except asyncio.CancelledError:
                             # Task was cancelled (timeout/stop) - reject the approval
                             request.reject("Cancelled due to task timeout or stop")
@@ -473,20 +496,22 @@ class ApprovalManager:
                                 task_id=request.task_id, agent_id=request.agent_id)
         
         if request.status == "approved":
-            console.success(
-                "APPROVED",
-                f"Request: {request.request_id} | Response: {request.response}",
-                task_id=request.task_id,
-                agent_id=request.agent_id
-            )
+            if not request._was_interactive:
+                console.success(
+                    "approved",
+                    request.response or None,
+                    task_id=request.task_id,
+                    agent_id=request.agent_id,
+                )
             return True
         else:
-            console.warning(
-                "❌ REJECTED",
-                f"Request: {request.request_id} | Reason: {request.response}",
-                task_id=request.task_id,
-                agent_id=request.agent_id
-            )
+            if not request._was_interactive:
+                console.warning(
+                    "rejected",
+                    request.response or None,
+                    task_id=request.task_id,
+                    agent_id=request.agent_id,
+                )
             return False
     
     def get_pending_requests(self, agent_id: Optional[str] = None) -> list:

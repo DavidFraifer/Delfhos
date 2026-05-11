@@ -1092,11 +1092,10 @@ agent = Agent(
     llm="gemini-2.0-flash",
     sandbox="docker",
     sandbox_config={
-        "memory_limit": "1g",      # Default: "512m"
-        "cpu_limit":    2.0,       # Default: 1.0 CPU core
-        "timeout":      600,       # Default: 300 seconds
-        "network":      False,     # Default: False (no outbound network)
-        "pids_limit":   128,       # Default: 64 (fork-bomb protection)
+        "memory_limit": "1g",   # Default: "512m"
+        "cpu_limit":    2.0,    # Default: 1.0 CPU core
+        "timeout":      600,    # Default: 300 seconds
+        "pids_limit":   128,    # Default: 64 (fork-bomb protection)
     },
 )
 ```
@@ -1105,7 +1104,7 @@ agent = Agent(
 
 When Docker is available and `sandbox="docker"` or `sandbox="auto"`, each task execution runs in a disposable container with:
 
-- **No network access** — the container cannot make outbound connections (all API calls go through the host via a Unix socket bridge)
+- **Code-level network isolation** — the container has a route to the host (required for the RPC bridge) but generated code cannot make arbitrary network calls — `urllib`, `requests`, `httpx`, `socket`, and similar modules are blocked by the import allowlist
 - **Read-only filesystem** — the container rootfs is immutable; only `/tmp` (50 MB, `noexec`) and the task upload directory are writable
 - **Memory cap** — the kernel kills the process if it exceeds the limit
 - **CPU quota** — prevents runaway computation from starving the host
@@ -1113,16 +1112,18 @@ When Docker is available and `sandbox="docker"` or `sandbox="auto"`, each task e
 - **No Linux capabilities** — `ALL` capabilities dropped; `no-new-privileges` set
 - **Unprivileged user** — agent code runs as a non-root `sandbox` user
 
+All API calls (Gmail, SQL, etc.) are forwarded to the host process over a TCP bridge (`host.docker.internal`) — generated code never touches the network directly.
+
 Even if generated code escapes the Python-level sandbox (e.g. via object introspection), the container boundary contains the damage.
 
 ### Building the Docker image
 
-The sandbox image is built automatically the first time a task runs with Docker enabled. To pre-build it manually (recommended for CI or production deployments):
+The sandbox image is built automatically the first time a task runs with Docker enabled. It is also **rebuilt automatically** whenever the bundled container sources change (e.g. after a Delfhos upgrade), so you never run a stale image without realising it. To pre-build manually (recommended for CI or production deployments):
 
 ```python
 from cortex._engine.core.sandbox.docker_sandbox import build_image
 
-build_image()          # Skips if image already exists
+build_image()            # Skips if image is up to date
 build_image(force=True)  # Rebuild unconditionally
 ```
 

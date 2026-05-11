@@ -47,7 +47,7 @@ def configure_api_keys(providers: Optional[Dict[str, str]] = None):
         from ..utils.console import console
         console.system("API keys loaded", f"{', '.join(_api_key_cache.keys())}")
     except ImportError:
-        print(f"✅ API keys loaded for: {list(_api_key_cache.keys())}")
+        print(f"  · api keys loaded: {list(_api_key_cache.keys())}")
 
 def get_cached_api_key(service: str) -> str:
     """Get cached API key for a service."""

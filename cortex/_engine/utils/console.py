@@ -6,30 +6,75 @@ from contextlib import contextmanager
 from enum import Enum
 from typing import Optional, Dict
 
-from rich.align import Align
-from rich.box import ROUNDED
-from rich.columns import Columns
+from rich.box import SQUARE
 from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
+from rich.theme import Theme
 
 
-# ── Delfhos brand palette (Code-act Framework v2.0.0) ─────────────
-# Monochrome metallic finish: carbon / graphite / stark white / muted zinc.
-# Soft amber is the sole warm accent, reserved for warnings & cursors.
-# Mint green is the success accent, reserved for ticks and completions.
-BRAND_CARBON      = "#050505"  # Forged Carbon Matte  (backgrounds)
-BRAND_GRAPHITE    = "#121212"  # Graphite Anodized    (panels)
-BRAND_STARK       = "#FFFFFF"  # Stark Matte White    (primary text, logo, brand accent)
-BRAND_ZINC        = "#717983"  # Muted Zinc Neutral   (metadata, annotations, dim)
-BRAND_ZINC_BRIGHT = "#A8ADB5"  # brighter zinc        (secondary text)
-BRAND_AMBER       = "#FF7983"  # Soft Amber           (warnings, cursors)
-BRAND_ERROR       = "#E05561"  # desaturated red      (errors — stays tonally close to amber)
-BRAND_SUCCESS     = "#D4D7DB"  # near-stark silver    (success, subtle)
-BRAND_MINT        = "#4EC994"  # Mint Green           (ticks, success accents)
+# ── Delfhos design system palette (see DESIGN.md §2, §4, §11) ─────
+# Near-monochrome. Color earns its place. Mono for technical surfaces.
+# These hex values are the canonical tokens shared with the marketing
+# site and docs — keep them in sync with `app/globals.css`.
+
+# Surfaces
+BG          = "#000000"
+BG_CARD     = "#0d0d0d"
+BG_RAISED   = "#141414"
+RULE        = "#2a2a2a"
+
+# Text
+TEXT        = "#ffffff"
+TEXT_SUB    = "#c8c8c8"
+TEXT_MUTE   = "#8e8e8e"
+TEXT_FAINT  = "#4a4a4a"
+
+# Syntax / log roles
+KEYWORD     = "#c4b5fd"
+FUNC        = "#7dd3fc"
+STRING      = "#86efac"
+NUMBER      = "#7dd3fc"
+DECORATOR   = "#f9a8d4"
+OPERATOR    = "#6e6e6e"
+COMMENT     = "#4a4a4a"
+
+# Semantic — reserved for terminal states
+SUCCESS     = "#22c55e"
+SUCCESS_SOFT = "#86efac"
+WARNING     = "#f59e0b"
+ERROR       = "#ef4444"
+ERROR_SOFT  = "#fca5a5"
+INFO        = "#3b82f6"
+
+
+# Markdown theme aligned with the Delfhos palette.
+# Overrides Rich's default magenta headings and cyan code blocks.
+_MARKDOWN_THEME = Theme({
+    "markdown.h1":          f"bold {TEXT}",
+    "markdown.h1.border":   RULE,
+    "markdown.h2":          f"bold {FUNC}",
+    "markdown.h3":          FUNC,
+    "markdown.h4":          f"italic {FUNC}",
+    "markdown.h5":          f"italic {TEXT_MUTE}",
+    "markdown.h6":          TEXT_FAINT,
+    "markdown.strong":      f"bold {TEXT}",
+    "markdown.em":          f"italic {TEXT_SUB}",
+    "markdown.code":        f"{STRING} on {BG_CARD}",
+    "markdown.code_block":  f"{STRING} on {BG_CARD}",
+    "markdown.block_quote": TEXT_MUTE,
+    "markdown.list":        TEXT_SUB,
+    "markdown.item.bullet": OPERATOR,
+    "markdown.item.number": FUNC,
+    "markdown.hr":          RULE,
+    "markdown.link":        FUNC,
+    "markdown.link_url":    f"underline {FUNC}",
+    "markdown.table.border":  RULE,
+    "markdown.table.header":  f"bold {TEXT_SUB}",
+})
 
 
 DEFAULT_ERROR_HINT = (
@@ -81,6 +126,7 @@ def extract_error_payload(exc: BaseException) -> tuple[str, str, str]:
     message = parsed_msg if parsed_msg else exc_text
     return code, message, DEFAULT_ERROR_HINT
 
+
 class LogLevel(Enum):
     INFO = "INFO"
     SUCCESS = "SUCCESS"
@@ -91,39 +137,72 @@ class LogLevel(Enum):
     SYSTEM = "SYSTEM"
     TOOL = "TOOL"
 
+
 def convert_markdown_links_to_rich(text: str) -> str:
     """Convert markdown links [text](url) to Rich clickable links [link=url]text[/link]"""
     pattern = r'\[([^\]]+)\]\(([^\)]+)\)'
     replacement = r'[link=\2]\1[/link]'
     return re.sub(pattern, replacement, text)
 
-class ProfessionalConsole:
-    """Minimal, clean console output inspired by modern CLI tools."""
 
+def _label(text: str) -> Text:
+    """Simple lowercase muted label."""
+    return Text(text.lower(), style=TEXT_MUTE)
+
+
+def _hairline(width: int = 64) -> Text:
+    """A thin rule made from U+2500, color RULE — never `=`, never `*` (§11.3)."""
+    return Text("─" * width, style=RULE)
+
+
+class ProfessionalConsole:
+    """Console output aligned with the Delfhos design system.
+
+    Quiet by default. Confident when it counts. Near-monochrome.
+    See DESIGN.md §11 for the rules this class implements.
+    """
+
+    # Glyphs are uniform across the system (§11.2). No emoji, ever.
     _SYMBOLS = {
-        LogLevel.INFO: "●",
+        LogLevel.INFO:    "·",
         LogLevel.SUCCESS: "✓",
         LogLevel.WARNING: "!",
-        LogLevel.ERROR: "✗",
-        LogLevel.DEBUG: "·",
-        LogLevel.TASK: "◆",
-        LogLevel.SYSTEM: "◆",
-        LogLevel.TOOL: "▸",
+        LogLevel.ERROR:   "✗",
+        LogLevel.DEBUG:   "·",
+        LogLevel.TASK:    "▸",
+        LogLevel.SYSTEM:  "▸",
+        LogLevel.TOOL:    "▸",
+    }
+
+    # Lowercase 3–4 char level tags shown in verbose mode (§11.2).
+    _TAGS = {
+        LogLevel.INFO:    "info",
+        LogLevel.SUCCESS: "ok",
+        LogLevel.WARNING: "warn",
+        LogLevel.ERROR:   "err",
+        LogLevel.DEBUG:   "dbg",
+        LogLevel.TASK:    "task",
+        LogLevel.SYSTEM:  "sys",
+        LogLevel.TOOL:    "tool",
     }
 
     def __init__(self, enable_colors: bool = True):
-        import sys
         self.console = Console(file=sys.__stderr__)
         self._lock = threading.Lock()
         self.start_time = time.time()
         self.verbose = False  # Set by orchestrator based on verbose="high"
 
+        # Single-color spinner per §10 — no rainbow progress bars.
+        # Layout mirrors `_print_line` exactly so the spinner glyph sits in
+        # the same column as level symbols (✓ ✗ ▸ ·) and its label aligns
+        # with message text. Geometry: 2-space indent · 1-char glyph ·
+        # 2-space gap · description.
         self.progress = Progress(
             TextColumn("  "),
-            SpinnerColumn(spinner_name="dots", style=BRAND_AMBER, speed=1.2),
-            TextColumn(f"[{BRAND_ZINC_BRIGHT}]{{task.description}}[/{BRAND_ZINC_BRIGHT}]"),
+            SpinnerColumn(spinner_name="dots", style=FUNC, speed=1.2),
+            TextColumn(f"  [{TEXT_SUB}]{{task.description}}[/{TEXT_SUB}]"),
             console=self.console,
-            transient=True
+            transient=True,
         )
         self.active_tasks: Dict[str, int] = {}
         self._loading_tasks: Dict[str, int] = {}
@@ -169,51 +248,91 @@ class ProfessionalConsole:
             self._progress_running = False
 
     def _get_color(self, level: LogLevel) -> str:
-        # Monochrome metallic palette. Only warnings/errors carry warm hue
-        # (soft amber / desaturated red) — everything else lives on the
-        # carbon → zinc → stark-white axis, matching the brand system.
+        # Map levels to design-system roles (DESIGN.md §4 console-log mapping).
+        # Color earns its place: only the three semantic terminal states wear
+        # a saturated hue. Action levels (task/system/tool) live on the mute
+        # axis — their `scope` tag (sky, FUNC) is the sole accent, which keeps
+        # the page calm and lets `✓` / `✗` / `!` actually mean something.
         colors = {
-            LogLevel.INFO:    BRAND_ZINC_BRIGHT,
-            LogLevel.SUCCESS: BRAND_MINT,
-            LogLevel.WARNING: BRAND_AMBER,
-            LogLevel.ERROR:   BRAND_ERROR,
-            LogLevel.DEBUG:   BRAND_ZINC,
-            LogLevel.TASK:    BRAND_STARK,
-            LogLevel.SYSTEM:  BRAND_ZINC_BRIGHT,
-            LogLevel.TOOL:    BRAND_ZINC_BRIGHT,
+            LogLevel.INFO:    TEXT_MUTE,
+            LogLevel.SUCCESS: SUCCESS_SOFT,
+            LogLevel.WARNING: WARNING,
+            LogLevel.ERROR:   ERROR_SOFT,
+            LogLevel.DEBUG:   TEXT_FAINT,
+            LogLevel.TASK:    TEXT_MUTE,
+            LogLevel.SYSTEM:  TEXT_MUTE,
+            LogLevel.TOOL:    TEXT_MUTE,
         }
-        return colors.get(level, BRAND_STARK)
+        return colors.get(level, TEXT)
 
-    def print(self, level: LogLevel, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None):
+    def print(self, level: LogLevel, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None, scope: Optional[str] = None):
         with self._lock:
             if self._suppressed:
-                self._suppressed_queue.append((level, message, details, task_id, agent_id))
+                self._suppressed_queue.append((level, message, details, task_id, agent_id, scope))
                 return
 
-            self._print_line(level, message, details)
+            self._print_line(level, message, details, scope=scope)
 
-    def _print_line(self, level: LogLevel, message: str, details: Optional[str] = None):
-        """Render a single log line to the console (caller must hold _lock)."""
+    def _print_line(self, level: LogLevel, message: str, details: Optional[str] = None, scope: Optional[str] = None):
+        """Render a single log line per §11.1 (caller must hold _lock).
+
+        Non-verbose: ``  {symbol}  [{scope}]  {message}  [{details-mute}]``
+        Verbose:     ``+{time}  {tag}  {symbol}  [{scope}]  {message}  [{details}]``
+
+        ``scope`` renders in #7dd3fc (func color — "an actor / callable", §4).
+        ``message`` renders in #ffffff (primary text).
+        ``details`` renders in #8e8e8e (mute) on a hanging-indented second line.
+        """
         color = self._get_color(level)
-        symbol = self._SYMBOLS.get(level, "●")
+        symbol = self._SYMBOLS.get(level, "·")
 
-        parts = []
+        line = Text("  ")
 
-        # Timestamps only in verbose mode
         if self.verbose:
             elapsed_ms = int((time.time() - self.start_time) * 1000)
             if elapsed_ms < 1000:
                 time_str = f"+{elapsed_ms}ms"
             else:
                 time_str = f"+{elapsed_ms / 1000:.2f}s"
-            parts.append(f"[#717983]{time_str:>10}[/#717983]")
+            line.append(f"{time_str:>8}", style=TEXT_MUTE)
+            line.append("  ")
+            tag = self._TAGS.get(level, "log")
+            line.append(f"{tag:<4}", style=color)
+            line.append("  ")
 
-        parts.append(f"  [{color}]{symbol}[/{color}] {message}")
+        line.append(symbol, style=color)
+        line.append("  ")
+
+        # Track visible char count for inline-vs-multiline decision.
+        vis = 2 + 1 + 2  # leading spaces + symbol + gap
+
+        if self.verbose:
+            vis += 8 + 2 + 4 + 2  # time + gap + tag + gap
+
+        # Optional scope — rendered in func color (#7dd3fc) per §4.
+        if scope:
+            line.append(str(scope), style=FUNC)
+            line.append("  ", style=OPERATOR)
+            vis += len(str(scope)) + 2
+
+        # Body in primary text — competes with nothing.
+        line.append(str(message), style=TEXT)
+        vis += len(str(message))
 
         if details:
-            parts.append(f"  [#717983]{details}[/#717983]")
+            details_str = str(details)
+            term_width = min(self.console.width or 100, 120)
+            if vis + 2 + len(details_str) <= term_width:
+                # ── Inline: fits on the same line ──────────────────────────
+                line.append("  ", style=TEXT_MUTE)
+                line.append(details_str, style=TEXT_MUTE)
+            else:
+                # ── Multiline: arrow continuation on next line ──────────────
+                line.append("\n      ", style=TEXT_MUTE)
+                line.append("↳  ", style=TEXT_FAINT)
+                line.append(details_str, style=TEXT_MUTE)
 
-        self.console.print("".join(parts))
+        self.console.print(line)
 
     def stop_all(self):
         with self._lock:
@@ -231,13 +350,9 @@ class ProfessionalConsole:
             self._suppression_depth += 1
             self._suppressed = True
 
-            # Already suppressed by another caller; keep waiting for the
-            # matching number of unsuppress() calls before resuming output.
             if self._suppression_depth > 1:
                 return
 
-            # Stop the live progress renderer completely — its repaints
-            # would overwrite the questionary prompt otherwise.
             self._remove_all_loading_tasks_locked()
             self._stop_progress_locked()
 
@@ -250,18 +365,17 @@ class ProfessionalConsole:
             self._suppression_depth -= 1
             self._suppressed = self._suppression_depth > 0
 
-            # Still suppressed by another caller.
             if self._suppression_depth > 0:
                 return
 
-            # Restart the live progress renderer unless chat input has paused it.
             self._start_progress_locked()
 
-            # Flush queued messages
             queued = list(self._suppressed_queue)
             self._suppressed_queue.clear()
-            for level, message, details, _tid, _aid in queued:
-                self._print_line(level, message, details)
+            for item in queued:
+                level, message, details, _tid, _aid = item[:5]
+                scope = item[5] if len(item) > 5 else None
+                self._print_line(level, message, details, scope=scope)
 
     def pause_live(self, clear_tasks: bool = False):
         """Temporarily pause live spinner rendering (nesting-safe)."""
@@ -290,10 +404,14 @@ class ProfessionalConsole:
             self.resume_live()
 
     def loading_start(self, label: str, key: str):
-        """Show a simple circle spinner while an operation is running."""
+        """Show a single-color dots spinner while an operation is running."""
         with self._lock:
             if self._suppressed or self._pause_depth > 0 or key in self._loading_tasks:
                 return
+            # Blank line before the spinner so it doesn't visually merge with
+            # the log line immediately above it.
+            if not self._loading_tasks:
+                self.console.print()
             try:
                 task_id = self.progress.add_task(label, total=None)
             except Exception:
@@ -318,51 +436,64 @@ class ProfessionalConsole:
         """Stop all active spinners and force a clean display refresh."""
         with self._lock:
             self._remove_all_loading_tasks_locked()
-            # Stop the live renderer and keep it idle until a new spinner starts.
             self._stop_progress_locked()
 
-    def info(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None):
+    def info(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None, scope: Optional[str] = None):
         if "payload generated" in str(message) or (details and "payload generated" in str(details)):
             return
-        self.print(LogLevel.INFO, message, details, task_id, agent_id)
+        self.print(LogLevel.INFO, message, details, task_id, agent_id, scope=scope)
 
-    def success(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None):
-        self.print(LogLevel.SUCCESS, message, details, task_id, agent_id)
+    def success(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None, scope: Optional[str] = None):
+        self.print(LogLevel.SUCCESS, message, details, task_id, agent_id, scope=scope)
 
-    def warning(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None):
-        self.print(LogLevel.WARNING, message, details, task_id, agent_id)
+    def warning(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None, scope: Optional[str] = None):
+        self.print(LogLevel.WARNING, message, details, task_id, agent_id, scope=scope)
 
-    def error(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None):
-        self.print(LogLevel.ERROR, message, details, task_id, agent_id)
+    def error(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None, scope: Optional[str] = None):
+        self.print(LogLevel.ERROR, message, details, task_id, agent_id, scope=scope)
 
-    def debug(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None):
+    def debug(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None, scope: Optional[str] = None):
         import os
         if os.environ.get("DELFHOS_DEBUG") == "1":
-            self.print(LogLevel.DEBUG, message, details, task_id, agent_id)
+            self.print(LogLevel.DEBUG, message, details, task_id, agent_id, scope=scope)
 
-    def task(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None):
-        self.print(LogLevel.TASK, message, details, task_id, agent_id)
+    def task(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None, scope: Optional[str] = None):
+        self.print(LogLevel.TASK, message, details, task_id, agent_id, scope=scope)
 
-    def system(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None):
-        self.print(LogLevel.SYSTEM, message, details, task_id, agent_id)
+    def system(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None, scope: Optional[str] = None):
+        self.print(LogLevel.SYSTEM, message, details, task_id, agent_id, scope=scope)
 
-    def tool(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None):
-        self.print(LogLevel.TOOL, message, details, task_id, agent_id)
+    def tool(self, message: str, details: Optional[str] = None, task_id: Optional[str] = None, agent_id: Optional[str] = None, scope: Optional[str] = None):
+        self.print(LogLevel.TOOL, message, details, task_id, agent_id, scope=scope)
+
+    def section_banner(self, title: str, eyebrow: str = "DELFHOS"):
+        """Tight title + hairline rule."""
+        with self._lock:
+            head = Text()
+            head.append("  ")
+            head.append(title, style=TEXT_MUTE)
+            self.console.print()
+            self.console.print(head)
+            rule = Text("  ")
+            rule.append("─" * 64, style=RULE)
+            self.console.print(rule)
 
     def print_task_box(self, task_message: str):
-        """Display the user's task in a clean, accented box."""
+        """Render the user's task as a brutalist plate (§6, §11)."""
         display_msg = task_message if len(task_message) < 400 else task_message[:397] + "..."
 
         body = Text()
-        body.append("❯ ", style=f"bold {BRAND_STARK}")
-        body.append(display_msg, style=BRAND_STARK)
+        body.append("❯ ", style=TEXT_MUTE)
+        body.append(display_msg, style=TEXT)
+
+        title = Text("task", style=TEXT_MUTE)
 
         task_panel = Panel(
             body,
-            title=f"[bold {BRAND_STARK}]Task[/bold {BRAND_STARK}]",
+            title=title,
             title_align="left",
-            border_style=BRAND_ZINC,
-            box=ROUNDED,
+            border_style=RULE,
+            box=SQUARE,
             expand=False,
             padding=(0, 2),
         )
@@ -370,7 +501,6 @@ class ProfessionalConsole:
             self.console.print()
             self.console.print(task_panel)
             self.console.print()
-            import sys
             if hasattr(self.console.file, 'flush'):
                 self.console.file.flush()
             sys.stdout.flush()
@@ -405,24 +535,24 @@ class ProfessionalConsole:
         agent_id: Optional[str] = None,
         cwd: Optional[str] = None,
     ):
-        """Render a Claude-Code-style welcome banner with the Delfhos ASCII logo."""
+        """Welcome banner — eyebrow + ASCII logo + key/value rows (§3.3, §6)."""
         tool_list = tools or []
         tool_count = len(tool_list)
         model_str = (llm_config or "not configured").strip()
 
-        # ── Left column: ASCII logo ───────────────────────────────────
+        # ── Left column: ASCII logo in stark white, no bold ───────────
         logo_text = Text()
         for i, line in enumerate(self._LOGO_LINES):
             if i > 0:
                 logo_text.append("\n")
-            logo_text.append(line, style=f"bold {BRAND_STARK}")
+            logo_text.append(line, style=TEXT)
 
-        # ── Right column: name chip + info rows ───────────────────────
+        # ── Right column: name + version chip + key/value table ──────
         header = Text()
-        header.append("Delfhos", style=f"bold {BRAND_STARK}")
-        header.append("  ")
-        # Stark-white chip on graphite — matches the "Stark Matte White" swatch.
-        header.append(f" v{version} ", style=f"bold {BRAND_CARBON} on {BRAND_STARK}")
+        header.append("delfhos", style=TEXT)
+        header.append("   ")
+        # White-on-black chip echoes the primary pill (§7).
+        header.append(f" v{version} ", style=f"{BG} on {TEXT}")
 
         if tool_count == 0:
             tools_line = "none"
@@ -432,46 +562,58 @@ class ProfessionalConsole:
             tools_line = ", ".join(tool_list[:5]) + f"  +{tool_count - 5} more"
 
         info_rows = Table.grid(padding=(0, 2))
-        info_rows.add_column(style=BRAND_ZINC, no_wrap=True)
-        info_rows.add_column(style=BRAND_STARK, overflow="fold")
-        info_rows.add_row("Model", model_str)
-        info_rows.add_row("Tools", f"{tool_count} connected  [{BRAND_ZINC}]·[/{BRAND_ZINC}]  {tools_line}")
+        # Eyebrow keys: mono uppercase faint (§3.3).
+        info_rows.add_column(style=TEXT_MUTE, no_wrap=True)
+        info_rows.add_column(style=TEXT, overflow="fold")
+        info_rows.add_row("model", model_str)
+
+        tools_value = Text()
+        tools_value.append(f"{tool_count}", style=NUMBER)
+        tools_value.append(" connected  ", style=TEXT)
+        tools_value.append("·", style=TEXT_FAINT)
+        tools_value.append("  ")
+        tools_value.append(tools_line, style=TEXT_SUB)
+        info_rows.add_row("tools", tools_value)
         if agent_id:
-            info_rows.add_row("Agent", f"[dim]{agent_id}[/dim]")
+            info_rows.add_row("agent", Text(str(agent_id), style=TEXT_SUB))
         if cwd:
-            info_rows.add_row("Cwd", f"[dim]{cwd}[/dim]")
+            info_rows.add_row("cwd", Text(str(cwd), style=TEXT_SUB))
 
         # Vertically center the info block beside the logo.
-        # Logo is 17 lines; info block ~5 lines → pad ~6 lines from top.
+        # `info_rows.row_count` already accounts for the optional agent/cwd
+        # rows; the +2 covers the header line and its trailing blank.
         logo_height = len(self._LOGO_LINES)
-        info_height = 2 + info_rows.row_count + (1 if agent_id else 0) + (1 if cwd else 0)
+        info_height = 2 + info_rows.row_count
         top_pad = max(0, (logo_height - info_height) // 2)
-        right_col = Group(Text("\n" * (top_pad - 1)) if top_pad > 0 else Text(""), header, Text(""), info_rows)
+        right_col = Group(
+            Text("\n" * (top_pad - 1)) if top_pad > 0 else Text(""),
+            header,
+            Text(""),
+            info_rows,
+        )
 
-        # ── Side-by-side: logo | info ─────────────────────────────────
         side_by_side = Table.grid(padding=(0, 4))
         side_by_side.add_column(no_wrap=True)
         side_by_side.add_column()
         side_by_side.add_row(logo_text, right_col)
 
-        # ── Bottom hint bar ───────────────────────────────────────────
+        # ── Hairline + slash-command hint bar (§11.6: no bold) ────────
         hint = Text()
-        sep_style = BRAND_ZINC
-        cmd_style = f"bold {BRAND_STARK}"
-        hint.append("/help", style=cmd_style)
-        hint.append("  ·  ", style=sep_style)
-        hint.append("/clear", style=cmd_style)
-        hint.append("  ·  ", style=sep_style)
-        hint.append("/stop", style=cmd_style)
-        hint.append("  ·  ", style=sep_style)
-        hint.append("/exit", style=cmd_style)
+        sep = Text("  ·  ", style=TEXT_FAINT)
+        for i, cmd in enumerate(("/help", "/clear", "/stop", "/exit")):
+            if i:
+                hint.append_text(sep)
+            hint.append(cmd, style=TEXT)
 
         body = Group(side_by_side, Text(""), hint)
 
+        title = Text("delfhos", style=TEXT_MUTE)
         banner = Panel(
             body,
-            border_style=BRAND_ZINC,
-            box=ROUNDED,
+            title=title,
+            title_align="left",
+            border_style=RULE,
+            box=SQUARE,
             expand=False,
             padding=(1, 2),
         )
@@ -482,13 +624,15 @@ class ProfessionalConsole:
             self.console.print()
 
     def task_summary(self, task_id: str, duration: float, tokens: dict, status: str, final_message: str = None, computational_time: float = None, wait_time: float = None, agent_id: Optional[str] = None, task_status: str = "success", tools: list = None, llm_config: Optional[str] = None):
-        # Stop all spinners before printing so the progress renderer doesn't
-        # race with console.print() calls and cause ghost spinner lines.
+        """Compact end-of-task line + optional Result plate (§4, §6, §11)."""
+        # Stop spinners first so the live renderer doesn't race with prints.
         self.loading_stop_all()
 
-        status_symbol = "✓" if task_status == "success" else "✗"
-        status_color = BRAND_MINT if task_status == "success" else BRAND_ERROR
-        status_word = "Completed" if task_status == "success" else "Failed"
+        is_ok = task_status == "success"
+        status_symbol = "✓" if is_ok else "✗"
+        # Soft tones for the inline status; saturated tones reserved for borders.
+        status_color = SUCCESS_SOFT if is_ok else ERROR_SOFT
+        status_word = "done" if is_ok else "failed"
 
         def _as_int(value) -> int:
             try:
@@ -501,73 +645,102 @@ class ProfessionalConsole:
         input_t = _as_int(tokens.get('input_tokens', tokens.get('prompt_tokens', 0)))
         output_t = _as_int(tokens.get('output_tokens', tokens.get('completion_tokens', 0)))
         tokens_used = _as_int(tokens.get('tokens_used', tokens.get('total_tokens', input_t + output_t)))
-
-        # Build compact stats
-        stats = []
-        stats.append(f"{duration:.2f}s")
-        stats.append(f"{tokens_used:,} tok")
-        stats.append(f"in/out {input_t:,}/{output_t:,}")
         cost_val = tokens.get('total_cost_usd')
+
+        # Compact one-liner:
+        #   ✓ done  │  1.23s · 4,210 tok · in/out 3,100/1,110 · $0.00041
+        line = Text("  ")
+        line.append(f"{status_symbol} ", style=status_color)
+        line.append(status_word, style=status_color)
+        line.append("   │   ", style=TEXT_FAINT)
+
+        meta_pairs = [
+            (f"{duration:.2f}", "s"),
+            (f"{tokens_used:,}", " tok"),
+        ]
+        for i, (num, unit) in enumerate(meta_pairs):
+            if i:
+                line.append("  ·  ", style=TEXT_FAINT)
+            line.append(num, style=NUMBER)
+            line.append(unit, style=TEXT_MUTE)
+
+        line.append("  ·  ", style=TEXT_FAINT)
+        line.append("in/out ", style=TEXT_MUTE)
+        line.append(f"{input_t:,}", style=NUMBER)
+        line.append("/", style=OPERATOR)
+        line.append(f"{output_t:,}", style=NUMBER)
+
         if cost_val is not None:
-            stats.append(f"${float(cost_val):.4f}")
+            line.append("  ·  ", style=TEXT_FAINT)
+            line.append("$", style=TEXT_MUTE)
+            line.append(f"{float(cost_val):.4f}", style=NUMBER)
 
-        sep = f"  [{BRAND_ZINC}]·[/{BRAND_ZINC}]  "
-        compact_line = (
-            f"  [{status_color}]{status_symbol}[/{status_color}] "
-            f"[bold {status_color}]{status_word}[/bold {status_color}]"
-            f"  [{BRAND_ZINC}]│[/{BRAND_ZINC}]  "
-            f"[{BRAND_ZINC_BRIGHT}]{sep.join(stats)}[/{BRAND_ZINC_BRIGHT}]"
-        )
-        self.console.print(compact_line)
+        self.console.print(line)
 
-        # Verbose: show detailed breakdown
+        # Verbose breakdown — keys mute, values typed.
         if self.verbose:
-            detail_parts = []
-            detail_parts.append(f"tokens={tokens_used:,}")
-            detail_parts.append(f"in={input_t:,}")
-            detail_parts.append(f"out={output_t:,}")
+            detail = Text("      ")
+            parts = [
+                ("tokens=", f"{tokens_used:,}"),
+                ("in=",     f"{input_t:,}"),
+                ("out=",    f"{output_t:,}"),
+            ]
             if cost_val is not None:
-                detail_parts.append(f"${float(cost_val):.6f}")
-            self.console.print(f"    [dim]{'  ·  '.join(detail_parts)}[/dim]")
+                parts.append(("cost=$", f"{float(cost_val):.6f}"))
+            for i, (k, v) in enumerate(parts):
+                if i:
+                    detail.append("  ·  ", style=TEXT_FAINT)
+                detail.append(k, style=TEXT_MUTE)
+                detail.append(v, style=NUMBER)
+            self.console.print(detail)
 
             if wait_time and wait_time > 0 and computational_time:
-                self.console.print(f"    [dim]compute: {computational_time:.2f}s  ·  wait: {wait_time:.2f}s[/dim]")
+                t = Text("      ")
+                t.append("compute=", style=TEXT_MUTE)
+                t.append(f"{computational_time:.2f}s", style=NUMBER)
+                t.append("  ·  ", style=TEXT_FAINT)
+                t.append("wait=", style=TEXT_MUTE)
+                t.append(f"{wait_time:.2f}s", style=NUMBER)
+                self.console.print(t)
 
             if llm_config:
-                self.console.print(f"    [dim]LLM: {llm_config}[/dim]")
+                t = Text("      ")
+                t.append("llm=", style=TEXT_MUTE)
+                t.append(str(llm_config), style=STRING)
+                self.console.print(t)
 
             if tools:
                 user_tools = [t for t in tools if t != "llm_code_generation"]
                 if user_tools:
-                    self.console.print(f"    [dim]Tools: {', '.join(user_tools)}[/dim]")
+                    t = Text("      ")
+                    t.append("tools=", style=TEXT_MUTE)
+                    t.append(", ".join(user_tools), style=STRING)
+                    self.console.print(t)
 
         self.console.print()
 
-        # Result panel
+        # Result plate — brutalist, hairline border tinted by outcome.
         if final_message:
             rich_result = convert_markdown_links_to_rich(final_message)
-            markdown_content = Markdown(rich_result, style=BRAND_STARK)
-            result_color = BRAND_MINT if task_status == "success" else BRAND_ERROR
-            border_color = BRAND_MINT if task_status == "success" else BRAND_ERROR
-            result_icon = "✓" if task_status == "success" else "✗"
+            markdown_content = Markdown(rich_result, style=TEXT)
+            border_color = SUCCESS_SOFT if is_ok else ERROR_SOFT
+            title = Text("result", style=border_color)
             result_panel = Panel(
                 markdown_content,
-                title=f"[bold {result_color}]{result_icon} Result[/bold {result_color}]",
+                title=title,
                 title_align="left",
                 border_style=border_color,
-                box=ROUNDED,
+                box=SQUARE,
                 expand=False,
                 padding=(0, 2),
             )
+            self.console.push_theme(_MARKDOWN_THEME)
             self.console.print(result_panel)
+            self.console.pop_theme()
 
     def print_exception(self, exc: Exception, title: str = "Task failed"):
-        """Print a beautiful error box for a caught exception."""
-        from rich.panel import Panel
-        from rich.console import Group
+        """Render a caught exception as a brutalist error plate."""
         from rich.traceback import Traceback
-        from rich.text import Text
-        import sys
 
         try:
             self.stop_all()
@@ -582,29 +755,41 @@ class ProfessionalConsole:
         else:
             tb = Traceback.from_exception(type(exc), exc, exc.__traceback__, show_locals=False)
 
-        group = Group(
-            Text(f"Delfhos encountered an error during: {title}", style=f"bold {BRAND_ERROR}"),
-            Text(""),
-            tb,
-            Text(""),
-            Text(f"Message: {message}", style=BRAND_STARK),
-            Text(f"Hint: {hint}", style=f"bold {BRAND_AMBER}")
-        )
+        header = Text()
+        header.append("✗ ", style=ERROR_SOFT)
+        header.append(f"Delfhos encountered an error during: ", style=TEXT_MUTE)
+        header.append(title, style=TEXT)
+
+        message_line = Text()
+        message_line.append("message  ", style=TEXT_MUTE)
+        message_line.append(message, style=TEXT)
+
+        hint_line = Text()
+        hint_line.append("hint     ", style=TEXT_MUTE)
+        hint_line.append(hint, style=WARNING)
+
+        group = Group(header, Text(""), tb, Text(""), message_line, hint_line)
+
+        title_text = Text()
+        title_text.append("error", style=ERROR_SOFT)
+        if code:
+            title_text.append(f"  {code}", style=TEXT_MUTE)
 
         panel = Panel(
             group,
-            title=f"[bold {BRAND_ERROR}][{code}] Error[/bold {BRAND_ERROR}]",
-            border_style=BRAND_ERROR,
-            expand=False
+            title=title_text,
+            title_align="left",
+            border_style=ERROR_SOFT,
+            box=SQUARE,
+            expand=False,
+            padding=(0, 2),
         )
         self.console.print(panel)
 
+
 def _delfhos_excepthook(exc_type, exc_val, tb_obj):
-    """Custom exception hook to print beautiful error boxes for Delfhos errors."""
-    from rich.panel import Panel
-    from rich.console import Group
+    """Custom exception hook to print a brutalist error plate."""
     from rich.traceback import Traceback
-    from rich.text import Text
 
     if issubclass(exc_type, KeyboardInterrupt):
         sys.__excepthook__(exc_type, exc_val, tb_obj)
@@ -613,27 +798,42 @@ def _delfhos_excepthook(exc_type, exc_val, tb_obj):
     tb = Traceback.from_exception(exc_type, exc_val, tb_obj, show_locals=False)
     code, message, hint = extract_error_payload(exc_val)
 
-    group = Group(
-        Text("Delfhos encountered an error:", style=f"bold {BRAND_ERROR}"),
-        Text(""),
-        tb,
-        Text(""),
-        Text(f"Message: {message}", style=BRAND_STARK),
-        Text(f"Hint: {hint}", style=f"bold {BRAND_AMBER}")
-    )
+    header = Text()
+    header.append("✗ ", style=ERROR_SOFT)
+    header.append("Delfhos encountered an error", style=TEXT)
+
+    message_line = Text()
+    message_line.append("message  ", style=TEXT_MUTE)
+    message_line.append(message, style=TEXT)
+
+    hint_line = Text()
+    hint_line.append("hint     ", style=TEXT_MUTE)
+    hint_line.append(hint, style=WARNING)
+
+    group = Group(header, Text(""), tb, Text(""), message_line, hint_line)
+
+    title_text = Text()
+    title_text.append("error", style=ERROR_SOFT)
+    if code:
+        title_text.append(f"  {code}", style=TEXT_MUTE)
+
     panel = Panel(
         group,
-        title=f"[bold {BRAND_ERROR}][{code}] Error[/bold {BRAND_ERROR}]",
-        border_style=BRAND_ERROR,
-        expand=False
+        title=title_text,
+        title_align="left",
+        border_style=ERROR_SOFT,
+        box=SQUARE,
+        expand=False,
+        padding=(0, 2),
     )
 
     try:
         console.stop_all()
-    except:
+    except Exception:
         pass
 
     console.console.print(panel)
+
 
 # Override the global exception hook
 sys.excepthook = _delfhos_excepthook

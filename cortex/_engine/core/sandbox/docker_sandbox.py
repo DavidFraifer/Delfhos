@@ -2,7 +2,7 @@
 DockerSandbox — Execute agent code inside an isolated Docker container.
 
 Manages the full container lifecycle: image build/cache, container creation
-with resource limits, RPC communication via Unix socket, and cleanup.
+with resource limits, RPC communication via TCP loopback, and cleanup.
 """
 
 from __future__ import annotations
@@ -57,27 +57,55 @@ _DEFAULTS = {
 }
 
 
-def _image_exists() -> bool:
-    """Check if the sandbox Docker image has been built."""
+def _image_created_at() -> Optional[float]:
+    """Return the cached image's creation timestamp, or None if missing."""
     try:
         result = subprocess.run(
-            ["docker", "image", "inspect", _full_image()],
-            capture_output=True,
-            timeout=10,
+            ["docker", "image", "inspect", "--format", "{{.Created}}", _full_image()],
+            capture_output=True, text=True, timeout=10,
         )
-        return result.returncode == 0
     except Exception:
-        return False
+        return None
+    if result.returncode != 0:
+        return None
+    # Format: "2024-05-01T12:34:56.789Z"
+    import datetime as _dt
+    try:
+        s = result.stdout.strip().replace("Z", "+00:00")
+        # Trim sub-microsecond precision Docker sometimes emits
+        if "." in s:
+            head, _, tail = s.partition(".")
+            frac, _, tz = tail.partition("+")
+            frac = (frac + "000000")[:6]
+            s = f"{head}.{frac}+{tz}" if tz else f"{head}.{frac}"
+        return _dt.datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return None
+
+
+def _image_is_stale() -> bool:
+    """True if any bundled container source file is newer than the image."""
+    created = _image_created_at()
+    if created is None:
+        return True
+    for path in _CONTAINER_DIR.iterdir():
+        try:
+            if path.stat().st_mtime > created:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def build_image(force: bool = False) -> None:
     """
     Build the sandbox Docker image from the bundled Dockerfile.
 
-    Skips the build if the image already exists unless *force* is True.
+    Skips the build if the image exists and is up-to-date relative to the
+    bundled container sources, unless *force* is True.
     """
-    if not force and _image_exists():
-        logger.debug("Sandbox image %s already exists", _full_image())
+    if not force and not _image_is_stale():
+        logger.debug("Sandbox image %s is up to date", _full_image())
         return
 
     logger.info("Building sandbox Docker image %s …", _full_image())
@@ -148,28 +176,28 @@ class DockerSandbox(BaseSandbox):
         if self._libraries is None:
             self._libraries = self._create_libraries()
 
-        # 3. Start RPC server
+        # 3. Start RPC server (TCP loopback)
         self._rpc_server = RPCServer(
             tool_libraries=self._libraries,
             on_print=lambda text: self._stdout_lines.append(text),
         )
-        socket_path = await self._rpc_server.start()
+        port = await self._rpc_server.start()
 
         try:
             # 4. Create and start container
-            self._container_id = self._create_container(socket_path)
+            self._container_id = self._create_container(port)
             self._start_container()
 
             # 5. Queue execute message — sent when container connects
             self._queue_execute_message(code)
 
-            # 6. Wait for result (with timeout)
+            # 6. Wait for result, but fail fast if the container exits first.
+            # Without this, a container that crashes during startup would
+            # leave us waiting the full timeout for an RPC reply that will
+            # never arrive.
             timeout = self._config["timeout"] + 10  # grace period
             try:
-                result = await asyncio.wait_for(
-                    self._rpc_server.wait_for_result(),
-                    timeout=timeout,
-                )
+                result = await self._wait_for_result_or_exit(timeout)
             except asyncio.TimeoutError:
                 result = {
                     "success": False,
@@ -228,11 +256,8 @@ class DockerSandbox(BaseSandbox):
             memory=self._orchestrator.memory if self._orchestrator else None,
         )
 
-    def _create_container(self, socket_path: str) -> str:
+    def _create_container(self, rpc_port: int) -> str:
         """Create a Docker container with security restrictions."""
-        socket_dir = os.path.dirname(socket_path)
-        socket_name = os.path.basename(socket_path)
-
         # Build the uploads and output directory paths for this task
         uploads_dir = os.path.join(os.getcwd(), "uploads", self._task_id)
         os.makedirs(uploads_dir, exist_ok=True)
@@ -252,12 +277,14 @@ class DockerSandbox(BaseSandbox):
             "--read-only",
             # Temp filesystem
             "--tmpfs", f"/tmp:size={self._config['tmpfs_size']},noexec",
-            # Mount RPC socket
-            "-v", f"{socket_dir}:/rpc:rw",
             # Mount uploads directory
             "-v", f"{uploads_dir}:/data:rw",
             # Mount output directory for add_to_output_files()
             "-v", f"{output_dir}:/output:rw",
+            # Make host reachable as host.docker.internal on all platforms.
+            # macOS/Windows Docker Desktop provide this alias automatically,
+            # but on Linux it must be added explicitly.
+            "--add-host", "host.docker.internal:host-gateway",
         ]
 
         # Mount workspace files as read-only
@@ -265,14 +292,15 @@ class DockerSandbox(BaseSandbox):
             filename = os.path.basename(host_path)
             cmd.extend(["-v", f"{host_path}:/workspace/{filename}:ro"])
 
-        # Network isolation
-        if not self._config["network"]:
-            cmd.extend(["--network", "none"])
+        # Note: we no longer use `--network none` because the container needs
+        # a TCP route back to the host RPC server. Agent code is still
+        # constrained by the `allowed_imports` allowlist (no urllib/requests/
+        # httpx/socket), so it cannot make arbitrary network calls itself.
 
-        # Container entrypoint with socket path
+        # Container entrypoint with host:port RPC endpoint
         cmd.extend([
             _full_image(),
-            f"/rpc/{socket_name}",
+            f"host.docker.internal:{rpc_port}",
         ])
 
         result = subprocess.run(
@@ -319,6 +347,98 @@ class DockerSandbox(BaseSandbox):
             "timeout": self._config["timeout"],
         }
         self._rpc_server._pending_execute = proto.msg_execute(code, manifest)
+
+    async def _wait_for_result_or_exit(self, timeout: float) -> Dict[str, Any]:
+        """Await the RPC result, but bail out if the container exits first.
+
+        Polls `docker inspect` every 500ms in parallel with the RPC wait.
+        If the container terminates before producing a result, captures its
+        logs and returns a failure dict so the caller can surface the real
+        error instead of timing out.
+        """
+        result_task = asyncio.create_task(self._rpc_server.wait_for_result())
+        exit_task = asyncio.create_task(self._poll_container_exit())
+        try:
+            done, _ = await asyncio.wait(
+                {result_task, exit_task},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                raise asyncio.TimeoutError
+            if result_task in done:
+                return result_task.result()
+            # Container exited before sending a result.
+            exit_info = exit_task.result()
+            logs = self._collect_container_logs()
+            return {
+                "success": False,
+                "result": None,
+                "output": "\n".join(self._stdout_lines),
+                "error": (
+                    f"Sandbox container exited with code {exit_info.get('exit_code')} "
+                    f"before producing a result.\n\nContainer logs:\n{logs}"
+                ),
+                "execution_time": 0,
+            }
+        finally:
+            for t in (result_task, exit_task):
+                if not t.done():
+                    t.cancel()
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+    async def _poll_container_exit(self) -> Dict[str, Any]:
+        """Poll `docker inspect` until the container is no longer running."""
+        loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(0.5)
+            if not self._container_id:
+                continue
+            info = await loop.run_in_executor(None, self._inspect_container)
+            if info is None:
+                continue
+            if info.get("status") and info["status"] != "running":
+                return info
+
+    def _inspect_container(self) -> Optional[Dict[str, Any]]:
+        try:
+            result = subprocess.run(
+                [
+                    "docker", "inspect",
+                    "--format", "{{.State.Status}}|{{.State.ExitCode}}",
+                    self._container_id,
+                ],
+                capture_output=True, text=True, timeout=5,
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return {"status": "missing", "exit_code": -1}
+        status, _, exit_code = result.stdout.strip().partition("|")
+        try:
+            exit_code_int = int(exit_code)
+        except (TypeError, ValueError):
+            exit_code_int = -1
+        return {"status": status, "exit_code": exit_code_int}
+
+    def _collect_container_logs(self, max_chars: int = 4000) -> str:
+        if not self._container_id:
+            return "(no container)"
+        try:
+            result = subprocess.run(
+                ["docker", "logs", "--tail", "200", self._container_id],
+                capture_output=True, text=True, timeout=5,
+            )
+        except Exception as e:
+            return f"(failed to read logs: {e})"
+        combined = (result.stdout or "") + (result.stderr or "")
+        combined = combined.strip()
+        if len(combined) > max_chars:
+            combined = "…" + combined[-max_chars:]
+        return combined or "(empty)"
 
     async def _cleanup_container(self) -> None:
         """Stop and remove the container, clean up RPC server."""
