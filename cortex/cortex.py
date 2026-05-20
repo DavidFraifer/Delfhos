@@ -43,7 +43,7 @@ class Cortex:
       4. Iterate: Get feedback and refine until the goal succeeds.
 
     Quick example:
-        agent = Cortex(tools=[Gmail(), Drive()], llm="gemini-3.1-flash-lite-preview")
+        agent = Cortex(tools=[Gmail(), Drive()], llm="gemini-3.1-flash-lite")
         agent.start().run("Archive unread emails and summarize to alice@co.com")
 
     Advanced example with per-tool approval:
@@ -53,11 +53,10 @@ class Cortex:
                 SQL(url="postgresql://...", confirm=["write"]),
                 Sheets(...),
             ],
-            light_llm="gemini-3.1-flash-lite-preview",
+            light_llm="gemini-3.1-flash-lite",
             heavy_llm="gemini-3.1-pro",
-            code_llm="gemini-3.1-pro",        # explicit model for code generation
             vision_llm="gemini-3.1-pro-vision",  # explicit model for image/multimodal tasks
-            chat=Chat(keep=5, summarize=True, summarizer_llm="gemini-3.1-flash-lite-preview"),
+            chat=Chat(keep=5, summarize=True, summarizer_llm="gemini-3.1-flash-lite"),
             system_prompt="You are a data analyst. Be thorough.",
             on_confirm=lambda brief: input(f"Approve {brief}? ").lower() == "y"
         )
@@ -73,7 +72,6 @@ class Cortex:
         llm: Single LLM for all ops (simple). Use either llm OR (light_llm + heavy_llm).
         light_llm: Fast LLM for prefiltering (advanced; requires heavy_llm).
         heavy_llm: Stronger LLM for code generation (advanced; requires light_llm).
-        code_llm: Model used for Python code generation. Defaults to heavy_llm.
         vision_llm: Model used for image analysis and multimodal tasks. Defaults to heavy_llm.
         chat: Chat(keep=10, summarize=False) for session memory (set Chat.summarizer_llm for compression).
         memory: Persistent memory across sessions (e.g., SQL database).
@@ -81,7 +79,7 @@ class Cortex:
         on_confirm: Approval callback fn(brief) -> bool. If set, enables human-in-the-loop.
                     Per-tool approval is configured on each tool: Gmail(confirm=["send"]).
         verbose: If True, print detailed execution traces.
-        enable_prefilter: If True, use LLM to pre-filter relevant tools before code generation (default: False).
+        prefilter_mode: Tool prefilter strategy — "auto" (default), "filter", "search", or "off".
         providers: API key overrides {\"google\": \"...\", \"openai\": \"...\", etc}.
     """
 
@@ -93,13 +91,12 @@ class Cortex:
         llm=None,
         light_llm=None,
         heavy_llm=None,
-        code_llm=None,
         vision_llm=None,
         system_prompt: Optional[str] = None,
         on_confirm: Optional[Callable] = None,
         providers: Optional[Dict[str, str]] = None,
         verbose: bool = False,
-        enable_prefilter: bool = False,
+        prefilter_mode: str = "auto",
         retry_count: int = 1,
         sandbox: str = "auto",
         sandbox_config: Optional[Dict[str, Any]] = None,
@@ -111,18 +108,17 @@ class Cortex:
             tools: List of Service tools (Gmail, Drive, SQL, APITool, etc), @tool functions, or Connections.
                    Per-tool approval: set confirm= on each connection, e.g. Gmail(confirm=["send"]).
                    Custom tools: use @tool(confirm=True) to always require approval.
-            llm: Single LLM for all operations (e.g., "gemini-3.1-flash-lite-preview").
+            llm: Single LLM for all operations (e.g., "gemini-3.1-flash-lite").
                  Shorthand for: light_llm=llm, heavy_llm=llm.
             light_llm: (Advanced) Fast LLM for prefiltering/lightweight tasks (requires heavy_llm).
             heavy_llm: (Advanced) Powerful LLM for code generation (requires light_llm).
-            code_llm: Model used specifically for Python code generation. Defaults to heavy_llm.
             vision_llm: Model used for image analysis and multimodal tasks. Defaults to heavy_llm.
             chat: Chat(keep=10, summarize=True) — session memory & auto-summarization (set Chat.summarizer_llm for compression).
             memory: Persistent memory for facts/context (e.g., persisted embeddings).
             system_prompt: Custom instructions injected into every LLM call.
             on_confirm: Approval callback fn(brief) -> bool for custom approval UI.
             verbose: If True, print detailed execution traces and debugging info.
-            enable_prefilter: If True, use LLM to pre-filter relevant tools before code generation (default: False, disabled).
+            prefilter_mode: Tool prefilter strategy. "auto" (default): "off" for <10 actions, "filter" for 10–49, "search" for ≥50. "filter" = single LLM call. "search" = iterative LLM search loop. "off" = no prefiltering.
             retry_count: Number of times to auto-retry execution on failure (default: 1).
             providers: Override API keys {"google": "...", "openai": "...", etc}.
             budget_usd: Hard spending cap in USD. Once the cumulative LLM cost across all
@@ -134,7 +130,7 @@ class Cortex:
             # Simple (single LLM)
             agent = Agent(
                 tools=[Gmail(), Drive()],
-                llm="gemini-3.1-flash-lite-preview"
+                llm="gemini-3.1-flash-lite"
             )
             agent.run("Forward today's reports to alice@co.com")
 
@@ -144,11 +140,10 @@ class Cortex:
                     SQL(url="...", confirm=["write"]),  # confirm before writes
                     Gmail(oauth_credentials="...", confirm=["send"]),
                 ],
-                light_llm="gemini-3.1-flash-lite-preview",
+                light_llm="gemini-3.1-flash-lite",
                 heavy_llm="gemini-3.1-pro",
-                code_llm="gemini-3.1-pro",        # override for code generation
                 vision_llm="gemini-3.1-pro-vision",  # override for image analysis
-                chat=Chat(summarizer_llm="gemini-3.1-flash-lite-preview"),  # auto-summarizes
+                chat=Chat(summarizer_llm="gemini-3.1-flash-lite"),  # auto-summarizes
                 budget_usd=0.50,                   # refuse new tasks after $0.50 spent
                 verbose=True
             )
@@ -162,7 +157,6 @@ class Cortex:
             llm=llm,
             light_llm=light_llm,
             heavy_llm=heavy_llm,
-            code_generation_llm=code_llm,
             vision_llm=vision_llm,
             on_confirm=on_confirm,
             system_prompt=system_prompt,
@@ -170,7 +164,7 @@ class Cortex:
             memory=memory,
             providers=providers,
             verbose=verbose,
-            enable_prefilter=enable_prefilter,
+            prefilter_mode=prefilter_mode,
             retry_count=retry_count,
             sandbox=sandbox,
             sandbox_config=sandbox_config,
@@ -178,7 +172,6 @@ class Cortex:
             _explicit_llms={
                 "light_llm": light_llm is not None,
                 "heavy_llm": heavy_llm is not None,
-                "code_generation_llm": code_llm is not None,
                 "vision_llm": vision_llm is not None
             }
         )
@@ -268,8 +261,8 @@ class Cortex:
                 "  from delfhos import Agent, Chat\n"
                 "  agent = Agent(\n"
                 "      tools=[...],\n"
-                "      llm='gemini-3.1-flash-lite-preview',\n"
-                "      chat=Chat(summarizer_llm='gemini-3.1-flash-lite-preview')\n"
+                "      llm='gemini-3.1-flash-lite',\n"
+                "      chat=Chat(summarizer_llm='gemini-3.1-flash-lite')\n"
                 "  )\n"
                 "  agent.run_chat()"
             )

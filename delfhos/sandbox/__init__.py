@@ -5,7 +5,7 @@ Useful for testing and developing agents without live API calls or real credenti
     from delfhos.sandbox import MockEmail, MockDatabase
 
     # In tests, swap real tools with mocks
-    agent = Agent(tools=[MockEmail(), MockDatabase()], llm="gemini-3.1-flash-lite-preview")
+    agent = Agent(tools=[MockEmail(), MockDatabase()], llm="gemini-3.1-flash-lite")
 
 Mocks:
   • MockEmail — simulates Gmail send/read

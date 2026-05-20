@@ -158,7 +158,7 @@ class PrefilterError(LLMExecutionError):
     message_template = "Tool prefilter failed: {detail}"
     resolution = (
         "Check the prefilter model configuration. "
-        "You can disable prefiltering with enable_prefilter=False to fall back "
+        "You can disable prefiltering with prefilter_mode='off' to fall back "
         "to passing all available tools to code generation."
     )
 

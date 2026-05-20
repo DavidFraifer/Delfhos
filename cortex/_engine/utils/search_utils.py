@@ -12,7 +12,7 @@ from delfhos.errors import ToolDefinitionError
 
 # Models that support web search
 SEARCH_SUPPORTED_MODELS = {
-    "gemini": ["gemini-3.1-flash-lite-preview", "gemini-3.1-flash", "gemini-3.1-pro", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-pro", "gemini-1.5-flash"],
+    "gemini": ["gemini-3.1-flash-lite", "gemini-3.1-flash", "gemini-3.1-pro", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-pro", "gemini-1.5-flash"],
     "gpt": ["gpt-5", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo"],  # OpenAI models
 }
 
@@ -27,7 +27,7 @@ def validate_search_model(model: Optional[str]) -> bool:
     Validate whether a model supports web search capability.
     
     Args:
-        model: The model identifier (e.g., "gemini-3.1-flash-lite-preview", "gpt-4", "claude-3-opus")
+        model: The model identifier (e.g., "gemini-3.1-flash-lite", "gpt-4", "claude-3-opus")
     
     Returns:
         True if model supports web search, False otherwise
@@ -78,7 +78,7 @@ def get_search_support_error_message(model: str) -> str:
         f"To use web search, initialize WebSearch with a supported model:\n"
         f"  # Gemini\n"
         f"  agent = Agent(\n"
-        f"    tools=[WebSearch(llm='gemini-3.1-flash-lite-preview')],\n"
+        f"    tools=[WebSearch(llm='gemini-3.1-flash-lite')],\n"
         f"    ...\n"
         f"  )\n"
         f"  # OpenAI\n"

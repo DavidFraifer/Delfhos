@@ -12,6 +12,7 @@ Delfhos is a Python SDK for building AI agents that use real tools — Gmail, SQ
 2. [How-to Guides](#how-to-guides) — Solve specific problems
    → [How to control tool permissions with `allow` and `confirm`](#how-to-control-what-a-tool-can-do-with-allow-and-confirm)
    → [How to configure the execution sandbox](#how-to-configure-the-execution-sandbox)
+   → [How to allow extra Python libraries in the sandbox](#how-to-allow-extra-python-libraries-in-the-sandbox)
    → [How to pass input files to the agent workspace](#how-to-pass-input-files-to-the-agent-workspace)
    → [How to extract output files from a task result](#how-to-extract-output-files-from-a-task-result)
    → [How to use `rerun()` for adaptive replanning](#how-to-use-rerun-for-adaptive-replanning)
@@ -482,15 +483,25 @@ api = APITool(
 
 ### LLM enrichment — improve descriptions automatically
 
-Pass `enrich=True` and an `llm=` model to have an LLM rewrite every endpoint description and infer missing response schemas before the agent runs. The enriched manifest is cached so the LLM is only called once per spec version.
+Pass `enrich=True` to have an LLM rewrite every endpoint description and infer missing response schemas before the agent runs. The enriched manifest is cached so the LLM is only called once per spec version.
+
+If you do not pass `llm=`, the agent automatically uses the `light_llm` (or `llm` in single-model mode) for enrichment — no extra configuration needed:
 
 ```python
 finnhub = APITool(
     spec="https://finnhub.io/static/swagger.json",
     headers={"X-Finnhub-Token": os.environ["FINNHUB_API_KEY"]},
     cache=True,   # Required to persist enriched manifest
-    enrich=True,  # Use LLM to improve descriptions
-    llm="gemini-2.5-flash",  # Model used for enrichment
+    enrich=True,  # Model is inferred from Agent's light_llm automatically
+)
+
+# Or specify a model explicitly:
+finnhub = APITool(
+    spec="https://finnhub.io/static/swagger.json",
+    headers={"X-Finnhub-Token": os.environ["FINNHUB_API_KEY"]},
+    cache=True,
+    enrich=True,
+    llm="gemini-2.5-flash",  # Override the model used for enrichment
 )
 ```
 
@@ -599,7 +610,7 @@ cfg.with_settings(temperature=0.8, top_k=40, max_tokens=1200)
 agent = Agent(tools=[...], llm=cfg)
 ```
 
-`LLMConfig` works wherever a model string is accepted: `llm`, `light_llm`, `heavy_llm`, `code_llm`, `vision_llm`.
+`LLMConfig` works wherever a model string is accepted: `llm`, `light_llm`, `heavy_llm`, `vision_llm`.
 
 > **Note on `headers` vs `api_key`:** Use `api_key` for a single bearer token (`Authorization: Bearer ...`). Use `headers` when your server requires additional fields — tenant IDs, session tokens, routing keys, etc. You can use both together: `api_key` sets the `Authorization` header and `headers` adds anything else on top.
 
@@ -618,7 +629,6 @@ agent = Agent(
     tools=[SQL(url="..."), Gmail(oauth_credentials="...")],
     light_llm="gemini-2.0-flash",        # Fast model for tool routing
     heavy_llm="gemini-2.0-pro",          # Powerful model for code generation
-    code_llm="gemini-2.0-pro",           # Override specifically for code tasks
     vision_llm="gemini-2.0-pro",         # Override for image/multimodal tasks
 )
 ```
@@ -626,7 +636,7 @@ agent = Agent(
 Rules:
 - If you specify only `llm`, it is used for everything.
 - `light_llm` and `heavy_llm` must be specified together.
-- `code_llm` and `vision_llm` are optional overrides on top of `heavy_llm`.
+- `vision_llm` is an optional override on top of `heavy_llm`.
 
 Task routing map:
 
@@ -635,10 +645,9 @@ Task routing map:
 | `llm` | Simple mode shortcut. Handles all tasks when you do not split models. | Internally sets both `light_llm` and `heavy_llm` to the same model. |
 | `light_llm` | Lightweight tasks: tool prefilter/routing (`enable_prefilter=True`), small parsing/classification helpers, and chat summarization when `Chat.summarizer_llm` is not set. | No fallback at config time: it must be provided together with `heavy_llm` (unless you use `llm`). |
 | `heavy_llm` | Main reasoning model: Python code generation, retry/fix loops after execution errors, and text-only calls through `llm.call(...)`. | Base default for specialized models. |
-| `code_llm` | Code-generation-specific path only (the model that writes tool-execution Python code). | Falls back to `heavy_llm` if not set. |
 | `vision_llm` | Image/multimodal analysis (for example `llm.call(file_data=[...], prompt=...)`). | Falls back to `heavy_llm` if not set. |
 
-In short: keep `light_llm` cheap/fast for routing, keep `heavy_llm` strong for reasoning, and override `code_llm` or `vision_llm` only when a specialized model improves those specific workloads.
+In short: keep `light_llm` cheap/fast for routing and `heavy_llm` strong for reasoning. Override `vision_llm` only when a specialized model improves multimodal workloads.
 
 ---
 
@@ -860,23 +869,64 @@ Any built-in connection type can be instantiated multiple times as long as each 
 
 ## How to enable tool prefiltering to reduce costs
 
-When you have many tools, prefiltering uses a fast (cheap) LLM to select only the relevant subset before expensive code generation.
+When you have many tools, prefiltering uses a fast (cheap) LLM to select only the relevant subset before the expensive code-generation call. This keeps the code-gen prompt short and focused, typically cutting 40–70% of context tokens.
+
+Control prefiltering with the `prefilter_mode` parameter:
+
+| Mode | When to use | What it does |
+|------|-------------|--------------|
+| `"auto"` *(default)* | Always — let Delfhos decide | `"off"` for <10 actions, `"filter"` for 10–49, `"search"` for ≥50 |
+| `"filter"` | 10–49 tool actions | One fast LLM call reads the full tool list and selects relevant tools |
+| `"search"` | ≥50 tool actions | Iterative search loop: LLM browses tool summaries up to 5 rounds before finalising |
+| `"off"` | <10 actions or debugging | No routing — the heavy LLM sees every tool on every call |
 
 ```python
 from delfhos import Agent, Gmail, Sheets, Drive, SQL, WebSearch
 
+# "auto" (default) — Delfhos picks the right mode automatically
 agent = Agent(
     tools=[Gmail(...), Sheets(...), Drive(...), SQL(...), WebSearch(...)],
-    light_llm="gemini-2.0-flash",     # Used for prefiltering
-    heavy_llm="gemini-2.0-pro",       # Used for code generation
-    enable_prefilter=True,            # Activate the filter
+    light_llm="gemini-2.0-flash",   # Used for prefiltering
+    heavy_llm="gemini-2.0-pro",     # Used for code generation
 )
 
 agent.run("What is the weather in London?")
+# auto selects "filter" (5 tools → <10 actions each → 25–40 total)
 # Prefilter selects: [WebSearch]  — Gmail/Sheets/Drive/SQL excluded
 ```
 
-Typical result: ~60% fewer tokens in the code generation prompt.
+You can also pin a specific mode:
+
+```python
+# Force search mode (best for APITool with 50+ endpoints)
+agent = Agent(
+    tools=[my_api_tool],             # e.g. 110 Finnhub endpoints
+    llm="gemini-2.0-flash",
+    prefilter_mode="search",
+)
+
+# Disable prefiltering entirely (fastest for tiny tool sets)
+agent = Agent(
+    tools=[my_single_tool],
+    llm="gemini-2.0-flash",
+    prefilter_mode="off",
+)
+```
+
+### How each mode works internally
+
+**`filter` mode** — single-pass routing:
+1. The `light_llm` receives the full list of available `tool:ACTION` pairs and the task description.
+2. It returns the subset of actions to include; the rest are excluded from the code-gen context.
+
+**`search` mode** — iterative discovery (up to 5 rounds):
+1. Round 1: The `light_llm` sees a compact inventory (tool names + action names only).
+2. If it needs detail, it emits `SEARCH: <keywords>` — Delfhos runs a ranked keyword search over tool summaries and returns the top matches.
+3. When confident, it emits `DONE: tool:ACTION, …` to finalise the selection.
+4. If all 5 rounds are exhausted, the union of every tool surfaced by SEARCH rounds is used as a fallback.
+
+**`off` mode** — no prefilter:
+The heavy LLM receives every tool's full documentation on every call. Fine for small agents; expensive at scale.
 
 ---
 
@@ -948,6 +998,10 @@ Edit it to add new models or update rates:
         "gemini-2.0-flash": {
             "input_per_million": 0.10,
             "output_per_million": 0.40
+        },
+        "gemini-3.5-flash": {
+            "input_per_million": 1.50,
+            "output_per_million": 9.00
         },
         "gpt-4o": {
             "input_per_million": 2.50,
@@ -1127,7 +1181,7 @@ build_image()            # Skips if image is up to date
 build_image(force=True)  # Rebuild unconditionally
 ```
 
-The image is version-tagged to match the installed Delfhos version (e.g. `delfhos-sandbox:0.7.0`) so upgrades automatically use a fresh image.
+The image is version-tagged to match the installed Delfhos version (e.g. `delfhos-sandbox:0.8.0`) so upgrades automatically use a fresh image.
 
 ### Checking sandbox status
 
@@ -1136,6 +1190,64 @@ from cortex._engine.core.sandbox.executor import _docker_available
 
 print("Docker available:", _docker_available())
 ```
+
+---
+
+## How to allow extra Python libraries in the sandbox
+
+By default the sandbox only permits a safe subset of the Python standard library (`json`, `re`, `datetime`, `math`, `statistics`, `csv`, `io`, `pathlib`, `asyncio`, `time`). Any `import` statement that references a module outside this list raises an error.
+
+Use `allowed_libs` to extend the allowlist with additional packages. Pass PyPI package names exactly as you would to `pip install`.
+
+```python
+from delfhos import Agent, SQL
+
+agent = Agent(
+    tools=[SQL(url="postgresql://...")],
+    llm="gemini-2.0-flash",
+    allowed_libs=["pandas", "numpy"],
+)
+agent.run("Load the sales table and compute monthly totals")
+```
+
+The agent's generated code can now call `import pandas` and `import numpy` without hitting the import block.
+
+### Local sandbox behaviour
+
+In local (in-process) mode the packages must already be installed in your Python environment. `allowed_libs` only lifts the import restriction — it does not install anything automatically:
+
+```bash
+pip install pandas numpy   # install first
+```
+
+```python
+agent = Agent(
+    tools=[...],
+    llm="gemini-2.0-flash",
+    sandbox="local",
+    allowed_libs=["pandas", "numpy"],
+)
+```
+
+### Docker sandbox behaviour
+
+In Docker mode (`sandbox="docker"` or `sandbox="auto"` with Docker available) Delfhos automatically pip-installs the requested packages inside the container before executing the task. You do not need them installed on the host:
+
+```python
+agent = Agent(
+    tools=[...],
+    llm="gemini-2.0-flash",
+    sandbox="docker",
+    allowed_libs=["pandas", "scikit-learn", "openpyxl"],
+)
+agent.run("Read the uploaded Excel file and train a simple classifier")
+```
+
+Packages are installed into a dedicated `/packages` volume inside the container and are discarded when the container exits. Each task starts from a clean install.
+
+### Security note
+
+Only add libraries you trust. `allowed_libs` expands what the LLM-generated code can import. Network-capable packages (`requests`, `httpx`, `urllib3`) remain blocked at the OS level in Docker mode — adding them to `allowed_libs` only unlocks the Python import; actual outbound connections still cannot reach the internet.
 
 ---
 
@@ -1388,17 +1500,17 @@ Agent(
     llm:              Optional[str] = None,
     light_llm:        Optional[str] = None,
     heavy_llm:        Optional[str] = None,
-    code_llm:         Optional[str] = None,
     vision_llm:       Optional[str] = None,
     system_prompt:    Optional[str] = None,
     on_confirm:       Optional[Callable] = None,
     providers:        Optional[Dict[str, str]] = None,
     verbose:          bool = False,
-    enable_prefilter: bool = False,
+    prefilter_mode:   str = "auto",
     retry_count:      int = 1,
     sandbox:          str = "auto",
     sandbox_config:   Optional[Dict[str, Any]] = None,
     files:            Optional[List[str]] = None,
+    allowed_libs:     Optional[List[str]] = None,
 )
 ```
 
@@ -1410,18 +1522,18 @@ Agent(
 | `llm` | `str` | `None` | Single model for all operations |
 | `light_llm` | `str` | `None` | Fast model for prefiltering; requires `heavy_llm` |
 | `heavy_llm` | `str` | `None` | Strong model for code generation; requires `light_llm` |
-| `code_llm` | `str` | `None` | Override model for code generation specifically |
 | `vision_llm` | `str` | `None` | Override model for image/multimodal tasks |
 | `system_prompt` | `str` | `None` | Instructions injected into every LLM call |
 | `on_confirm` | `callable` | `None` | Custom approval callback `fn(request) → bool \| None` |
 | `providers` | `dict` | `None` | API key overrides `{"google": "...", "openai": "..."}` |
 | `verbose` | `bool` | `False` | Print full execution traces |
-| `enable_prefilter` | `bool` | `False` | Use `light_llm` to pre-select tools |
+| `prefilter_mode` | `str` | `"auto"` | Tool routing strategy: `"auto"` \| `"filter"` \| `"search"` \| `"off"`. `"auto"` picks the mode based on action count (<10 → off, 10–49 → filter, ≥50 → search). |
 | `retry_count` | `int` | `1` | Max retries on non-fatal execution errors |
 | `sandbox` | `str` | `"auto"` | Execution isolation mode: `"auto"` \| `"docker"` \| `"local"` |
 | `rerun_count` | `int` | `2` | Max rerun iterations when generated code calls `rerun()`. Each iteration triggers a fresh code-generation pass. See [`rerun()` guide](#how-to-use-rerun-for-adaptive-replanning). |
 | `sandbox_config` | `dict` | `None` | Resource limit overrides for Docker mode (see [sandbox guide](#how-to-configure-the-execution-sandbox)) |
 | `files` | `list[str]` | `None` | Absolute host paths to inject as read-only workspace files. In Docker mode each file is bind-mounted at `/workspace/<filename>`; in local mode the original paths are used. See [input file guide](#how-to-pass-input-files-to-the-agent-workspace). |
+| `allowed_libs` | `list[str]` | `None` | PyPI package names to add to the sandbox import allowlist (e.g. `["pandas", "numpy"]`). In Docker mode packages are pip-installed automatically inside the container. In local mode they must already be installed in the host environment. See [allowed libs guide](#how-to-allow-extra-python-libraries-in-the-sandbox). |
 
 ### Methods
 
@@ -1733,7 +1845,7 @@ APITool(
     confirm:     Union[bool, List[str], None] = True,
     cache:       bool = False,                    # Cache compiled manifest to ~/delfhos/api_cache/
     enrich:      bool = False,                    # Use LLM to improve descriptions/schemas
-    llm:         Optional[str] = None,            # Model for enrichment (required if enrich=True)
+    llm:         Optional[str] = None,            # Model for enrichment; defaults to Agent's light_llm
     sample:      bool = True,                     # Capture real response schemas in background
 )
 ```
@@ -1749,8 +1861,8 @@ APITool(
 | `allow` | `list` | `None` | Restrict which endpoints the agent can use (function names from `inspect()`) |
 | `confirm` | `bool \| list` | `True` | Require approval before listed endpoints execute |
 | `cache` | `bool` | `False` | Reuse compiled manifest from disk; useful for large specs |
-| `enrich` | `bool` | `False` | Run an LLM pass to improve endpoint descriptions and infer response schemas. Cached after first run — zero cost on subsequent runs. Requires `llm=`. |
-| `llm` | `str` | `None` | Model used for enrichment (e.g. `"gemini-2.5-flash"`). Only used when `enrich=True`. |
+| `enrich` | `bool` | `False` | Run an LLM pass to improve endpoint descriptions and infer response schemas. Cached after first run — zero cost on subsequent runs. |
+| `llm` | `str` | `None` | Model used for enrichment. If omitted, falls back to the Agent's `light_llm` (or `llm` in single-model mode). Only used when `enrich=True`. |
 | `sample` | `bool` | `True` | After each successful API call, infer the response schema from real data and persist it to the cache. No LLM, no cost, zero latency impact. |
 
 ### Class methods
@@ -2092,7 +2204,7 @@ When you call `agent.run("task")`, the following pipeline executes:
        are fetched from the database and included in the code generation prompt.
 
 4. Code generation
-   └── The heavy_llm (or code_llm if set) receives:
+   └── The heavy_llm receives:
          - The system prompt
          - Known facts from memory
          - The chat history (if Chat is attached)
@@ -2232,7 +2344,7 @@ By splitting these across a `light_llm` and `heavy_llm`:
 - The heavy model only sees a small, focused context (thanks to prefiltering)
 - Total cost is significantly lower than using a powerful model for everything
 
-The `code_llm` and `vision_llm` overrides let you use specialized models for specific subtasks without changing the main model.
+The `vision_llm` override lets you use a specialized model for multimodal tasks without changing the main model.
 
 ---
 

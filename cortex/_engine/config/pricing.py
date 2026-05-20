@@ -10,7 +10,7 @@ from typing import Dict, Any, Optional
 _DEFAULT_PRICING: Dict[str, Dict[str, float]] = {
     "gemini-2.5-flash-lite": {"input_per_million": 0.10, "output_per_million": 0.40},
     "gemini-2.5-flash-lite-preview-09-2025": {"input_per_million": 0.10, "output_per_million": 0.40},
-    "gemini-3.1-flash-lite-preview": {"input_per_million": 0.10, "output_per_million": 0.40},
+    "gemini-3.1-flash-lite": {"input_per_million": 0.10, "output_per_million": 0.40},
     "gemini-2.0-flash": {"input_per_million": 0.10, "output_per_million": 0.40},
     "gemini-2.5-flash": {"input_per_million": 0.15, "output_per_million": 0.60},
     "gemini-3-flash-preview": {"input_per_million": 0.50, "output_per_million": 3.00},
@@ -18,6 +18,7 @@ _DEFAULT_PRICING: Dict[str, Dict[str, float]] = {
     "gemini-2.5-pro": {"input_per_million": 1.25, "output_per_million": 10.00},
     "gemini-3-pro-preview": {"input_per_million": 2.00, "output_per_million": 12.00},
     "gemini-3.1-pro-preview": {"input_per_million": 2.00, "output_per_million": 12.00},
+    "gemini-3.5-flash": {"input_per_million": 1.50, "output_per_million": 9.00},
     "gpt-4.1-nano": {"input_per_million": 0.10, "output_per_million": 0.40},
     "gpt-4o-mini": {"input_per_million": 0.15, "output_per_million": 0.60},
     "gpt-5-mini": {"input_per_million": 0.25, "output_per_million": 1.00},

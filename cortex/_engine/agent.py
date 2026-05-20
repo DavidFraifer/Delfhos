@@ -58,7 +58,7 @@ class Agent:
     in a sandbox, and iterates with confirmation/feedback until the goal succeeds.
     
     Example (simple):
-        agent = Agent(tools=[Gmail(), Drive()], llm="gemini-3.1-flash-lite-preview")
+        agent = Agent(tools=[Gmail(), Drive()], llm="gemini-3.1-flash-lite")
         agent.start().run("Send yesterday's reports to alice@co.com")
     
     Example (advanced with multiple LLMs and per-tool approval):
@@ -67,7 +67,7 @@ class Agent:
                 Gmail(oauth_credentials="secrets.json", allow=["read", "send"], confirm=["send"]),
                 SQL(host="localhost", database="main", confirm=["write"]),
             ],
-            light_llm="gemini-3.1-flash-lite-preview",  # for prefiltering
+            light_llm="gemini-3.1-flash-lite",  # for prefiltering
             heavy_llm="gemini-3.1-pro",  # for code generation
             chat=Chat(keep=5, summarize=True),
             system_prompt="You are a data analyst. Be precise."
@@ -77,11 +77,10 @@ class Agent:
     Args:
         tools: List of tool names (str), async functions, or Connection instances.
                Set confirm= on each Connection/Tool to require approval for specific actions.
-        llm: Single LLM for all operations (e.g., "gemini-3.1-flash-lite-preview").
+        llm: Single LLM for all operations (e.g., "gemini-3.1-flash-lite").
              Shorthand for: light_llm=llm, heavy_llm=llm.
         light_llm: (Advanced) LLM for prefiltering/lightweight tasks (required if not using llm).
         heavy_llm: (Advanced) LLM for code generation (required if not using llm).
-        code_generation_llm: Model used specifically for Python code generation. Defaults to heavy_llm.
         vision_llm: Model used for image analysis and multimodal tasks. Defaults to heavy_llm.
         chat: Chat(keep=10, summarize=False) — session memory & summarization.
         memory: Optional persistent memory (e.g., SQL database).
@@ -95,28 +94,27 @@ class Agent:
                  on_confirm: Optional[Callable] = None,
                  system_prompt: Optional[str] = None,
                  prefilter_llm=None,
-                 code_generation_llm=None,
                  vision_llm=None,
                  chat: Optional[Chat] = None,
                  memory: Optional[Memory] = None,
                  providers: Optional[Dict[str, str]] = None,
                  verbose: bool = False,
-                 enable_prefilter: bool = False,
+                 prefilter_mode: str = "auto",
                  retry_count: int = 1,
                  sandbox: str = "auto",
                  sandbox_config: Optional[Dict] = None,
                  budget_usd: Optional[float] = None,
                  files: Optional[List[str]] = None,
+                 allowed_libs: Optional[List[str]] = None,
                  _explicit_llms: Optional[Dict[str, bool]] = None):
         """Initialize an Agent with tools and language models.
         
         Args:
             tools: List of Connection objects, @tool functions, or string names.
                    Per-tool approval: set confirm= on each tool (e.g., Gmail(confirm=["send"])).
-            llm: Single LLM model for all operations (e.g., "gemini-3.1-flash-lite-preview").
+            llm: Single LLM model for all operations (e.g., "gemini-3.1-flash-lite").
             light_llm: Fast LLM for filtering/analysis (use with heavy_llm).
             heavy_llm: Powerful LLM for code generation (use with light_llm).
-            code_generation_llm: Model used specifically for Python code generation. Defaults to heavy_llm.
             vision_llm: Model used for image analysis and multimodal tasks. Defaults to heavy_llm.
             agent_id: Custom agent identifier (auto-generated if omitted).
             auto_stop_timeout: Auto-stop after N seconds of inactivity (None = never auto-stop).
@@ -126,7 +124,7 @@ class Agent:
                    In Docker mode each file is bind-mounted at /workspace/<filename>; in local mode the host paths are used directly.
             chat: Chat instance for session memory with auto-summarization (set Chat.summarizer_llm for compression).
             memory: Memory instance for persistent semantic storage.
-            enable_prefilter: If True, use LLM to pre-filter relevant tools before code generation (default: False, disabled).
+            prefilter_mode: Tool prefilter strategy. "auto" (default): "off" for <10 actions, "filter" for 10–49, "search" for ≥50. "filter" = single LLM call. "search" = iterative LLM search loop. "off" = no prefiltering.
             retry_count: Number of times to auto-retry execution on failure (default: 1).
             verbose: If True, print execution traces and debugging info.
             providers: Dict of API provider overrides (internal use).
@@ -139,13 +137,13 @@ class Agent:
             # Simple mode (single LLM for everything)
             agent = Agent(
                 tools=[Gmail(), Drive()],
-                llm="gemini-3.1-flash-lite-preview"
+                llm="gemini-3.1-flash-lite"
             )
             
             # Advanced mode (light + heavy LLM split)
             agent = Agent(
                 tools=[Gmail(), Drive(), SQL(url="...")],
-                light_llm="gemini-3.1-flash-lite-preview",  # fast, cheap
+                light_llm="gemini-3.1-flash-lite",  # fast, cheap
                 heavy_llm="gemini-3.1-pro",  # powerful, for code generation
                 chat=Chat(keep=10),  # session memory
                 verbose=True  # see execution details
@@ -195,7 +193,6 @@ class Agent:
                 "light_llm": _explicit_llms.get("light_llm", light_llm is not None),
                 "heavy_llm": _explicit_llms.get("heavy_llm", heavy_llm is not None),
                 "prefilter_llm": prefilter_llm is not None,
-                "code_generation_llm": code_generation_llm is not None,
                 "vision_llm": vision_llm is not None
             }
         else:
@@ -205,7 +202,6 @@ class Agent:
                 "light_llm": light_llm is not None,
                 "heavy_llm": heavy_llm is not None,
                 "prefilter_llm": prefilter_llm is not None,
-                "code_generation_llm": code_generation_llm is not None,
                 "vision_llm": vision_llm is not None
             }
 
@@ -227,7 +223,6 @@ class Agent:
             (resolved_light_llm, "light_llm"),
             (resolved_heavy_llm, "heavy_llm"),
             (prefilter_llm, "prefilter_llm"),
-            (code_generation_llm, "code_generation_llm"),
             (vision_llm, "vision_llm")
         ]
         
@@ -247,7 +242,7 @@ class Agent:
 
         # Specific model configurations - use appropriate defaults based on what user chose
         self.prefilter_llm = prefilter_llm or self.light_llm
-        self.code_generation_llm = code_generation_llm or self.heavy_llm
+        self.code_generation_llm = self.heavy_llm
         self.vision_llm = vision_llm or self.heavy_llm
         self.chat = chat
         if self.chat is not None and not self.chat.summarizer_llm:
@@ -256,6 +251,7 @@ class Agent:
         self.retry_count = retry_count
         self.rerun_count = 2
         self.files = files or []
+        self.allowed_libs = [lib.strip() for lib in (allowed_libs or []) if lib and lib.strip()]
         
         self.logger = CORTEXLogger()
         self.usage = TokenUsage()
@@ -279,7 +275,6 @@ class Agent:
             approval_enabled=approval_enabled,
             system_prompt=system_prompt,
             prefilter_llm=self.prefilter_llm,
-            code_generation_llm=self.code_generation_llm,
             vision_llm=self.vision_llm,
             token_usage=self.usage,
             memory=memory,
@@ -287,12 +282,13 @@ class Agent:
             trace_callback=self._update_trace,
             llm_config=self.get_llm_config_string(),
             verbose="high" if self.verbose else "low",
-            enable_prefilter=enable_prefilter,
+            prefilter_mode=prefilter_mode,
             retry_count=self.retry_count,
             rerun_count=self.rerun_count,
             sandbox=sandbox,
             sandbox_config=sandbox_config,
             files=self.files,
+            allowed_libs=self.allowed_libs,
         )
         self.running = False
         self.last_called = None  # Track when the agent was last used
@@ -430,6 +426,9 @@ class Agent:
             if isinstance(tool, Connection):
                 # If the connection has a compile step (APITool, etc.), run it to introspect + register
                 if hasattr(tool, "compile"):
+                    # Auto-inject light_llm when enrich=True but no explicit llm was given
+                    if getattr(tool, "enrich", False) and not getattr(tool, "llm", None):
+                        tool.llm = self.light_llm
                     tool.compile()
 
                 # Collect enrichment info from APITools
@@ -530,7 +529,7 @@ class Agent:
         
         # Case 2: User chose light_llm and heavy_llm, no specialized overrides
         if explicit["light_llm"] and explicit["heavy_llm"]:
-            specialized = [k for k in ["code_generation_llm", "vision_llm", "prefilter_llm"]
+            specialized = [k for k in ["vision_llm", "prefilter_llm"]
                           if explicit.get(k)]
 
             # Check if chat has custom summarizer_llm
@@ -543,8 +542,6 @@ class Agent:
             # User has specialized overrides - show all explicitly provided
             llm_parts = [f"light_llm: {self.light_llm}", f"heavy_llm: {self.heavy_llm}"]
 
-            if explicit["code_generation_llm"] and self.code_generation_llm != self.heavy_llm:
-                llm_parts.append(f"code_generation_llm: {self.code_generation_llm}")
             if explicit["vision_llm"] and self.vision_llm != self.heavy_llm:
                 llm_parts.append(f"vision_llm: {self.vision_llm}")
             if chat_has_custom_summarizer:
@@ -849,7 +846,7 @@ Never return null, "none", or plain text."""
         Example::
         
             async def main():
-                agent = Agent(tools=[Gmail()], llm="gemini-3.1-flash-lite-preview")
+                agent = Agent(tools=[Gmail()], llm="gemini-3.1-flash-lite")
                 await agent.run_async("Read my latest emails and summarize")
         """
         # Display task box FIRST before anything else
@@ -918,7 +915,7 @@ Never return null, "none", or plain text."""
         
         Example::
         
-            agent = Agent(tools=[Gmail(), Drive()], llm="gemini-3.1-flash-lite-preview")
+            agent = Agent(tools=[Gmail(), Drive()], llm="gemini-3.1-flash-lite")
             result = agent.run("Forward today's reports to alice@acme.com")
             print(result)
         """

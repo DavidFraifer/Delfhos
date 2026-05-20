@@ -84,7 +84,6 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
         approval_enabled: bool = False,
         system_prompt: Optional[str] = None,
         prefilter_llm: Optional[str] = None,
-        code_generation_llm: Optional[str] = None,
         vision_llm: Optional[str] = None,
         token_usage=None,
         memory=None,
@@ -92,12 +91,13 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
         trace_callback=None,
         llm_config: Optional[str] = None,
         verbose: str = "low",
-        enable_prefilter: bool = False,
+        prefilter_mode: str = "auto",
         retry_count: int = 1,
         sandbox: str = "auto",
         sandbox_config: Optional[Dict] = None,
         files: Optional[List[str]] = None,
         rerun_count: int = 2,
+        allowed_libs: Optional[List[str]] = None,
     ):
         approval_enabled = on_confirm is not None or approval_enabled
 
@@ -111,13 +111,13 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
         self.heavy_llm = heavy_llm
         self.llm_config = llm_config
         self.verbose = verbose
-        self.enable_prefilter = enable_prefilter
+        self.prefilter_mode = prefilter_mode
         self.retry_count = retry_count
         self.rerun_count = rerun_count
 
         # ── Model overrides ────────────────────────────────────────────────
         self.prefilter_llm = prefilter_llm or self.light_llm
-        self.code_generation_llm = code_generation_llm or self.heavy_llm
+        self.code_generation_llm = self.heavy_llm
         self.vision_llm = vision_llm or self.heavy_llm
 
         self.agent_id = agent_id
@@ -132,6 +132,7 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
         self.sandbox_mode = sandbox
         self.sandbox_config = sandbox_config
         self.workspace_files = files or []
+        self.allowed_libs = allowed_libs or []
 
         # ── Tools ──────────────────────────────────────────────────────────
         self.tools = ToolContainer(logger=self.logger)
@@ -425,6 +426,7 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
             mode=getattr(self, "sandbox_mode", "auto"),
             sandbox_config=getattr(self, "sandbox_config", None),
             workspace_files=getattr(self, "workspace_files", []),
+            allowed_libs=getattr(self, "allowed_libs", []),
             tool_manager=self.tools,
             task_id=task_id,
             agent_id=self.agent_id,

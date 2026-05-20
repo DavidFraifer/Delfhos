@@ -36,7 +36,7 @@ def test_web_search_returns_complete_token_payload(monkeypatch):
     import asyncio
 
     summary, token_info = asyncio.run(
-        websearch_module.web_search(query="latest ai news", task_id="t1", model="gemini-3.1-flash-lite-preview")
+        websearch_module.web_search(query="latest ai news", task_id="t1", model="gemini-3.1-flash-lite")
     )
 
     assert summary == "summary"

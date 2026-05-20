@@ -8,7 +8,7 @@ from delfhos.sandbox import MockDatabase, MockEmail
 class TestConfirmPolicy(unittest.TestCase):
     def test_agent_allows_empty_tools_for_llm_only_mode(self):
         # No tools, no on_confirm → no approval manager needed
-        agent = Agent(tools=[], llm="gemini-3.1-flash-lite-preview")
+        agent = Agent(tools=[], llm="gemini-3.1-flash-lite")
 
         self.assertEqual(agent.tools, [])
         self.assertFalse(agent.enable_human_approval)
@@ -46,14 +46,14 @@ class TestConfirmPolicy(unittest.TestCase):
     def test_per_tool_confirm_enables_approval_manager(self):
         # MockEmail with confirm=["send"] should enable approval manager
         mock_email = MockEmail(confirm=["send"])
-        agent = Agent(tools=[mock_email], llm="gemini-3.1-flash-lite-preview")
+        agent = Agent(tools=[mock_email], llm="gemini-3.1-flash-lite")
 
         self.assertTrue(agent.enable_human_approval)
         self.assertIsNotNone(agent.orchestrator.approval_manager)
 
     def test_per_tool_confirm_on_db_enables_approval_manager(self):
         mock_db = MockDatabase(confirm=["write"])
-        agent = Agent(tools=[mock_db], llm="gemini-3.1-flash-lite-preview")
+        agent = Agent(tools=[mock_db], llm="gemini-3.1-flash-lite")
 
         self.assertTrue(agent.enable_human_approval)
         self.assertIsNotNone(agent.orchestrator.approval_manager)
@@ -62,7 +62,7 @@ class TestConfirmPolicy(unittest.TestCase):
         # Tools without explicit confirm= still enable the approval manager because
         # confirm defaults to True now
         mock_email = MockEmail()
-        agent = Agent(tools=[mock_email], llm="gemini-3.1-flash-lite-preview")
+        agent = Agent(tools=[mock_email], llm="gemini-3.1-flash-lite")
 
         self.assertTrue(agent.enable_human_approval)
         self.assertIsNotNone(agent.orchestrator.approval_manager)
@@ -71,7 +71,7 @@ class TestConfirmPolicy(unittest.TestCase):
         callback = lambda req_id, msg: True
         agent = Agent(
             tools=["websearch"],
-            llm="gemini-3.1-flash-lite-preview",
+            llm="gemini-3.1-flash-lite",
             on_confirm=callback,
         )
         self.assertTrue(agent.enable_human_approval)

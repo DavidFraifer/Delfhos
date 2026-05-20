@@ -371,9 +371,9 @@ class PythonExecutor:
     """
     Executes agent-generated Python code in a controlled environment.
     """
-    
+
     def __init__(self, tool_manager, task_id: str, agent_id: str, light_llm: str, heavy_llm: str, orchestrator=None,
-                 vision_model: Optional[str] = None):
+                 vision_model: Optional[str] = None, allowed_libs: Optional[list] = None):
         self.tool_manager = tool_manager
         self.task_id = task_id
         self.agent_id = agent_id
@@ -382,6 +382,7 @@ class PythonExecutor:
         self.vision_model = vision_model or self.heavy_llm
         self.orchestrator = orchestrator
         self.execution_timeout = 300  # 5 minutes max per task
+        self._allowed_libs = [lib.strip() for lib in (allowed_libs or []) if lib and lib.strip()]
         self.namespace = None
     
     async def execute(self, code: str) -> Dict[str, Any]:
@@ -742,7 +743,7 @@ class PythonExecutor:
             "re",
             "statistics",
             "time",
-        }
+        } | {lib.split(".")[0] for lib in self._allowed_libs}
 
         def _safe_import(name, *args, **kwargs):
             root_name = name.split(".", 1)[0]

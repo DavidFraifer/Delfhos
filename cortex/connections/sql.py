@@ -30,7 +30,7 @@ class SQLConnection(BaseConnection):
     
     Example (connection string):
         db = SQL(url="postgresql://user:pw@localhost/mydb")
-        agent = Agent(tools=[db, Sheets()], llm="gemini-3.1-flash-lite-preview")
+        agent = Agent(tools=[db, Sheets()], llm="gemini-3.1-flash-lite")
         agent.run("Query revenue by region and update the Reporting sheet")
     
     Example (parameters):

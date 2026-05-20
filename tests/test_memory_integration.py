@@ -265,7 +265,7 @@ def test_agent_stop_clears_non_persistent_chat():
     chat.append("user", "temp session message")
     assert len(chat.messages) == 1
 
-    agent = Agent(tools=[], llm="gemini-3.1-flash-lite-preview", chat=chat)
+    agent = Agent(tools=[], llm="gemini-3.1-flash-lite", chat=chat)
     agent.start()
     agent.stop()
 

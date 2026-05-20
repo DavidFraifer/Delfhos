@@ -16,7 +16,7 @@ def _safe_log_tokens(logger: Any, task_id: str, agent_id: str, token_info: dict,
     """Best-effort token logging helper for non-critical tool paths."""
     if logger and token_info and (task_id or agent_id):
         try:
-            logger.add_tokens(task_id or agent_id, token_info, model or "gemini-3.1-flash-lite-preview", "web_search")
+            logger.add_tokens(task_id or agent_id, token_info, model or "gemini-3.1-flash-lite", "web_search")
         except Exception:
             pass
 

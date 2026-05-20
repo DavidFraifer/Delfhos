@@ -29,7 +29,7 @@ class GmailConnection(GoogleBaseConnection):
     
     Example (service account):
         gmail = Gmail(service_account="sa.json", delegated_user="user@workspace.com")
-        agent = Agent(tools=[gmail], llm="gemini-3.1-flash-lite-preview")
+        agent = Agent(tools=[gmail], llm="gemini-3.1-flash-lite")
         agent.run("Reply to all unread emails with a summary of today's meetings")
     
     Example (personal OAuth):

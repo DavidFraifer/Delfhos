@@ -3,6 +3,7 @@ Tool Registry System
 Provides tool capability definitions and Python API documentation for agent code generation
 """
 
+import re
 from typing import Dict, List, Optional, Any, Set, Tuple
 
 
@@ -762,6 +763,11 @@ def _parse_prefilter_part(part: str) -> Optional[tuple]:
     colon_idx = part.rfind(':')
     name_part = part[:colon_idx].strip()
     action_part = part[colon_idx + 1:].strip().upper()
+    # Defensive: the LLM sometimes appends call-style arguments
+    # (e.g. "QUOTE(SYMBOL='AAPL')"); keep just the action identifier.
+    paren_idx = action_part.find('(')
+    if paren_idx != -1:
+        action_part = action_part[:paren_idx].strip()
     if not name_part or not action_part:
         return None
     return name_part, action_part
@@ -959,6 +965,182 @@ def get_available_actions_for_connections(connections: List[Any], custom_tools: 
                 result[t_name] = {"EXECUTE"}
     
     return result
+
+
+_WORD_RE = re.compile(r"\w+")
+
+
+def _extract_keywords(query: str) -> List[str]:
+    """Split a query into lowercase keywords (length > 1)."""
+    return [w.lower() for w in _WORD_RE.findall(query or "") if len(w) > 1]
+
+
+def _score_tool_action(
+    tool_name: str,
+    action: str,
+    summary: str,
+    keywords: List[str],
+) -> int:
+    """
+    Score a tool:action against keywords.
+    Exact match on name/action: 10
+    Prefix on name/action: 5
+    Word-boundary in name/action: 4
+    Word-boundary in summary: 3
+    Substring in name/action: 2
+    Substring in summary: 1
+    """
+    tn = tool_name.lower()
+    an = action.lower()
+    s = (summary or "").lower()
+    score = 0
+    for kw in keywords:
+        if kw == tn or kw == an:
+            score += 10
+        elif tn.startswith(kw) or an.startswith(kw):
+            score += 5
+        elif re.search(r"\b" + re.escape(kw) + r"\b", tn) or re.search(
+            r"\b" + re.escape(kw) + r"\b", an
+        ):
+            score += 4
+        elif s and re.search(r"\b" + re.escape(kw) + r"\b", s):
+            score += 3
+        elif kw in tn or kw in an:
+            score += 2
+        elif kw in s:
+            score += 1
+    return score
+
+
+def build_tool_inventory_overview(
+    available_actions: Dict[str, Set[str]],
+    connections: List[Any] = None,
+    custom_descriptions: Dict[str, str] = None,
+    inline_action_limit: int = 8,
+) -> str:
+    """
+    Build a compact one-shot inventory of available tools for the first
+    iteration of search-mode prefilter.
+
+    Format:
+        tool_name: ACTION1, ACTION2, ...           (if ≤ inline_action_limit actions)
+        tool_name: (N actions — use SEARCH)         (otherwise)
+
+    Connection-aware: lists connection_name for tools that have connections.
+    """
+    # tool_name -> list of connection names
+    conn_by_tool: Dict[str, List[str]] = {}
+    if connections:
+        for conn in connections:
+            tn = getattr(conn, "tool_name", "").lower()
+            cn = getattr(conn, "connection_name", "")
+            if tn and cn:
+                conn_by_tool.setdefault(tn, []).append(cn)
+
+    lines: List[str] = []
+    for tool_name in sorted(available_actions.keys()):
+        actions = sorted(available_actions[tool_name])
+        if not actions:
+            continue
+        conns = conn_by_tool.get(tool_name, [])
+        # Prefer first connection name as identifier; tool_name in parens if differs
+        if conns:
+            if len(conns) == 1:
+                header = f"{conns[0]} (tool={tool_name})"
+            else:
+                header = f"{tool_name} (connections: {', '.join(conns)})"
+        else:
+            header = tool_name
+
+        if len(actions) <= inline_action_limit:
+            lines.append(f"- {header}: {', '.join(actions)}")
+        else:
+            lines.append(f"- {header}: {len(actions)} actions — SEARCH to discover")
+
+    return "\n".join(lines)
+
+
+def search_tools_for_query(
+    query: str,
+    available_actions: Dict[str, Set[str]],
+    connections: List[Any] = None,
+    custom_descriptions: Dict[str, str] = None,
+    exclude: Optional[Set[str]] = None,
+    limit: int = 10,
+) -> List[str]:
+    """
+    Score-ranked search over available tools. Supports multi-keyword queries
+    (any whitespace-separated word becomes a keyword) and OR matching with
+    relevance scoring. Returns the top `limit` results, excluding any
+    `tool:ACTION` keys already in `exclude` (to avoid repeating tools across
+    iterations).
+
+    Results are formatted as "tool:ACTION → summary" (or just "tool:ACTION"
+    when no summary is available).
+    """
+    keywords = _extract_keywords(query)
+    if not keywords:
+        return []
+
+    exclude = exclude or set()
+    # candidates: list of (score, key, display_summary)
+    candidates: Dict[str, Tuple[int, str]] = {}
+
+    # 1) Score against TOOL_ACTION_SUMMARIES summaries
+    for tool_name, actions in available_actions.items():
+        for action in actions:
+            key = f"{tool_name}:{action}"
+            if key in exclude:
+                continue
+            summary = TOOL_ACTION_SUMMARIES.get(tool_name, {}).get(action, "")
+            score = _score_tool_action(tool_name, action, summary, keywords)
+            if score > 0:
+                candidates[key] = (score, summary)
+
+    # 2) Boost by connection-name/description matches
+    if connections:
+        for conn in connections:
+            conn_name = getattr(conn, "connection_name", "")
+            tool_name = getattr(conn, "tool_name", "").lower()
+            conn_desc = ""
+            if hasattr(conn, "metadata") and isinstance(conn.metadata, dict):
+                conn_desc = conn.metadata.get("description", "")
+            conn_text = (conn_name + " " + (conn_desc or "")).lower()
+            conn_boost = 0
+            for kw in keywords:
+                if kw in conn_text:
+                    conn_boost += 2
+            if conn_boost <= 0:
+                continue
+            for action in available_actions.get(tool_name, set()):
+                key = f"{tool_name}:{action}"
+                if key in exclude:
+                    continue
+                summary = TOOL_ACTION_SUMMARIES.get(tool_name, {}).get(action, "")
+                prev = candidates.get(key, (0, summary))
+                candidates[key] = (prev[0] + conn_boost, summary or prev[1])
+
+    # 3) Custom tools (script-injected) — score by name + description
+    if custom_descriptions:
+        for raw_name, desc in custom_descriptions.items():
+            t_name = raw_name.lower()
+            # Skip standard tools (already covered above) and missing actions
+            if t_name in TOOL_ACTION_SUMMARIES:
+                continue
+            actions = available_actions.get(t_name, {"EXECUTE"})
+            for action in actions:
+                key = f"{t_name}:{action}"
+                if key in exclude or key in candidates:
+                    continue
+                desc_short = (desc or "")[:80]
+                score = _score_tool_action(t_name, action, desc_short, keywords)
+                if score > 0:
+                    candidates[key] = (score, desc_short)
+
+    # Sort by score desc, then by key asc (stable)
+    ranked = sorted(candidates.items(), key=lambda kv: (-kv[1][0], kv[0]))
+    top = ranked[:limit]
+    return [f"{key} → {summary}" if summary else key for key, (_score, summary) in top]
 
 
 def build_connection_context_for_prompt(connection_map: Dict[str, List[str]], connections: List[Any]) -> str:

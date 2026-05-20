@@ -147,6 +147,7 @@ class DockerSandbox(BaseSandbox):
         vision_model: Optional[str] = None,
         sandbox_config: Optional[Dict[str, Any]] = None,
         workspace_files: Optional[list] = None,
+        allowed_libs: Optional[list] = None,
     ):
         self._tool_manager = tool_manager
         self._task_id = task_id
@@ -157,6 +158,7 @@ class DockerSandbox(BaseSandbox):
         self._vision_model = vision_model
         self._config = {**_DEFAULTS, **(sandbox_config or {})}
         self._workspace_files = workspace_files or []
+        self._allowed_libs = [lib.strip() for lib in (allowed_libs or []) if lib and lib.strip()]
 
         # Lazily created
         self._libraries: Optional[dict] = None
@@ -297,6 +299,11 @@ class DockerSandbox(BaseSandbox):
         # constrained by the `allowed_imports` allowlist (no urllib/requests/
         # httpx/socket), so it cannot make arbitrary network calls itself.
 
+        # When user-specified libs need pip-installing, provide a writable
+        # (exec-capable) tmpfs so pip can place C-extension .so files there.
+        if self._allowed_libs:
+            cmd.extend(["--tmpfs", "/packages:size=256m"])
+
         # Container entrypoint with host:port RPC endpoint
         cmd.extend([
             _full_image(),
@@ -331,6 +338,11 @@ class DockerSandbox(BaseSandbox):
         message so the runner knows what code to execute.
         """
         available_tools = list(self._libraries.keys()) if self._libraries else []
+        base_imports = [
+            "asyncio", "datetime", "json", "math", "pathlib",
+            "re", "statistics", "time",
+        ]
+        extra_roots = [lib.split(".")[0] for lib in self._allowed_libs]
         manifest = {
             "task_id": self._task_id,
             "agent_id": self._agent_id,
@@ -340,10 +352,8 @@ class DockerSandbox(BaseSandbox):
                 if self._orchestrator and hasattr(self._orchestrator, "agent_context")
                 else {}
             ),
-            "allowed_imports": [
-                "asyncio", "datetime", "json", "math", "pathlib",
-                "re", "statistics", "time",
-            ],
+            "allowed_imports": list(dict.fromkeys(base_imports + extra_roots)),
+            "packages_to_install": self._allowed_libs,
             "timeout": self._config["timeout"],
         }
         self._rpc_server._pending_execute = proto.msg_execute(code, manifest)

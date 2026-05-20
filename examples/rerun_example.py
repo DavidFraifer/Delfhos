@@ -84,7 +84,7 @@ def sales_report(region: str = "all", quarter: str = "latest") -> dict:
 # ── Agent ──────────────────────────────────────────────────────────────────────
 agent = Agent(
     tools=[sales_report],
-    llm="gemini-3.1-flash-lite-preview",
+    llm="gemini-3.1-flash-lite",
     verbose=True,
 )
 

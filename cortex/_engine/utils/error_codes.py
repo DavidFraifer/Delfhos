@@ -238,7 +238,7 @@ class ErrorCodes:
         "Model does not support web search",
         "The specified LLM model does not support web search capability",
         "Web search is supported for Gemini and OpenAI/GPT models. Initialize WebSearch with a supported model:\n"
-        "  WebSearch(llm='gemini-3.1-flash-lite-preview')  # Gemini\n"
+        "  WebSearch(llm='gemini-3.1-flash-lite')  # Gemini\n"
         "  WebSearch(llm='gpt-4')  # OpenAI"
     )
 

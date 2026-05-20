@@ -55,11 +55,13 @@ class SandboxExecutor(BaseSandbox):
         mode: SandboxMode = "auto",
         sandbox_config: Optional[Dict[str, Any]] = None,
         workspace_files: Optional[list] = None,
+        allowed_libs: Optional[list] = None,
         **executor_kwargs,
     ):
         self._mode = mode
         self._sandbox_config = sandbox_config or {}
         self._workspace_files = workspace_files or []
+        self._allowed_libs = allowed_libs or []
         self._executor_kwargs = executor_kwargs
         self._backend: Optional[BaseSandbox] = None
 
@@ -71,7 +73,7 @@ class SandboxExecutor(BaseSandbox):
     def _resolve_backend(self) -> BaseSandbox:
         if self._mode == "local":
             logger.info("Sandbox: using local (in-process) backend")
-            return LocalSandbox(**self._executor_kwargs)
+            return LocalSandbox(allowed_libs=self._allowed_libs, **self._executor_kwargs)
 
         if self._mode == "docker" or self._mode == "auto":
             if _docker_available():
@@ -81,6 +83,7 @@ class SandboxExecutor(BaseSandbox):
                 return DockerSandbox(
                     sandbox_config=self._sandbox_config,
                     workspace_files=self._workspace_files,
+                    allowed_libs=self._allowed_libs,
                     **self._executor_kwargs,
                 )
             elif self._mode == "docker":
@@ -90,7 +93,7 @@ class SandboxExecutor(BaseSandbox):
                     "sandbox='auto' to allow fallback."
                 )
             else:
-                return LocalSandbox(**self._executor_kwargs)
+                return LocalSandbox(allowed_libs=self._allowed_libs, **self._executor_kwargs)
 
         raise ValueError(f"Unknown sandbox mode: {self._mode!r}")
 

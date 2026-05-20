@@ -98,11 +98,13 @@ class APITool(BaseConnection):
                      re-parsing the spec on subsequent runs.
                      Disabled by default to avoid stale schemas.
         enrich:      If True, use an LLM to improve endpoint descriptions and
-                     infer response schemas during compilation. Requires ``llm``
-                     to be set. Results are cached so cost is only incurred once.
+                     infer response schemas during compilation. If ``llm`` is not
+                     set, the agent automatically falls back to its ``light_llm``.
+                     Results are cached so cost is only incurred once.
                      Disabled by default.
         llm:         Model identifier for LLM enrichment (e.g., ``"gemini-2.5-flash"``).
-                     Only used when ``enrich=True``.
+                     Only used when ``enrich=True``. Defaults to the Agent's
+                     ``light_llm`` if not provided.
         sample:      If True, capture real response schemas from API calls during
                      task execution and store them in the cache. No LLM involved,
                      zero token cost. Improves agent context over time.
@@ -352,7 +354,7 @@ class APITool(BaseConnection):
         elif self.enrich and not self.llm:
             _log_connection(
                 "API COMPILE",
-                f"{self.api_tool_name}: enrich=True but no llm= specified, skipping enrichment",
+                f"{self.api_tool_name}: enrich=True but no llm= available, skipping enrichment (agent injects light_llm automatically)",
             )
 
         # Refresh selected_tools after enrichment (descriptions may have changed)

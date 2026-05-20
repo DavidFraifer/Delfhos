@@ -33,7 +33,6 @@ class Cortex:
         llm: Single LLM for all ops.
         light_llm: Fast LLM for prefiltering.
         heavy_llm: Stronger LLM for code generation.
-        code_llm: Model used for Python code generation. Defaults to heavy_llm.
         vision_llm: Model used for image analysis and multimodal tasks. Defaults to heavy_llm.
         chat: Chat(keep=10, summarize=False) for session memory (set Chat.summarizer_llm for compression).
         memory: Persistent memory.
@@ -51,7 +50,6 @@ class Cortex:
         llm: Optional[LLMSpec] = ...,
         light_llm: Optional[LLMSpec] = ...,
         heavy_llm: Optional[LLMSpec] = ...,
-        code_llm: Optional[LLMSpec] = ...,
         vision_llm: Optional[LLMSpec] = ...,
         system_prompt: Optional[str] = ...,
         on_confirm: Optional[Callable] = ...,

@@ -31,7 +31,7 @@ class Tool:
             '''Do something with x and optional y.'''
             return f"{x} * {y}"
 
-        agent = Agent(tools=[my_function], llm="gemini-3.1-flash-lite-preview")
+        agent = Agent(tools=[my_function], llm="gemini-3.1-flash-lite")
 
     The decorator automatically captures the function's:
       • Name (or override with name="custom_name")
@@ -82,7 +82,7 @@ def tool(
             \"\"\"Fetch the current weather for a city.\"\"\"
             return weather_api.fetch(location=location, units=units)
 
-        agent = Agent(tools=[get_weather], llm="gemini-3.1-flash-lite-preview")
+        agent = Agent(tools=[get_weather], llm="gemini-3.1-flash-lite")
         agent.run("What's the weather in Paris?")
 
     **Advanced usage** (with options)::

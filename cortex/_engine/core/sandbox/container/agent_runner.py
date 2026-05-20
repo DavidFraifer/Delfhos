@@ -284,6 +284,25 @@ async def main(endpoint: str) -> None:
         manifest = msg["manifest"]
         timeout = manifest.get("timeout", 300)
 
+        # Install user-requested packages before executing agent code.
+        packages_to_install = manifest.get("packages_to_install", [])
+        if packages_to_install:
+            import subprocess as _sp
+            _install_dir = "/packages"
+            _result = _sp.run(
+                [sys.executable, "-m", "pip", "install", "--target", _install_dir,
+                 "--quiet", "--no-cache-dir"] + packages_to_install,
+                capture_output=True, text=True,
+            )
+            if _result.returncode != 0:
+                await rpc.send_done(
+                    success=False,
+                    error=f"Failed to install packages {packages_to_install}:\n{_result.stderr}",
+                )
+                return
+            if _install_dir not in sys.path:
+                sys.path.insert(0, _install_dir)
+
         # Build proxy libraries
         libraries = build_proxy_libraries(
             manifest.get("available_tools", []),

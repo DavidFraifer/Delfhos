@@ -21,7 +21,7 @@ class CalendarConnection(GoogleBaseConnection):
     
     Example:
         calendar = Calendar(oauth_credentials="client_secrets.json")
-        agent = Agent(tools=[calendar, Gmail()], llm="gemini-3.1-flash-lite-preview")
+        agent = Agent(tools=[calendar, Gmail()], llm="gemini-3.1-flash-lite")
         agent.run("Find a 1-hour slot next Tuesday and schedule meeting with alice@co.com")
     
     Authentication (choose one):

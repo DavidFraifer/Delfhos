@@ -8,7 +8,7 @@ class Gmail:
 
     Example (service account):
         gmail = Gmail(service_account="sa.json", delegated_user="user@workspace.com")
-        agent = Agent(tools=[gmail], llm="gemini-3.1-flash-lite-preview")
+        agent = Agent(tools=[gmail], llm="gemini-3.1-flash-lite")
         agent.run("Reply to all unread emails with a summary of today's meetings")
 
     Example (personal OAuth):
@@ -75,7 +75,7 @@ class SQL:
 
     Example (connection string):
         db = SQL(url="postgresql://user:pw@localhost/mydb")
-        agent = Agent(tools=[db, Sheets()], llm="gemini-3.1-flash-lite-preview")
+        agent = Agent(tools=[db, Sheets()], llm="gemini-3.1-flash-lite")
         agent.run("Query revenue by region and update the Reporting sheet")
 
     Example (parameters):
@@ -140,7 +140,7 @@ class Sheets:
 
     Example:
         sheets = Sheets(oauth_credentials="client_secrets.json")
-        agent = Agent(tools=[sheets, SQL(...)], llm="gemini-3.1-flash-lite-preview")
+        agent = Agent(tools=[sheets, SQL(...)], llm="gemini-3.1-flash-lite")
         agent.run("Pull yesterday's sales from the DB and update the Q3 Summary sheet")
 
     Authentication (choose one):
@@ -192,7 +192,7 @@ class Drive:
 
     Example:
         drive = Drive(oauth_credentials="client_secrets.json")
-        agent = Agent(tools=[drive, Gmail()], llm="gemini-3.1-flash-lite-preview")
+        agent = Agent(tools=[drive, Gmail()], llm="gemini-3.1-flash-lite")
         agent.run("Archive Q3 reports into Completed/Q3 folder and send summary to finance@co.com")
 
     Authentication (choose one):
@@ -243,7 +243,7 @@ class Calendar:
 
     Example:
         calendar = Calendar(oauth_credentials="client_secrets.json")
-        agent = Agent(tools=[calendar, Gmail()], llm="gemini-3.1-flash-lite-preview")
+        agent = Agent(tools=[calendar, Gmail()], llm="gemini-3.1-flash-lite")
         agent.run("Find a 1-hour slot next Tuesday and schedule meeting with alice@co.com")
 
     Authentication (choose one):
@@ -294,7 +294,7 @@ class Docs:
 
     Example:
         docs = Docs(oauth_credentials="client_secrets.json")
-        agent = Agent(tools=[docs, WebSearch()], llm="gemini-3.1-flash-lite-preview")
+        agent = Agent(tools=[docs, WebSearch()], llm="gemini-3.1-flash-lite")
         agent.run("Research latest Python best practices and write a guide to my Tech Doc")
 
     Authentication (choose one):
@@ -348,7 +348,7 @@ class WebSearch:
     Claude models do not support web search.
 
     Example (Gemini):
-        search = WebSearch(llm="gemini-3.1-flash-lite-preview")
+        search = WebSearch(llm="gemini-3.1-flash-lite")
         agent = Agent(tools=[search, Gmail()], llm="gemini-3.1-pro")
         agent.run("What are the latest AI trends and email a summary to alice@co.com")
 
@@ -358,7 +358,7 @@ class WebSearch:
         agent.run("What are the latest AI trends and email a summary to alice@co.com")
 
     Args:
-        llm: Required. LLM model to use for web search (e.g., "gemini-3.1-flash-lite-preview", "gpt-4").
+        llm: Required. LLM model to use for web search (e.g., "gemini-3.1-flash-lite", "gpt-4").
              Supported: Gemini and OpenAI/GPT models.
         api_key: Optional API key. If not provided, uses env var or falls back to free mode.
         allow: Restrict actions to specific ones (e.g., ["search"]; default: allow all).

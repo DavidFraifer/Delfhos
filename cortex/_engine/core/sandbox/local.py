@@ -28,6 +28,7 @@ class LocalSandbox(BaseSandbox):
         heavy_llm: str,
         orchestrator=None,
         vision_model: Optional[str] = None,
+        allowed_libs: Optional[list] = None,
     ):
         self._executor = PythonExecutor(
             tool_manager=tool_manager,
@@ -37,6 +38,7 @@ class LocalSandbox(BaseSandbox):
             heavy_llm=heavy_llm,
             orchestrator=orchestrator,
             vision_model=vision_model,
+            allowed_libs=allowed_libs,
         )
 
     @property

@@ -10,7 +10,7 @@ Quick start::
 
     agent = Agent(
         tools=[Gmail(oauth_credentials="secrets.json"), Drive(oauth_credentials="secrets.json")],
-        llm="gemini-3.1-flash-lite-preview"
+        llm="gemini-3.1-flash-lite"
     )
     agent.run("Forward today's reports to alice@co.com and archive old ones")
 
@@ -23,7 +23,7 @@ Custom tools::
         \"\"\"Analyze sentiment of text.\"\"\"
         return "positive" if "good" in text.lower() else "negative"
 
-    agent = Agent(tools=[analyze_sentiment, Gmail()], llm="gemini-3.1-flash-lite-preview")
+    agent = Agent(tools=[analyze_sentiment, Gmail()], llm="gemini-3.1-flash-lite")
 """
 
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -87,17 +87,17 @@ class Agent:
       4. Iterate: Get feedback and refine until the goal succeeds.
 
     Quick example:
-        agent = Agent(tools=[Gmail(), Drive()], llm="gemini-3.1-flash-lite-preview")
+        agent = Agent(tools=[Gmail(), Drive()], llm="gemini-3.1-flash-lite")
         agent.run("Archive unread emails and summarize to alice@co.com")
 
     Advanced example with web search:
         agent = Agent(
             tools=[
-                WebSearch(llm="gemini-3.1-flash-lite-preview"),
+                WebSearch(llm="gemini-3.1-flash-lite"),
                 SQL(url="postgresql://..."),
                 Sheets(...)
             ],
-            light_llm="gemini-3.1-flash-lite-preview",
+            light_llm="gemini-3.1-flash-lite",
             heavy_llm="gemini-3.1-pro",
             chat=Chat(keep=5, summarize=True),
             system_prompt="You are a data analyst. Be thorough.",
@@ -115,7 +115,6 @@ class Agent:
         llm: Single LLM for all ops (simple). Use either llm OR (light_llm + heavy_llm).
         light_llm: Fast LLM for prefiltering (advanced; requires heavy_llm).
         heavy_llm: Stronger LLM for code generation (advanced; requires light_llm).
-        code_llm: Model used for Python code generation. Defaults to heavy_llm.
         vision_llm: Model used for image analysis and multimodal tasks. Defaults to heavy_llm.
         chat: Chat(keep=10, summarize=False) for session memory (set Chat.summarizer_llm for compression).
         memory: Persistent memory across sessions (e.g., SQL database).
@@ -123,7 +122,7 @@ class Agent:
         on_confirm: Approval callback fn(brief) -> bool. If set, enables human-in-the-loop.
                     Per-tool approval: set confirm= on each tool, e.g. Gmail(confirm=["send"]).
         verbose: If True, print detailed execution traces.
-        enable_prefilter: If True, pre-filter tools before code generation (default: False).
+        prefilter_mode: Tool prefilter strategy. "auto" (default): "off" for <10 actions, "filter" for 10–49, "search" for ≥50.
         providers: API key overrides {"google": "...", "openai": "...", etc}.
     """
 
@@ -135,26 +134,25 @@ class Agent:
         llm: Optional[str] = None,
         light_llm: Optional[str] = None,
         heavy_llm: Optional[str] = None,
-        code_llm: Optional[str] = None,
         vision_llm: Optional[str] = None,
         system_prompt: Optional[str] = None,
         on_confirm: Optional[Callable] = None,
         providers: Optional[Dict[str, str]] = None,
         verbose: bool = False,
-        enable_prefilter: bool = False,
+        prefilter_mode: str = "auto",
         sandbox: str = "auto",
         sandbox_config: Optional[Dict[str, Any]] = None,
         budget_usd: Optional[float] = None,
+        allowed_libs: Optional[List[str]] = None,
     ) -> None:
         """Initialize an Agent with tools and language models.
 
         Args:
             tools: List of Service tools (Gmail, Drive, SQL, APITool, etc), @tool functions, or Connections.
-            llm: Single LLM for all operations (e.g., "gemini-3.1-flash-lite-preview").
+            llm: Single LLM for all operations (e.g., "gemini-3.1-flash-lite").
                  Shorthand for: light_llm=llm, heavy_llm=llm.
             light_llm: (Advanced) Fast LLM for prefiltering/lightweight tasks (requires heavy_llm).
             heavy_llm: (Advanced) Powerful LLM for code generation (requires light_llm).
-            code_llm: Model used specifically for Python code generation. Defaults to heavy_llm.
             vision_llm: Model used for image analysis and multimodal tasks. Defaults to heavy_llm.
             chat: Chat(keep=10, summarize=True) — session memory & auto-summarization (set Chat.summarizer_llm for compression).
             memory: Persistent memory for facts/context (e.g., persisted embeddings).
@@ -169,7 +167,7 @@ class Agent:
             # Simple (single LLM)
             agent = Agent(
                 tools=[Gmail(), Drive()],
-                llm="gemini-3.1-flash-lite-preview"
+                llm="gemini-3.1-flash-lite"
             )
             agent.run("Forward today's reports to alice@co.com")
 
@@ -179,11 +177,10 @@ class Agent:
                     SQL(url="...", confirm=["write"]),       # confirm before writes
                     Gmail(oauth_credentials="...", confirm=["send"]),  # confirm before sending
                 ],
-                light_llm="gemini-3.1-flash-lite-preview",
+                light_llm="gemini-3.1-flash-lite",
                 heavy_llm="gemini-3.1-pro",
-                code_llm="gemini-3.1-pro",        # override for code generation
                 vision_llm="gemini-3.1-pro-vision",  # override for image analysis
-                chat=Chat(summarizer_llm="gemini-3.1-flash-lite-preview"),  # auto-summarizes
+                chat=Chat(summarizer_llm="gemini-3.1-flash-lite"),  # auto-summarizes
                 verbose=True
             )
         """
@@ -243,8 +240,8 @@ class Agent:
         Example:
             agent = Agent(
                 tools=[...],
-                llm="gemini-3.1-flash-lite-preview",
-                chat=Chat(summarizer_llm="gemini-3.1-flash-lite-preview")
+                llm="gemini-3.1-flash-lite",
+                chat=Chat(summarizer_llm="gemini-3.1-flash-lite")
             )
             agent.run_chat()
         """

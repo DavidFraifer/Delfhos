@@ -25,7 +25,7 @@ class DocsConnection(GoogleBaseConnection):
     
     Example:
         docs = Docs(oauth_credentials="client_secrets.json")
-        agent = Agent(tools=[docs, WebSearch()], llm="gemini-3.1-flash-lite-preview")
+        agent = Agent(tools=[docs, WebSearch()], llm="gemini-3.1-flash-lite")
         agent.run("Research latest Python best practices and write a guide to my Tech Doc")
     
     Authentication (choose one):

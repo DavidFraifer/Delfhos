@@ -47,7 +47,7 @@ from delfhos.sandbox import MockEmail, MockDatabase
 
 agent = Agent(
     tools=[MockEmail(confirm=False), MockDatabase(confirm=False)],
-    llm="gemini-3.1-flash-lite-preview",
+    llm="gemini-3.1-flash-lite",
 )
 
 agent.run(
@@ -110,7 +110,7 @@ def calculate_discount(price: float, pct: float) -> float:
     """Return price after applying a percentage discount."""
     return price * (1 - pct / 100)
 
-agent = Agent(tools=[calculate_discount], llm="gemini-3.1-flash-lite-preview")
+agent = Agent(tools=[calculate_discount], llm="gemini-3.1-flash-lite")
 agent.run("What is the price of a $120 item with a 15% discount?")
 agent.stop()
 ```
@@ -128,7 +128,7 @@ gmail = Gmail(oauth_credentials="client_secrets.json", allow=["read", "send"], c
 db    = SQL(url="postgresql://user:pass@host/db",       allow=["schema", "query"])
 drive = Drive(oauth_credentials="client_secrets.json",  confirm=True)
 
-agent = Agent(tools=[gmail, db, drive], llm="gemini-3.1-flash-lite-preview")
+agent = Agent(tools=[gmail, db, drive], llm="gemini-3.1-flash-lite")
 agent.run("Check unread emails and log any order mentions to the database.")
 agent.stop()
 ```
@@ -192,8 +192,8 @@ from delfhos import Agent, Chat, Gmail
 
 agent = Agent(
     tools=[Gmail(oauth_credentials="client_secrets.json")],
-    llm="gemini-3.1-flash-lite-preview",
-    chat=Chat(summarizer_llm="gemini-3.1-flash-lite-preview"),
+    llm="gemini-3.1-flash-lite",
+    chat=Chat(summarizer_llm="gemini-3.1-flash-lite"),
 )
 
 agent.run_chat()  # starts a terminal session — type /help for commands
@@ -210,7 +210,7 @@ from delfhos import Agent, Chat, Memory
 
 agent = Agent(
     tools=[...],
-    llm="gemini-3.1-flash-lite-preview",
+    llm="gemini-3.1-flash-lite",
     chat=Chat(keep=8, summarize=True, namespace="my_agent"),    # short-term
     memory=Memory(namespace="my_agent"),                         # long-term semantic
 )
@@ -313,7 +313,7 @@ agent = Agent(
 The agent cleans up automatically when used as a context manager:
 
 ```python
-with Agent(tools=[...], llm="gemini-3.1-flash-lite-preview") as agent:
+with Agent(tools=[...], llm="gemini-3.1-flash-lite") as agent:
     agent.run("Summarise last week's sales and email it to the team.")
 ```
 

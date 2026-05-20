@@ -20,7 +20,7 @@ class DriveConnection(GoogleBaseConnection):
     
     Example:
         drive = Drive(oauth_credentials="client_secrets.json")
-        agent = Agent(tools=[drive, Gmail()], llm="gemini-3.1-flash-lite-preview")
+        agent = Agent(tools=[drive, Gmail()], llm="gemini-3.1-flash-lite")
         agent.run("Archive Q3 reports into Completed/Q3 folder and send summary to finance@co.com")
     
     Authentication (choose one):

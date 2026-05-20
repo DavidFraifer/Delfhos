@@ -12,8 +12,8 @@ class Chat:
     the oldest messages are summarized asynchronously and removed.
 
     Example:
-        chat = Chat(summarizer_llm="gemini-3.1-flash-lite-preview")  # Auto-summarizes old messages, keeps last 10
-        agent = Agent(tools=[Gmail()], chat=chat, llm="gemini-3.1-flash-lite-preview")
+        chat = Chat(summarizer_llm="gemini-3.1-flash-lite")  # Auto-summarizes old messages, keeps last 10
+        agent = Agent(tools=[Gmail()], chat=chat, llm="gemini-3.1-flash-lite")
         # Agent remembers last 10 messages + a summary of older ones
 
     Args:
@@ -24,7 +24,7 @@ class Chat:
         path: SQLite file path for persisted chat state (used only when persist=True).
               If omitted, defaults to ~/delfhos/chat/<namespace>.db.
         namespace: Namespace key to isolate multiple chats in the same DB.
-        summarizer_llm: LLM model used for chat compression (e.g., "gemini-3.1-flash-lite-preview").
+        summarizer_llm: LLM model used for chat compression (e.g., "gemini-3.1-flash-lite").
                         If not provided, must be set before the agent attempts compression.
     """
     keep: int

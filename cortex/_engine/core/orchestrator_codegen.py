@@ -27,6 +27,8 @@ from ..tools.tool_registry import (
     parse_prefilter_response,
     filter_selected_actions,
     build_connection_context_for_prompt,
+    search_tools_for_query,
+    build_tool_inventory_overview,
 )
 from ..trace import PrefilterTrace, CodeGenTrace
 from .python_executor import parse_python_code
@@ -434,6 +436,214 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
         )
         return selected_actions, connection_map, python_api_docs, schema_task
 
+    # ------------------------------------------------------------------ #
+    #  Search-mode prefilter                                              #
+    # ------------------------------------------------------------------ #
+
+    def _build_search_prefilter_prompt(
+        self,
+        task_text: str,
+        search_history: list,
+        inventory: str,
+    ) -> str:
+        """
+        Two-shape prompt:
+        - First iteration: show tool inventory (namespace → actions) + instructions
+        - Later iterations: show inventory + accumulated search results + minimal instructions
+        """
+        lines: List[str] = [f'Task: "{task_text[:1400]}"', ""]
+        lines.append("Available tools:")
+        lines.append(inventory)
+        lines.append("")
+        if search_history:
+            lines.append("Searches:")
+            for query, results in search_history:
+                lines.append(f"  SEARCH: {query}")
+                if results:
+                    for r in results:
+                        lines.append(f"    {r}")
+                else:
+                    lines.append("    (no matches)")
+            lines.append("")
+        lines.append(
+            "Respond with EXACTLY ONE of:\n"
+            "  DONE: tool:ACTION, tool:ACTION, ...   (finalize selection — prefer this when action names are clear)\n"
+            "  SEARCH: <keywords>                     (fetch descriptions — PACK MULTIPLE CONCEPTS in one call, e.g. 'email send invoice pdf')\n"
+            "  ANSWER: <text>                         (no tools needed — direct answer)\n"
+            "\n"
+            "Rules for DONE:\n"
+            "  - List only the action identifier — NO parentheses, NO parameters, NO call syntax.\n"
+            "  - Correct:   DONE: finnhub:QUOTE, gmail:SEND\n"
+            "  - Wrong:     DONE: finnhub:QUOTE(SYMBOL='AAPL'), gmail:SEND(to=...)\n"
+            "  - Each action may be invoked many times later with different arguments — do not enumerate calls here."
+        )
+        return "\n".join(lines)
+
+    async def _run_prefilter_search(
+        self,
+        message: str,
+        task_id: str,
+        memory_context: Optional[str],
+        connections: list,
+        available_actions: dict,
+        schema_task: Optional[asyncio.Task],
+    ):
+        """
+        Iterative search-mode prefilter optimized for high-tool-count agents.
+
+        Design:
+        - Iteration 1 shows a compact inventory (namespace → action names) so
+          the LLM can often DONE immediately without any SEARCH.
+        - When SEARCH is needed, the response is score-ranked and deduped
+          against prior iterations to avoid wasting tokens on repeats.
+        - Capped at 5 iterations; the LLM is told to pack multiple concepts
+          per SEARCH (one call covers email + invoice + pdf, etc.).
+        """
+        MAX_ITERATIONS = 5
+        SEARCH_RESULT_LIMIT = 10
+
+        task_text = message
+        if memory_context:
+            compact = self._compact_prefilter_memory_context(memory_context)
+            if compact:
+                task_text = f"{message}\n\n[Relevant memory facts]\n{compact}"
+
+        inventory = build_tool_inventory_overview(
+            available_actions,
+            connections=connections,
+            custom_descriptions=getattr(self, "tool_descriptions", None),
+        )
+
+        await self.track_tool_timing_async(
+            task_id, "prefilter", None, self.prefilter_llm,
+            description=self._ui_text("analyzing_connections"), is_starting=True,
+        )
+
+        start_time = time.time()
+        total_tokens: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+        search_history: list = []
+        already_shown: set = set()  # tool:ACTION keys already returned by prior searches
+        selected_actions: list = []
+        connection_map: Dict[str, list] = {}
+        direct_answer: Optional[str] = None
+
+        for _ in range(MAX_ITERATIONS):
+            prompt = self._build_search_prefilter_prompt(task_text, search_history, inventory)
+            result = await llm_completion_async(
+                model=self.prefilter_llm,
+                prompt=prompt,
+                temperature=0.0,
+                max_tokens=200,
+            )
+            response, tokens = normalize_llm_result(result)
+            total_tokens["input_tokens"] += tokens.get("input_tokens", 0)
+            total_tokens["output_tokens"] += tokens.get("output_tokens", 0)
+
+            response = response.strip()
+            upper = response.upper()
+
+            if upper.startswith("ANSWER:"):
+                direct_answer = response[7:].strip()
+                break
+            elif upper.startswith("DONE:"):
+                selected_actions, connection_map = parse_prefilter_response(
+                    response[5:].strip(), connections
+                )
+                break
+            elif upper.startswith("SEARCH:"):
+                query = response[7:].strip()
+                hits = search_tools_for_query(
+                    query, available_actions, connections,
+                    getattr(self, "tool_descriptions", None),
+                    exclude=already_shown,
+                    limit=SEARCH_RESULT_LIMIT,
+                )
+                for h in hits:
+                    already_shown.add(h.split(" → ")[0].strip())
+                search_history.append((query, hits))
+                console.debug(
+                    f"Prefilter search [{len(search_history)}]",
+                    f"Query: {query!r} → {len(hits)} new results",
+                    task_id=task_id, agent_id=self.agent_id,
+                )
+            else:
+                # Fallback: treat as DONE payload
+                selected_actions, connection_map = parse_prefilter_response(response, connections)
+                break
+        else:
+            # Max iterations reached — union all found tools as a safety net
+            fallback = list(already_shown)
+            selected_actions, connection_map = parse_prefilter_response(
+                ",".join(fallback), connections
+            )
+
+        duration = time.time() - start_time
+
+        if direct_answer is not None:
+            if schema_task and not schema_task.done():
+                schema_task.cancel()
+            await self.track_tool_timing_async(
+                task_id, "prefilter", duration, self.prefilter_llm,
+                description="Direct answer (no tools needed)", is_starting=False,
+                metadata={"direct_answer": True},
+            )
+            self._safe_add_tokens(task_id, total_tokens, self.prefilter_llm, "prefilter", duration=duration)
+            escaped = direct_answer.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
+            return f'print("""{escaped}""")', {}, None, schema_task  # type: ignore[return-value]
+
+        selected_actions, blocked_actions = filter_selected_actions(selected_actions, available_actions)
+        if blocked_actions:
+            console.warning(
+                "Prefilter proposed disallowed actions",
+                f"Blocked: {', '.join(sorted(blocked_actions))}",
+                task_id=task_id, agent_id=self.agent_id,
+            )
+
+        if self.verbose == "high":
+            self._print_verbose_actions_table(available_actions, selected_actions, task_id=task_id)
+
+        if self.current_trace:
+            pf_end_dt = datetime.now()
+            pf_start_dt = datetime.fromtimestamp(start_time)
+            base_selected = {a.split(":")[0] for a in selected_actions}
+            tools_rej = [a for a in available_actions if a not in base_selected]
+            self.current_trace.prefilter = PrefilterTrace(
+                started_at=pf_start_dt,
+                duration_ms=int(duration * 1000),
+                model_used=self.prefilter_llm,
+                tools_available=len(available_actions),
+                tools_selected=list(base_selected),
+                tools_rejected=tools_rej,
+                tokens_input=total_tokens["input_tokens"],
+                tokens_output=total_tokens["output_tokens"],
+                ran_parallel_with="sql_schema_fetch" if schema_task else None,
+            )
+            self.current_trace.add_event(
+                "prefilter_complete",
+                f"{len(selected_actions)} tools selected ({len(search_history)} searches)",
+                t=pf_end_dt,
+            )
+
+        await self.track_tool_timing_async(
+            task_id, "prefilter", duration, self.prefilter_llm,
+            description=self._ui_text("analyzing_connections"), is_starting=False,
+            metadata={"selected_tools": selected_actions, "connection_map": connection_map, "searches": len(search_history)},
+        )
+        self._safe_add_tokens(task_id, total_tokens, self.prefilter_llm, "prefilter", duration=duration)
+
+        selected_tools = {a.split(":")[0] if ":" in a else a for a in selected_actions}
+        tool_label = "tool" if len(selected_tools) == 1 else "tools"
+        console.tool(
+            "prefilter",
+            f"{len(selected_tools)} {tool_label} selected ({len(search_history)} searches)",
+            task_id=task_id, agent_id=self.agent_id, scope="prefilter",
+        )
+
+        python_api_docs = build_filtered_api_docs(
+            selected_actions, custom_descriptions=getattr(self, "tool_descriptions", None)
+        )
+        return selected_actions, connection_map, python_api_docs, schema_task
+
     def _print_verbose_actions_table(
         self, available_actions: dict, selected_actions: list, task_id: str = ""
     ):
@@ -556,8 +766,19 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
         if has_sql_connections:
             schema_task = asyncio.create_task(self._fetch_sql_schema(task_id))
 
+        # ── Resolve effective prefilter mode ──────────────────────────────
+        effective_mode = getattr(self, "prefilter_mode", "off")
+        if effective_mode == "auto":
+            total_actions = sum(len(acts) for acts in available_actions.values())
+            if total_actions < 10:
+                effective_mode = "off"
+            elif total_actions < 50:
+                effective_mode = "filter"
+            else:
+                effective_mode = "search"
+
         # ── Prefilter (optional) ───────────────────────────────────────────
-        if not self.enable_prefilter:
+        if effective_mode == "off":
             all_actions = [
                 f"{tool_name}:{action}"
                 for tool_name, actions in available_actions.items()
@@ -574,7 +795,15 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
             python_api_docs = build_filtered_api_docs(
                 all_actions, custom_descriptions=self.tool_descriptions
             )
-        else:
+        elif effective_mode == "search":
+            result = await self._run_prefilter_search(
+                message, task_id, memory_context, connections,
+                available_actions, schema_task,
+            )
+            if isinstance(result[0], str) and result[2] is None:
+                return result[0]
+            selected_actions, connection_map, python_api_docs, schema_task = result
+        else:  # "filter"
             result = await self._run_prefilter(
                 message, task_id, memory_context, connections,
                 available_actions, schema_task,

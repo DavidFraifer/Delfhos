@@ -22,7 +22,7 @@ agent = Agent(
         MockEmail(),
         MockDatabase(confirm=False),
     ],
-    llm="gemini-3.1-flash-lite-preview",
+    llm="gemini-3.1-flash-lite",
     sandbox="local",
     verbose=True,
 )

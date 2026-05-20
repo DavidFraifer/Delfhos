@@ -7,7 +7,7 @@ agent = Agent(
         Gmail(oauth_credentials="client_secrets.json", allow=["read", "send"], confirm=["send"]),
         Sheets(oauth_credentials="client_secrets.json", allow=["create", "write"]),
     ],
-    llm="gemini-3.1-flash-lite-preview",
+    llm="gemini-3.1-flash-lite",
     verbose=True,
 )
 

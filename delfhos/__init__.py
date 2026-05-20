@@ -10,7 +10,7 @@ Quick start::
 
     agent = Agent(
         tools=[Gmail(oauth_credentials="secrets.json"), Drive(oauth_credentials="secrets.json")],
-        llm="gemini-3.1-flash-lite-preview"
+        llm="gemini-3.1-flash-lite"
     )
     agent.run("Forward today's reports to alice@co.com and archive old ones")
 
@@ -23,7 +23,7 @@ Custom tools::
         \"\"\"Analyze sentiment of text.\"\"\"
         return "positive" if "good" in text.lower() else "negative"
 
-    agent = Agent(tools=[analyze_sentiment, Gmail()], llm="gemini-3.1-flash-lite-preview")
+    agent = Agent(tools=[analyze_sentiment, Gmail()], llm="gemini-3.1-flash-lite")
 
 Restrict tool access::
 
@@ -36,7 +36,7 @@ Advanced (multiple LLMs, session memory)::
 
     agent = Agent(
         tools=[...],
-        light_llm="gemini-3.1-flash-lite-preview\",
+        light_llm="gemini-3.1-flash-lite\",
         heavy_llm="gemini-3.1-pro\",
         chat=Chat(keep=5, summarize=True, persist=True),  # persist=True for cross-run memory
         verbose=True
@@ -55,7 +55,7 @@ from typing import TYPE_CHECKING
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 
-__version__ = "0.7.3"
+__version__ = "0.8.0"
 
 # Tool system (no circular deps — delfhos.tool uses only stdlib)
 from delfhos.tool import tool, ToolException, DelfhosToolWarning

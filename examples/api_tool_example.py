@@ -42,7 +42,7 @@ finnhub = APITool(
 #  is called.  agent.total_cost_usd shows how much has been spent so far.
 #
 agent = Agent(
-    llm="gemini-3.1-flash-lite-preview",
+    llm="gemini-3.5-flash",
     tools=[finnhub],
     system_prompt=(
         "You are a concise financial analyst. "

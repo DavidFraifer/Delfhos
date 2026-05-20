@@ -6,7 +6,7 @@ from ...utils import report_error
 from ...utils.search_utils import validate_search_model, get_search_support_error_message
 
 # Always use Gemini for web search, defaulting to lite for maximum speed
-WEBSEARCH_LLM = "gemini-3.1-flash-lite-preview"
+WEBSEARCH_LLM = "gemini-3.1-flash-lite"
 
 
 async def _llm_web_search(query: str, task_id: str, model: str, agent_id: str = None) -> tuple[str, dict]:
@@ -54,7 +54,7 @@ async def web_search(query: str, task_id=1, _fast_search=True, model: str = None
     Args:
         query: Search query with optional format instructions
         task_id: Task identifier for logging
-        model: LLM model (e.g., "gemini-3.1-flash-lite-preview", "gpt-4")
+        model: LLM model (e.g., "gemini-3.1-flash-lite", "gpt-4")
                Supported: Gemini, OpenAI/GPT. Claude not supported.
         agent_id: Agent identifier for logging
     

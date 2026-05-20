@@ -25,7 +25,7 @@ class SheetsConnection(GoogleBaseConnection):
     
     Example:
         sheets = Sheets(oauth_credentials="client_secrets.json")
-        agent = Agent(tools=[sheets, SQL(...)], llm="gemini-3.1-flash-lite-preview")
+        agent = Agent(tools=[sheets, SQL(...)], llm="gemini-3.1-flash-lite")
         agent.run("Pull yesterday's sales from the DB and update the Q3 Summary sheet")
     
     Authentication (choose one):
