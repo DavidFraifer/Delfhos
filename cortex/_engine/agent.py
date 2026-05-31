@@ -106,6 +106,7 @@ class Agent:
                  budget_usd: Optional[float] = None,
                  files: Optional[List[str]] = None,
                  allowed_libs: Optional[List[str]] = None,
+                 comments: str = "readable",
                  _explicit_llms: Optional[Dict[str, bool]] = None):
         """Initialize an Agent with tools and language models.
         
@@ -252,7 +253,17 @@ class Agent:
         self.rerun_count = 2
         self.files = files or []
         self.allowed_libs = [lib.strip() for lib in (allowed_libs or []) if lib and lib.strip()]
-        
+
+        # Narration style for generated code's print() output:
+        #   "readable"  — structured Markdown for a UI (default)
+        #   "speakable" — conversational prose suited for a text-to-speech engine
+        if comments not in ("readable", "speakable"):
+            raise_error("AGT-002", context={
+                "reason": f"Invalid comments style: {comments!r}",
+                "hint": "comments must be either 'readable' (Markdown) or 'speakable' (TTS-friendly prose).",
+            })
+        self.comments = comments
+
         self.logger = CORTEXLogger()
         self.usage = TokenUsage()
 
@@ -289,6 +300,7 @@ class Agent:
             sandbox_config=sandbox_config,
             files=self.files,
             allowed_libs=self.allowed_libs,
+            comments=self.comments,
         )
         self.running = False
         self.last_called = None  # Track when the agent was last used

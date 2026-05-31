@@ -43,6 +43,7 @@ from ..trace import (
 from .orchestrator_timing import OrchestratorTimingMixin
 from .orchestrator_scheduler import OrchestratorSchedulerMixin
 from .orchestrator_codegen import OrchestratorCodegenMixin
+from .orchestrator_streaming import OrchestratorStreamingMixin
 from ..trace import RerunTrace
 
 
@@ -58,7 +59,7 @@ def _has_confirm_policy(confirm_policy: Any) -> bool:
     return False
 
 
-class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, OrchestratorCodegenMixin):
+class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, OrchestratorCodegenMixin, OrchestratorStreamingMixin):
     """
     Orchestrates agent task execution using Python code generation.
 
@@ -98,6 +99,7 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
         files: Optional[List[str]] = None,
         rerun_count: int = 2,
         allowed_libs: Optional[List[str]] = None,
+        comments: str = "readable",
     ):
         approval_enabled = on_confirm is not None or approval_enabled
 
@@ -114,6 +116,7 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
         self.prefilter_mode = prefilter_mode
         self.retry_count = retry_count
         self.rerun_count = rerun_count
+        self.comments_style = comments  # "readable" | "speakable" — print() narration style
 
         # ── Model overrides ────────────────────────────────────────────────
         self.prefilter_llm = prefilter_llm or self.light_llm
@@ -155,6 +158,8 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
         self.task_results: Dict[str, dict] = {}
         self.task_tools_used: Dict[str, list] = {}
         self.task_tool_timings: Dict[str, list] = {}
+        self.task_live_output: Dict[str, str] = {}  # live print() output mirror, keyed by task_id
+        self._live_output_pending: Dict[str, str] = {}  # partial (un-newlined) tail per task
         self.tool_timing_callback = None
         self.on_task_complete = None
         self.detected_language = "en"
@@ -754,6 +759,7 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
         completed_tools = self._log_timing_summary(
             task_id, tool_entries, task_duration, computational_time
         )
+        self._flush_live_output(task_id)
         self._update_trace_tool_calls(task_id, completed_tools)
 
         if self.verbose == "high":
@@ -907,6 +913,7 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
                 tool_name=f"{tool_n}.{action}" if action else tool_n,
                 arguments=args,
                 started_at=start_dt,
+                description=entry.get("description", "") or "",
                 duration_ms=dur_ms,
                 outcome="success" if entry.get("status") == "success" else "error",
                 result=meta.get("_tool_trace_result", ""),
@@ -1133,11 +1140,41 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
         console.console.print(table)
         console.console.print()
 
+    def append_live_output(self, task_id: str, text: str):
+        """Mirror a chunk of generated-code print() output for live streaming.
+
+        Appends to the per-task live buffer (read by get_task_snapshot) and, once a
+        full line is available, records it on the trace as an utterance (the agent's
+        spoken "voice"). Best-effort: never raises into the executor.
+        """
+        if not text:
+            return
+        try:
+            self.task_live_output[task_id] = self.task_live_output.get(task_id, "") + text
+            pending = self._live_output_pending.get(task_id, "") + text
+            *complete, tail = pending.split("\n")
+            self._live_output_pending[task_id] = tail
+            if complete and self.current_trace is not None:
+                for line in complete:
+                    self.current_trace.add_utterance(line)
+        except (RuntimeError, TypeError, AttributeError, KeyError):
+            pass  # best-effort: streaming mirror must never break execution
+
+    def _flush_live_output(self, task_id: str):
+        """Emit any buffered partial line as a final utterance at task end."""
+        tail = self._live_output_pending.pop(task_id, "")
+        if tail.strip() and self.current_trace is not None:
+            try:
+                self.current_trace.add_utterance(tail)
+            except (RuntimeError, TypeError, AttributeError):
+                pass
+
     def _cleanup_task_state(self, task_id: str):
         for active_key in list(self._active_phase_logs.keys()):
             if active_key[0] == task_id:
                 self._active_phase_logs.pop(active_key, None)
         self.wait_times.pop(task_id, None)
+        self._live_output_pending.pop(task_id, None)
         self._cleanup_wait_times_if_needed()
 
     def _handle_task_error(self, task_id: str, e: Exception, start_time: float):

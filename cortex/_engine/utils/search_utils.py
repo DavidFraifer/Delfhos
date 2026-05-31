@@ -12,7 +12,7 @@ from delfhos.errors import ToolDefinitionError
 
 # Models that support web search
 SEARCH_SUPPORTED_MODELS = {
-    "gemini": ["gemini-3.1-flash-lite", "gemini-3.1-flash", "gemini-3.1-pro", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-pro", "gemini-1.5-flash"],
+    "gemini": ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3.1-flash", "gemini-3.1-pro", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-pro", "gemini-1.5-flash"],
     "gpt": ["gpt-5", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo"],  # OpenAI models
 }
 

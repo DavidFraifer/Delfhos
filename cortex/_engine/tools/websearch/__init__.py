@@ -12,9 +12,10 @@ WEBSEARCH_LLM = "gemini-3.1-flash-lite"
 async def _llm_web_search(query: str, task_id: str, model: str, agent_id: str = None) -> tuple[str, dict]:
 
     # Simplified system message for faster and more direct responses
-    system_message = """You are a fast and precise research assistant. When searching the web, provide concise, factual information including:
+    system_message = """You are a fast and precise research assistant grounded in live web search. Provide concise, factual information including:
 - Specific names, numbers, dates, and concrete facts
 - Direct answers to the query
+CRITICAL: Base your answer ONLY on the web search results you retrieve. NEVER rely on your own prior/training knowledge, and NEVER contradict or "correct" the retrieved facts with what you think you know — the live results are authoritative and more current than your training data. If the search returns nothing relevant, say so explicitly instead of guessing.
 IMPORTANT: Always respond in the SAME language as the user's query. If the query is in Spanish, respond entirely in Spanish."""
 
     # Send query as-is to preserve the user's language

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "delfhos"
-version = "0.8.0"
+version = "0.8.5"
 description = "Delfhos — AI agent SDK with typed connections and tool orchestration"
 keywords = ["ai", "agents", "sdk", "automation", "gemini"]
 authors = [
@@ -28,10 +28,8 @@ dependencies = [
     "google-genai>=1.0.0",
     "python-dotenv>=1.0.0",
     "requests>=2.28.0",
-    "beautifulsoup4>=4.12.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
-    "tenacity>=8.0.0",
     "numpy>=1.24.0",
     "sentence-transformers>=2.2.0",
     "transformers>=4.30.0",
@@ -50,16 +48,7 @@ dependencies = [
     "fastapi>=0.100.0",
     "uvicorn>=0.23.0",
     "python-multipart>=0.0.6",
-    "python-jose>=3.3.0",
-    "email-validator>=2.0.0",
-    "passlib>=1.7.4",
-    "bcrypt>=4.0.0",
-    "websockets>=11.0",
     "httpx>=0.24.0",
-    "tqdm>=4.65.0",
-    "stripe>=5.0.0",
-    "supabase>=2.0.0",
-    "postgrest>=0.10.0",
 ]
 
 [project.optional-dependencies]

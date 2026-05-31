@@ -908,22 +908,40 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
             "  )"
         )
 
+        # Print/narration style — switches between Markdown output (default) and a
+        # conversational spoken style suited for a downstream text-to-speech engine.
+        if getattr(self, "comments_style", "readable") == "speakable":
+            print_rule = (
+                "- Only print() is visible — it is the agent's SPOKEN VOICE. Narrate as you go in first person, "
+                'short conversational sentences (e.g. print("Okay, let me check your inbox")). '
+                "The FINAL answer must ALSO be plain spoken prose: NO Markdown, NO tables, NO `format_table()`, "
+                "NO headers/bullets/code fences. Match the user's language.\n"
+                "- Speaking 'in your own words' is about TONE, never facts — see the FACTS rule: relay the data, don't invent a take.\n"
+            )
+            output_rule = "OUTPUT: Python code ONLY. NO code comments. Only print() is visible — speak naturally for text-to-speech (no markdown)."
+        else:
+            print_rule = (
+                "- Only print() is visible. Print final answers in Markdown, use `format_table()`. Match user language.\n"
+            )
+            output_rule = "OUTPUT: Python code ONLY. NO comments. Only print() is visible, use markdown."
+
         code_rules = (
             "RULES:\n"
             "- ONLY Python code. Minimal code. Async (await). NO asyncio.run(); define `async def main():...` & `await main()`.\n"
             "- Use ONLY the namespaces shown above. Do NOT invent variable names. NEVER pass connection_name (auto-detected).\n"
             '- EVERY tool call MUST include `desc="<specific action>"` (e.g. `desc="Searching AI news April 2026"`). SELF-CHECK: if any call is missing `desc=`, rewrite before returning.\n'
             "- `files` tool ONLY reads Sandbox uploads.\n"
-            "- Only print() is visible. Print final answers in Markdown, use `format_table()`. Match user language.\n"
+            f"{print_rule}"
             "- Wait for tool output before generating text that depends on it.\n"
             "- Processing N items: ALWAYS `asyncio.gather(*[process(x) for x in items])`, NEVER sequential `for` loops with `await`.\n"
             "- Libs: asyncio, json, re, datetime, time, math, statistics. NO pandas.\n"
             "- APITool responses are dict/list/str. If str, parse with `json.loads(result)` before using as dict/list.\n"
-            '- WEBSEARCH: ask "Return ONLY JSON: {k:v}" → `safe_json_loads(response)` (None if invalid → print raw, abort). NEVER hardcode facts.\n'
+            '- WEBSEARCH: ask "Return ONLY JSON: {k:v}" → `safe_json_loads(response)` (None if invalid → print raw, abort).\n'
+            "- FACTS: never write a factual sentence (dates, numbers, names, yes/no) from your own knowledge — the answer MUST be built from a tool result obtained this run. websearch results are live and authoritative. Either interpolate the result directly (f\"...{search_results}...\") or, to say it naturally, pass it to `llm.call(f\"Rephrase conversationally using ONLY this data, invent nothing: {search_results}\")` and print THAT output. NEVER hardcode the conclusion in a print() literal and never decide the answer with substring checks (e.g. `if \"2026\" not in results`).\n"
             "- Large data → `llm.call`: pre-process with Python first (filter/slice/summarise). Never pass raw bulks.\n"
             "- To return files/datasets/large text to the user: call `add_to_output_files(name, content)` (name=logical label, content=str/bytes/dict/list). The file is saved and accessible via Response.files after the task.\n"
             f"{examples_section}\n\n"
-            "OUTPUT: Python code ONLY. NO comments. Only print() is visible, use markdown."
+            f"{output_rule}"
         )
 
         # Cache for rerun passes

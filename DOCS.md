@@ -842,6 +842,152 @@ async def main():
 
 ---
 
+## How to stream and poll a running request
+
+`run()` blocks until a task finishes. To watch a task *while it runs* — for a
+progress UI, a dashboard, or a TTS pipeline — submit it with `run_async()` and
+poll for live snapshots.
+
+```python
+import time
+from delfhos import Agent, Gmail
+
+agent = Agent(tools=[Gmail(oauth_credentials="...")], llm="gemini-2.0-flash")
+
+task_id = agent.run_async("Summarize my unread emails and draft replies")
+
+while True:
+    snap = agent.poll(task_id)            # -> StreamSnapshot
+    print(snap.state, "|", snap.output_so_far[-80:])
+    for ev in snap.events:
+        print(f"  [{ev.kind}] {ev.label} ({ev.status})")
+    if snap.is_terminal:                  # "done" or "error"
+        break
+    time.sleep(0.2)
+
+print("final:", snap.result or snap.error)
+agent.stop()
+```
+
+`poll()` returns a **`StreamSnapshot`** that unifies everything known about the
+request at that instant:
+
+| Field            | Meaning                                                            |
+|------------------|--------------------------------------------------------------------|
+| `state`          | `"queued"` → `"running"` → `"done"` / `"error"`                    |
+| `task`           | The task text                                                      |
+| `elapsed_ms`     | Time since the request started                                     |
+| `events`         | Unified timeline — list of `StreamEvent`                          |
+| `output_so_far`  | `print()` output captured so far (grows during the run)            |
+| `result`         | Final answer once `state == "done"`                               |
+| `error`          | Error message once `state == "error"`                             |
+| `cost_usd`, `files`, `trace` | Populated once terminal                              |
+| `is_terminal`    | `True` when `state` is `"done"` or `"error"`                       |
+
+Each **`StreamEvent`** has `kind` (`"phase"` for internal pipeline steps like
+planning/prefilter, `"tool"` for a tool call labelled by its `desc=`, or
+`"say"` for a line the agent printed), plus `label`, `status`, `started_at`,
+and `duration_ms`. This is the same information the trace records — surfaced
+live instead of only at the end.
+
+### The `stream()` / `astream()` generators
+
+For the common "submit and follow" case, skip the manual loop:
+
+```python
+for snap in agent.stream("Find the cheapest flight and email it to me"):
+    print(snap.state, "-", snap.output_so_far[-60:])
+# the last snapshot is terminal
+```
+
+```python
+async for snap in agent.astream("Generate the weekly report"):
+    print(snap.state)
+```
+
+Both accept `interval` (seconds between snapshots, default `0.2`) and `timeout`
+(max seconds to stream, default `120`).
+
+---
+
+## How to expose the agent over HTTP
+
+Call `serve()` to run a small embedded HTTP API (FastAPI + uvicorn, both bundled
+with Delfhos — no extra install):
+
+```python
+from delfhos import Agent, Gmail
+
+agent = Agent(tools=[Gmail(oauth_credentials="...")], llm="gemini-2.0-flash")
+agent.serve(port=8080)        # blocking
+```
+
+| Endpoint                     | Purpose                                                  |
+|------------------------------|----------------------------------------------------------|
+| `POST /run`                  | Body `{"task": "..."}` → `{"task_id": "..."}`            |
+| `GET  /tasks/{id}`           | JSON `StreamSnapshot`                                     |
+| `GET  /tasks/{id}/stream`    | Server-Sent Events — one snapshot per frame until done   |
+| `GET  /health`               | `{"ok": true}`                                           |
+
+```bash
+# Submit a task
+curl -s -X POST localhost:8080/run -H 'content-type: application/json' \
+     -d '{"task": "Summarize my unread emails"}'
+# {"task_id": "..."}
+
+# Poll once
+curl -s localhost:8080/tasks/<task_id>
+
+# Follow live with Server-Sent Events
+curl -N localhost:8080/tasks/<task_id>/stream
+```
+
+To mount the API inside an existing ASGI app instead of running it standalone,
+use the FastAPI app directly:
+
+```python
+from cortex._engine.server import AgentServer
+
+api = AgentServer(agent).app   # a FastAPI instance you can mount/include
+```
+
+---
+
+## How to give the agent a voice (`comments`)
+
+By default the agent's `print()` output is structured **Markdown** meant for a
+UI. Set `comments="speakable"` to make it narrate in conversational, first-person
+prose suited for a **text-to-speech** engine instead:
+
+```python
+from delfhos import Agent, Gmail
+
+# Default — readable Markdown
+agent = Agent(tools=[Gmail(...)], llm="gemini-2.0-flash")
+
+# Speakable — TTS-friendly narration
+agent = Agent(tools=[Gmail(...)], llm="gemini-2.0-flash", comments="speakable")
+```
+
+In `speakable` mode the generated code prints lines like
+`print("Okay, let me check your inbox")` as it works, and the final answer is
+plain spoken prose (no tables, headers, or `format_table()`). In `readable` mode
+you get today's structured Markdown.
+
+Either way, **both** channels are recorded on the trace so a UI or TTS layer can
+replay them:
+
+- the formal action label passed as `desc=` on each tool call →
+  `Response.trace.tool_calls[i].description`
+- every printed line (the agent's "voice") → `Response.trace.utterances`, and
+  interleaved on `Response.trace.timeline` as `say` events
+
+`comments` is set once on the constructor and applies to every `run()` on that
+agent. It pairs naturally with `stream()` — the `say` events in each
+`StreamSnapshot` give you the narration in real time.
+
+---
+
 ## How to use two Gmail accounts in one agent
 
 ```python
@@ -1181,7 +1327,7 @@ build_image()            # Skips if image is up to date
 build_image(force=True)  # Rebuild unconditionally
 ```
 
-The image is version-tagged to match the installed Delfhos version (e.g. `delfhos-sandbox:0.8.0`) so upgrades automatically use a fresh image.
+The image is version-tagged to match the installed Delfhos version (e.g. `delfhos-sandbox:0.8.5`) so upgrades automatically use a fresh image.
 
 ### Checking sandbox status
 
@@ -1195,7 +1341,24 @@ print("Docker available:", _docker_available())
 
 ## How to allow extra Python libraries in the sandbox
 
-By default the sandbox only permits a safe subset of the Python standard library (`json`, `re`, `datetime`, `math`, `statistics`, `csv`, `io`, `pathlib`, `asyncio`, `time`). Any `import` statement that references a module outside this list raises an error.
+By default the sandbox only permits a safe subset of the Python standard library. Any `import` statement that references a module outside this list raises an error.
+
+### Default allowed modules
+
+| Module | What it provides |
+|---|---|
+| `json` | JSON encode / decode |
+| `re` | Regular expressions |
+| `datetime` | Dates, times, timedeltas |
+| `math` | Arithmetic, trigonometry, logarithms |
+| `statistics` | Mean, median, stdev, variance |
+| `csv` | CSV reading and writing |
+| `io` | In-memory byte / text streams |
+| `pathlib` | Object-oriented filesystem paths (`Path`) |
+| `asyncio` | Async / await primitives (proxied, no raw event-loop access) |
+| `time` | `time()`, `sleep()`, `monotonic()` |
+
+In addition to these importable modules, the sandbox exposes a curated set of built-in functions (`int`, `str`, `list`, `dict`, `sorted`, `zip`, `map`, `filter`, `enumerate`, …) and common exception types (`ValueError`, `KeyError`, `TypeError`, …) directly in the execution namespace — no import needed.
 
 Use `allowed_libs` to extend the allowlist with additional packages. Pass PyPI package names exactly as you would to `pip install`.
 
@@ -1511,6 +1674,7 @@ Agent(
     sandbox_config:   Optional[Dict[str, Any]] = None,
     files:            Optional[List[str]] = None,
     allowed_libs:     Optional[List[str]] = None,
+    comments:         str = "readable",
 )
 ```
 
@@ -1534,6 +1698,7 @@ Agent(
 | `sandbox_config` | `dict` | `None` | Resource limit overrides for Docker mode (see [sandbox guide](#how-to-configure-the-execution-sandbox)) |
 | `files` | `list[str]` | `None` | Absolute host paths to inject as read-only workspace files. In Docker mode each file is bind-mounted at `/workspace/<filename>`; in local mode the original paths are used. See [input file guide](#how-to-pass-input-files-to-the-agent-workspace). |
 | `allowed_libs` | `list[str]` | `None` | PyPI package names to add to the sandbox import allowlist (e.g. `["pandas", "numpy"]`). In Docker mode packages are pip-installed automatically inside the container. In local mode they must already be installed in the host environment. See [allowed libs guide](#how-to-allow-extra-python-libraries-in-the-sandbox). |
+| `comments` | `str` | `"readable"` | Narration style for the agent's `print()` output: `"readable"` (structured Markdown for a UI) or `"speakable"` (conversational prose for text-to-speech). See [voice guide](#how-to-give-the-agent-a-voice-comments). |
 
 ### Methods
 
@@ -1542,8 +1707,12 @@ Agent(
 | `start` | `() → self` | Initialize and start the agent |
 | `stop` | `()` | Shut down and free resources |
 | `run` | `(task: str, timeout: float = 60.0) → Response` | Execute task (blocking) |
-| `run_async` | `(task: str) → None` | Submit task (background, non-blocking) |
+| `run_async` | `(task: str) → str` | Submit task (background, non-blocking); returns `task_id` |
 | `arun` | `async (task: str, timeout: float = 60.0) → Response` | Execute task (async/await) |
+| `poll` | `(task_id: str) → StreamSnapshot` | Live snapshot of a submitted task. See [streaming guide](#how-to-stream-and-poll-a-running-request). |
+| `stream` | `(task: str, interval: float = 0.2, timeout: float = 120.0) → Iterator[StreamSnapshot]` | Submit a task and yield live snapshots until terminal |
+| `astream` | `async (task: str, interval: float = 0.2, timeout: float = 120.0) → AsyncIterator[StreamSnapshot]` | Async variant of `stream()` |
+| `serve` | `(host: str = "127.0.0.1", port: int = 8080) → None` | Expose the agent over HTTP (blocking). See [HTTP guide](#how-to-expose-the-agent-over-http). |
 | `run_chat` | `(timeout: float = 120.0)` | Launch interactive terminal chat |
 | `get_pending_approvals` | `() → list[dict]` | List requests awaiting approval |
 | `approve` | `(request_id: str, response: str = "Approved") → bool` | Approve a pending request |
@@ -1597,6 +1766,47 @@ class Response:
 | `duration_ms` | `int` | Wall-clock execution time in milliseconds |
 | `trace` | `Any` | Full execution trace object |
 | `files` | `Dict[str, str]` | Output files saved during execution. Keys are logical labels (e.g. `"report"`, `"orders.csv"`); values are absolute host paths. Empty dict if no files were produced. See [output file guide](#how-to-extract-output-files-from-a-task-result). |
+
+The `trace` object additionally carries `trace.tool_calls[i].description` (the
+`desc=` passed at each tool call site) and `trace.utterances` (the lines the
+agent printed, mirrored onto `trace.timeline` as `say` events).
+
+---
+
+## `StreamSnapshot` and `StreamEvent`
+
+Returned by `agent.poll()` and yielded by `agent.stream()` / `agent.astream()`.
+A `StreamSnapshot` is a point-in-time view of a request; see the
+[streaming guide](#how-to-stream-and-poll-a-running-request).
+
+```python
+@dataclass
+class StreamSnapshot:
+    task_id:       str
+    state:         str               # "queued" | "running" | "done" | "error"
+    task:          str
+    elapsed_ms:    int
+    events:        List[StreamEvent]  # unified live timeline
+    output_so_far: str                # print() output captured so far
+    result:        Optional[str]      # final answer once state == "done"
+    error:         Optional[str]      # error message once state == "error"
+    cost_usd:      Optional[float]
+    files:         Dict[str, str]
+    trace:         Any                # full Trace once terminal
+
+    @property
+    def is_terminal(self) -> bool: ...  # True when state is "done" or "error"
+
+    def to_dict(self) -> dict: ...      # JSON-serializable view (used by the HTTP API)
+
+@dataclass
+class StreamEvent:
+    kind:        str               # "phase" | "tool" | "say"
+    label:       str               # phase name, tool desc=, or printed line
+    status:      str               # "running" | "success" | "error"
+    started_at:  float             # unix epoch seconds
+    duration_ms: Optional[int]
+```
 
 ---
 

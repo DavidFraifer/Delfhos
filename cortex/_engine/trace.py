@@ -30,6 +30,17 @@ class TimelineEvent:
     detail: str
 
 @dataclass
+class Utterance:
+    """A single line spoken/printed by the agent during execution.
+
+    Captures the agent's `print()` narration so it can be replayed for a UI
+    or fed to a text-to-speech engine. Complements the formal tool `desc`
+    (stored on ToolCallTrace.description) — see [[delfhos-comments-style]].
+    """
+    t_ms: int
+    text: str
+
+@dataclass
 class MemoryRetrievalTrace:
     started_at: datetime
     duration_ms: int = 0
@@ -81,6 +92,7 @@ class ToolCallTrace:
     tool_name: str
     arguments: Dict[str, Any]
     started_at: datetime
+    description: str = ""  # the `desc=` passed at the call site (formal action label)
     duration_ms: int = 0
     outcome: str = "success"  # success | error
     result: str = ""
@@ -185,6 +197,7 @@ class Trace:
     execution: Optional[ExecutionTrace] = None
     reruns: List[RerunTrace] = field(default_factory=list)
     tool_calls: List[ToolCallTrace] = field(default_factory=list)
+    utterances: List[Utterance] = field(default_factory=list)
     chat_compression: Optional[ChatCompressionTrace] = None
     session_close: Optional[SessionCloseTrace] = None
     api_enrichment: Optional[EnrichmentTrace] = None
@@ -217,6 +230,17 @@ class Trace:
             t = datetime.now()
         t_ms = int((t - self.started_at).total_seconds() * 1000)
         self._timeline_events.append(TimelineEvent(t_ms=t_ms, event=event, detail=detail))
+
+    def add_utterance(self, text: str, t: Optional[datetime] = None):
+        """Record a line printed by the agent and mirror it onto the timeline."""
+        text = (text or "").strip()
+        if not text:
+            return
+        if not t:
+            t = datetime.now()
+        t_ms = int((t - self.started_at).total_seconds() * 1000)
+        self.utterances.append(Utterance(t_ms=t_ms, text=text))
+        self._timeline_events.append(TimelineEvent(t_ms=t_ms, event="say", detail=text))
 
     @property
     def timeline(self) -> List[TimelineEvent]:
@@ -307,6 +331,17 @@ class Trace:
                     err_summary = str(tc.error).replace('\n', ' ')
                     if len(err_summary) > 40: err_summary = err_summary[:37] + "..."
                     lines.append(f"║       → [ERROR] {err_summary}".ljust(60)+"║")
+            lines.append(f"║{'':<59}║")
+
+        if self.utterances:
+            lines.append(f"║ NARRATION                 {len(self.utterances)} line(s)".ljust(60)+"║")
+            for utt in self.utterances[:8]:
+                said = utt.text.replace("\n", " ")
+                if len(said) > 48:
+                    said = said[:45] + "..."
+                lines.append(f"║   “{said}".ljust(60)+"║")
+            if len(self.utterances) > 8:
+                lines.append(f"║   … (+{len(self.utterances) - 8} more)".ljust(60)+"║")
             lines.append(f"║{'':<59}║")
 
         if self.session_close:

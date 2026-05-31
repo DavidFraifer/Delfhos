@@ -20,10 +20,10 @@ That's it.
 
 import time
 import asyncio
-from typing import List, Optional, Union, Dict, Any, Callable
+from typing import List, Optional, Union, Dict, Any, Callable, Iterator, AsyncIterator
 from cortex._engine.agent import Agent
 from cortex._engine.connection import Connection
-from cortex._engine.types import Response
+from cortex._engine.types import Response, StreamSnapshot
 from rich.box import SQUARE
 from rich.panel import Panel
 from rich.table import Table
@@ -101,6 +101,7 @@ class Cortex:
         sandbox: str = "auto",
         sandbox_config: Optional[Dict[str, Any]] = None,
         budget_usd: Optional[float] = None,
+        comments: str = "readable",
     ):
         """Initialize an Agent (Cortex) with tools and language models.
 
@@ -124,6 +125,10 @@ class Cortex:
             budget_usd: Hard spending cap in USD. Once the cumulative LLM cost across all
                         run() calls reaches this limit, new tasks are blocked until
                         reset_budget() is called. Use agent.total_cost_usd to track spend.
+            comments: Narration style for the agent's print() output. "readable" (default)
+                      produces structured Markdown for a UI; "speakable" produces conversational
+                      first-person prose suited for a text-to-speech engine. Both styles still
+                      record the formal tool desc= and the spoken lines in Response.trace.
 
         Example::
 
@@ -169,6 +174,7 @@ class Cortex:
             sandbox=sandbox,
             sandbox_config=sandbox_config,
             budget_usd=budget_usd,
+            comments=comments,
             _explicit_llms={
                 "light_llm": light_llm is not None,
                 "heavy_llm": heavy_llm is not None,
@@ -192,7 +198,7 @@ class Cortex:
 
     # ─── Task execution ───────────────────────────────────────────────────────
 
-    def run_async(self, task: str) -> None:
+    def run_async(self, task: str) -> str:
         """
         Submit a task for execution in the background. Does not wait for completion.
 
@@ -203,9 +209,13 @@ class Cortex:
 
         Args:
             task: Natural language task description.
+
+        Returns:
+            The task_id. Pass it to poll(task_id) to inspect live progress, or
+            wait for completion via poll()/stream().
         """
         # Note: run() will auto-start the agent and print task box first
-        self._agent.run(task)
+        return self._agent.run(task)
 
     def run(self, task: str, timeout: float = 60.0) -> Response:
         """
@@ -432,6 +442,120 @@ class Cortex:
             await asyncio.sleep(poll_interval)
             
         return Response(text="", status=False, error="Timeout waiting for task")
+
+    # ─── Streaming / live status ──────────────────────────────────────────────
+
+    def poll(self, task_id: str) -> StreamSnapshot:
+        """
+        Return a point-in-time snapshot of a request submitted via run_async().
+
+        The snapshot unifies request state, the live trace (tool calls, pipeline
+        phases, and the agent's printed narration), and the output produced so far.
+
+        Args:
+            task_id: The id returned by run_async().
+
+        Returns:
+            StreamSnapshot — inspect .state ("queued"|"running"|"done"|"error"),
+            .events, .output_so_far, and (once terminal) .result / .error / .trace.
+
+        Example::
+
+            task_id = agent.run_async("Summarize my unread emails")
+            while True:
+                snap = agent.poll(task_id)
+                print(snap.state, snap.output_so_far)
+                if snap.is_terminal:
+                    break
+                time.sleep(0.2)
+        """
+        return self._agent.orchestrator.get_task_snapshot(task_id)
+
+    def stream(
+        self, task: str, interval: float = 0.2, timeout: float = 120.0
+    ) -> Iterator[StreamSnapshot]:
+        """
+        Submit a task and yield live snapshots until it finishes (or times out).
+
+        Args:
+            task:     Natural language task description.
+            interval: Seconds between snapshots (default 0.2).
+            timeout:  Max seconds to keep streaming (default 120).
+
+        Yields:
+            StreamSnapshot objects. The final yielded snapshot is terminal
+            (.is_terminal is True) unless the timeout was reached first.
+
+        Example::
+
+            for snap in agent.stream("Find the cheapest flight and email it to me"):
+                print(snap.state, "-", snap.output_so_far[-80:])
+        """
+        task_id = self.run_async(task)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            snap = self.poll(task_id)
+            yield snap
+            if snap.is_terminal:
+                return
+            time.sleep(interval)
+        # Final attempt after timeout so callers always see the latest state.
+        yield self.poll(task_id)
+
+    async def astream(
+        self, task: str, interval: float = 0.2, timeout: float = 120.0
+    ) -> AsyncIterator[StreamSnapshot]:
+        """
+        Async variant of stream(): submit a task and yield live snapshots.
+
+        Args:
+            task:     Natural language task description.
+            interval: Seconds between snapshots (default 0.2).
+            timeout:  Max seconds to keep streaming (default 120).
+
+        Yields:
+            StreamSnapshot objects, ending with a terminal snapshot.
+
+        Example::
+
+            async for snap in agent.astream("Generate the weekly report"):
+                print(snap.state)
+        """
+        if not self._agent.running:
+            self._agent.start()
+        task_id = await self._agent.run_async(task)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            snap = self.poll(task_id)
+            yield snap
+            if snap.is_terminal:
+                return
+            await asyncio.sleep(interval)
+        yield self.poll(task_id)
+
+    def serve(self, host: str = "127.0.0.1", port: int = 8080, **uvicorn_kwargs) -> None:
+        """
+        Expose this agent over HTTP (blocking). Serves a small FastAPI app:
+
+            POST /run               body {"task": "..."} -> {"task_id": "..."}
+            GET  /tasks/{id}        -> JSON snapshot (state, events, output_so_far, ...)
+            GET  /tasks/{id}/stream -> Server-Sent Events stream of snapshots
+            GET  /health            -> {"ok": true}
+
+        Args:
+            host: Interface to bind (default 127.0.0.1).
+            port: Port to bind (default 8080).
+            **uvicorn_kwargs: Extra args forwarded to uvicorn.run().
+
+        To mount the app inside an existing ASGI server instead of running it
+        standalone, use: ``from cortex._engine.server import AgentServer`` and
+        access ``AgentServer(agent).app``.
+        """
+        import uvicorn
+        from cortex._engine.server import AgentServer
+
+        server = AgentServer(self)
+        uvicorn.run(server.app, host=host, port=port, **uvicorn_kwargs)
 
     # ─── Human approval ───────────────────────────────────────────────────────
 

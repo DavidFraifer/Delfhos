@@ -31,7 +31,7 @@ class TokenUsage:
     def total(self) -> int:
         return self.task.total + self.summarizer.total + self.extractor.total
 
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List
 
 @dataclass
 class Response:
@@ -43,3 +43,70 @@ class Response:
     duration_ms: int = 0
     trace: Any = None
     files: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class StreamEvent:
+    """One item in a request's unified live timeline.
+
+    Unifies the existing trace channels into a single ordered stream:
+      - kind="phase": internal pipeline step (planning, prefilter, schema, memory)
+      - kind="tool":  a tool call (label is the `desc=` or tool name)
+      - kind="say":   a line the agent printed (its spoken "voice")
+    """
+    kind: str          # "phase" | "tool" | "say"
+    label: str
+    status: str        # "running" | "success" | "error"
+    started_at: float  # unix epoch seconds
+    duration_ms: Optional[int] = None
+
+    def to_dict(self) -> dict:
+        return {
+            "kind": self.kind,
+            "label": self.label,
+            "status": self.status,
+            "started_at": self.started_at,
+            "duration_ms": self.duration_ms,
+        }
+
+
+@dataclass
+class StreamSnapshot:
+    """A point-in-time view of a running (or finished) request.
+
+    Returned by ``agent.poll(task_id)`` and yielded by ``agent.stream(...)`` /
+    ``agent.astream(...)``. Carries the request state, the unified live timeline
+    (``events``), the output produced so far, and — once terminal — the final
+    result, cost, files, and full ``trace``.
+    """
+    task_id: str
+    state: str                 # "queued" | "running" | "done" | "error"
+    task: str = ""
+    elapsed_ms: int = 0
+    events: List[StreamEvent] = field(default_factory=list)
+    output_so_far: str = ""
+    result: Optional[str] = None
+    error: Optional[str] = None
+    cost_usd: Optional[float] = None
+    files: Dict[str, str] = field(default_factory=dict)
+    trace: Any = None
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.state in ("done", "error")
+
+    def to_dict(self) -> dict:
+        """JSON-serializable view (used by the HTTP server)."""
+        return {
+            "task_id": self.task_id,
+            "state": self.state,
+            "task": self.task,
+            "elapsed_ms": self.elapsed_ms,
+            "events": [e.to_dict() for e in self.events],
+            "output_so_far": self.output_so_far,
+            "result": self.result,
+            "error": self.error,
+            "cost_usd": self.cost_usd,
+            "files": self.files,
+            "is_terminal": self.is_terminal,
+        }

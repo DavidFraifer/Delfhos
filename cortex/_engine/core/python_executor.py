@@ -222,6 +222,29 @@ class PythonExecutionError(ToolExecutionError):
         super().__init__(tool_name="python_executor", detail=message)
 
 
+class _StreamingBuffer(io.StringIO):
+    """StringIO that also mirrors writes to the orchestrator for live streaming.
+
+    getvalue() still returns the full captured output unchanged, so the existing
+    result["output"] contract is preserved; the orchestrator just receives each
+    chunk as it is printed so pollers can see partial output in real time.
+    """
+
+    def __init__(self, orchestrator=None, task_id: str = ""):
+        super().__init__()
+        self._orchestrator = orchestrator
+        self._task_id = task_id
+
+    def write(self, s):
+        n = super().write(s)
+        if self._orchestrator is not None and s:
+            try:
+                self._orchestrator.append_live_output(self._task_id, s)
+            except (RuntimeError, TypeError, AttributeError):
+                pass  # best-effort: never let the live mirror break execution
+        return n
+
+
 class ToolExecutionTracker:
     """
     Tracks tool execution with descriptions for real-time frontend updates.
@@ -424,8 +447,10 @@ class PythonExecutor:
             # Record the initial set of keys so user-defined vars can be identified later
             self._baseline_keys = set(self.namespace.keys())
 
-        # Capture stdout/stderr
-        stdout_capture = io.StringIO()
+        # Capture stdout/stderr. stdout uses a streaming buffer so printed output
+        # is mirrored to the orchestrator live (for poll()/stream()) while still
+        # being fully available via getvalue() at the end.
+        stdout_capture = _StreamingBuffer(self.orchestrator, self.task_id)
         stderr_capture = io.StringIO()
 
         # Bind print() in the namespace directly to the capture buffer so
