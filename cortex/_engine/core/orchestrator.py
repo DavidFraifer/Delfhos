@@ -99,7 +99,6 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
         files: Optional[List[str]] = None,
         rerun_count: int = 2,
         allowed_libs: Optional[List[str]] = None,
-        comments: str = "readable",
     ):
         approval_enabled = on_confirm is not None or approval_enabled
 
@@ -116,7 +115,6 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
         self.prefilter_mode = prefilter_mode
         self.retry_count = retry_count
         self.rerun_count = rerun_count
-        self.comments_style = comments  # "readable" | "speakable" — print() narration style
 
         # ── Model overrides ────────────────────────────────────────────────
         self.prefilter_llm = prefilter_llm or self.light_llm
@@ -1000,11 +998,17 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
             "llm_rag_retrieval": "RAG retrieval",
         }
 
-        # Build ordered token queue for websearch entries (matched FIFO to tool calls)
+        # Build ordered token queues for entries hidden from llm_breakdown but shown as
+        # tool rows (websearch, llm). Tokens are matched FIFO to their completed_tools rows.
         ws_token_queue = iter([
             (c.get("input_tokens", 0), c.get("output_tokens", 0))
             for c in llm_breakdown
             if c.get("function_name") == "web_search"
+        ])
+        llm_token_queue = iter([
+            (c.get("input_tokens", 0), c.get("output_tokens", 0))
+            for c in llm_breakdown
+            if c.get("function_name") == "llm"
         ])
 
         timeline_items = []
@@ -1053,7 +1057,12 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
                     v_s = v_s[:77] + "…"
                 param_parts.append(f"{k}={v_s}")
 
-            tok_in, tok_out = next(ws_token_queue, (0, 0)) if tn == "websearch" else (0, 0)
+            if tn == "websearch":
+                tok_in, tok_out = next(ws_token_queue, (0, 0))
+            elif tn == "llm":
+                tok_in, tok_out = next(llm_token_queue, (0, 0))
+            else:
+                tok_in, tok_out = 0, 0
             timeline_items.append({
                 "type": "tool", "timestamp": _ts(entry.get("timestamp", 0)),
                 "tool": tn, "description": entry.get("description", ""),

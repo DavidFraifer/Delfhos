@@ -101,7 +101,6 @@ class Cortex:
         sandbox: str = "auto",
         sandbox_config: Optional[Dict[str, Any]] = None,
         budget_usd: Optional[float] = None,
-        comments: str = "readable",
     ):
         """Initialize an Agent (Cortex) with tools and language models.
 
@@ -125,10 +124,6 @@ class Cortex:
             budget_usd: Hard spending cap in USD. Once the cumulative LLM cost across all
                         run() calls reaches this limit, new tasks are blocked until
                         reset_budget() is called. Use agent.total_cost_usd to track spend.
-            comments: Narration style for the agent's print() output. "readable" (default)
-                      produces structured Markdown for a UI; "speakable" produces conversational
-                      first-person prose suited for a text-to-speech engine. Both styles still
-                      record the formal tool desc= and the spoken lines in Response.trace.
 
         Example::
 
@@ -174,7 +169,6 @@ class Cortex:
             sandbox=sandbox,
             sandbox_config=sandbox_config,
             budget_usd=budget_usd,
-            comments=comments,
             _explicit_llms={
                 "light_llm": light_llm is not None,
                 "heavy_llm": heavy_llm is not None,

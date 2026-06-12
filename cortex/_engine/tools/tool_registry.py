@@ -575,7 +575,7 @@ TOOL_ACTION_SUMMARIES = {
 
 # Compressed API docs per tool+action (~80% smaller than full docs)
 COMPRESSED_API_DOCS = {
-    "gmail:READ": "await gmail.read(max_results=10, query='is:unread', desc='...') -> List[{id, subject, from_email, to, date, body, snippet, attachments: [{attachment_id, filename, mime_type, size}]}] // Queries: 'from:boss', 'has:attachment'. Download: await gmail.download_attachments(email). ⚠️ Print brief confirm only.",
+    "gmail:READ": "await gmail.read(max_results=10, query='is:unread', desc='...') -> List[{id, subject, from_email, to, date, body, snippet, attachments: [{attachment_id, filename, mime_type, size}]}] // Queries: 'from:boss', 'has:attachment'. Attachments (PDF/image invoices, receipts, scans): paths = await gmail.download_attachments(email) -> List[str] local file paths; pass them STRAIGHT to llm.call(file_data=paths) to read with vision (works for PDF too) — do NOT use files.read for these. ⚠️ Print brief confirm only.",
     "gmail:SEND": "await gmail.send(to='...', subject='...', body='...', cc='...', bcc='...', attachments=['path/file.pdf'], desc='...') -> dict",
     "sheets:READ": "await sheets.read(sheet_id, range='Sheet1!A1:C10', desc='...') -> List[List[Any]] // 2D array, row 1 headers",
     "sheets:WRITE": "await sheets.write(sheet_id, data, sheet='Sheet1', cell='A1', desc='...') // data: List[List], List[Dict], or CSV str",
@@ -602,7 +602,7 @@ COMPRESSED_API_DOCS = {
 
 # Minimal examples per action (only essential patterns)
 COMPRESSED_EXAMPLES = {
-    "gmail:READ": "import asyncio\nemails = await gmail.read(query='has:attachment')\nasync def process(e):\n    if e.get('attachments'): await gmail.download_attachments(e)\n    return e\nresults = await asyncio.gather(*[process(e) for e in emails])",
+    "gmail:READ": "import asyncio\nemails = await gmail.read(query='subject:Factura')\nasync def process(e):\n    if e.get('attachments'):\n        paths = await gmail.download_attachments(e)  # -> List[str] local paths\n        return await llm.call('Extract JSON {...} from this invoice', file_data=paths)  # paths -> vision model, no files.read\n    return await llm.call('Extract JSON {...} from: ' + e['body'])  # no attachment -> use body\nresults = await asyncio.gather(*[process(e) for e in emails])",
     "sheets:WRITE": "csv = await sql.query('SELECT *', as_csv=True)\nawait sheets.create('Rpt', data=csv)",
     "parallel": "import asyncio\nresults = await asyncio.gather(*[llm.call(x) for x in items], desc='what this parallel block does')",
 }

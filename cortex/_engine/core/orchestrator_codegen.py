@@ -908,22 +908,12 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
             "  )"
         )
 
-        # Print/narration style — switches between Markdown output (default) and a
-        # conversational spoken style suited for a downstream text-to-speech engine.
-        if getattr(self, "comments_style", "readable") == "speakable":
-            print_rule = (
-                "- Only print() is visible — it is the agent's SPOKEN VOICE. Narrate as you go in first person, "
-                'short conversational sentences (e.g. print("Okay, let me check your inbox")). '
-                "The FINAL answer must ALSO be plain spoken prose: NO Markdown, NO tables, NO `format_table()`, "
-                "NO headers/bullets/code fences. Match the user's language.\n"
-                "- Speaking 'in your own words' is about TONE, never facts — see the FACTS rule: relay the data, don't invent a take.\n"
-            )
-            output_rule = "OUTPUT: Python code ONLY. NO code comments. Only print() is visible — speak naturally for text-to-speech (no markdown)."
-        else:
-            print_rule = (
-                "- Only print() is visible. Print final answers in Markdown, use `format_table()`. Match user language.\n"
-            )
-            output_rule = "OUTPUT: Python code ONLY. NO comments. Only print() is visible, use markdown."
+        # Print/narration style — only print() is visible to the user; final
+        # answers are rendered as Markdown.
+        print_rule = (
+            "- Only print() is visible. Print final answers in Markdown, use `format_table()`. Match user language.\n"
+        )
+        output_rule = "OUTPUT: Python code ONLY. NO comments. Only print() is visible, use markdown."
 
         code_rules = (
             "RULES:\n"
