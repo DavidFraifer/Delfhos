@@ -953,41 +953,6 @@ api = AgentServer(agent).app   # a FastAPI instance you can mount/include
 
 ---
 
-## How to give the agent a voice (`comments`)
-
-By default the agent's `print()` output is structured **Markdown** meant for a
-UI. Set `comments="speakable"` to make it narrate in conversational, first-person
-prose suited for a **text-to-speech** engine instead:
-
-```python
-from delfhos import Agent, Gmail
-
-# Default — readable Markdown
-agent = Agent(tools=[Gmail(...)], llm="gemini-2.0-flash")
-
-# Speakable — TTS-friendly narration
-agent = Agent(tools=[Gmail(...)], llm="gemini-2.0-flash", comments="speakable")
-```
-
-In `speakable` mode the generated code prints lines like
-`print("Okay, let me check your inbox")` as it works, and the final answer is
-plain spoken prose (no tables, headers, or `format_table()`). In `readable` mode
-you get today's structured Markdown.
-
-Either way, **both** channels are recorded on the trace so a UI or TTS layer can
-replay them:
-
-- the formal action label passed as `desc=` on each tool call →
-  `Response.trace.tool_calls[i].description`
-- every printed line (the agent's "voice") → `Response.trace.utterances`, and
-  interleaved on `Response.trace.timeline` as `say` events
-
-`comments` is set once on the constructor and applies to every `run()` on that
-agent. It pairs naturally with `stream()` — the `say` events in each
-`StreamSnapshot` give you the narration in real time.
-
----
-
 ## How to use two Gmail accounts in one agent
 
 ```python
@@ -1327,7 +1292,7 @@ build_image()            # Skips if image is up to date
 build_image(force=True)  # Rebuild unconditionally
 ```
 
-The image is version-tagged to match the installed Delfhos version (e.g. `delfhos-sandbox:0.8.5`) so upgrades automatically use a fresh image.
+The image is version-tagged to match the installed Delfhos version (e.g. `delfhos-sandbox:0.8.6`) so upgrades automatically use a fresh image.
 
 ### Checking sandbox status
 
@@ -1674,7 +1639,6 @@ Agent(
     sandbox_config:   Optional[Dict[str, Any]] = None,
     files:            Optional[List[str]] = None,
     allowed_libs:     Optional[List[str]] = None,
-    comments:         str = "readable",
 )
 ```
 
@@ -1698,7 +1662,6 @@ Agent(
 | `sandbox_config` | `dict` | `None` | Resource limit overrides for Docker mode (see [sandbox guide](#how-to-configure-the-execution-sandbox)) |
 | `files` | `list[str]` | `None` | Absolute host paths to inject as read-only workspace files. In Docker mode each file is bind-mounted at `/workspace/<filename>`; in local mode the original paths are used. See [input file guide](#how-to-pass-input-files-to-the-agent-workspace). |
 | `allowed_libs` | `list[str]` | `None` | PyPI package names to add to the sandbox import allowlist (e.g. `["pandas", "numpy"]`). In Docker mode packages are pip-installed automatically inside the container. In local mode they must already be installed in the host environment. See [allowed libs guide](#how-to-allow-extra-python-libraries-in-the-sandbox). |
-| `comments` | `str` | `"readable"` | Narration style for the agent's `print()` output: `"readable"` (structured Markdown for a UI) or `"speakable"` (conversational prose for text-to-speech). See [voice guide](#how-to-give-the-agent-a-voice-comments). |
 
 ### Methods
 
