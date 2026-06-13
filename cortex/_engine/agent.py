@@ -101,6 +101,7 @@ class Agent:
                  verbose: bool = False,
                  prefilter_mode: str = "auto",
                  retry_count: int = 1,
+                 rerun_count: int = 2,
                  sandbox: str = "auto",
                  sandbox_config: Optional[Dict] = None,
                  budget_usd: Optional[float] = None,
@@ -249,7 +250,7 @@ class Agent:
             self.chat.summarizer_llm = self.light_llm
         self.memory = memory
         self.retry_count = retry_count
-        self.rerun_count = 2
+        self.rerun_count = rerun_count
         self.files = files or []
         self.allowed_libs = [lib.strip() for lib in (allowed_libs or []) if lib and lib.strip()]
 

@@ -13,7 +13,10 @@ from delfhos.errors import ToolDefinitionError
 # Models that support web search
 SEARCH_SUPPORTED_MODELS = {
     "gemini": ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3.1-flash", "gemini-3.1-pro", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-pro", "gemini-1.5-flash"],
-    "gpt": ["gpt-5", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo"],  # OpenAI models
+    # OpenAI models. Web search runs through the Responses API `web_search` tool
+    # (see _openai_web_search_sync); the gpt-4o/gpt-4.1/gpt-5/o-series families
+    # support it. Matched by prefix, so "gpt-4" also covers gpt-4o/gpt-4.1/turbo.
+    "gpt": ["gpt-5", "gpt-4", "o1", "o3", "o4", "chatgpt"],
 }
 
 # Models that explicitly do NOT support web search

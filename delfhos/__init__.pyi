@@ -38,6 +38,7 @@ from delfhos.tool import (
     tool as tool,
 )
 from delfhos.tools import (
+    APITool as APITool,
     Calendar as Calendar,
     Docs as Docs,
     Drive as Drive,
@@ -75,6 +76,7 @@ class _Response:
     cost_usd: Optional[float]
     duration_ms: int
     trace: Any
+    files: Dict[str, str]
 
 class Agent:
     """
@@ -140,9 +142,12 @@ class Agent:
         providers: Optional[Dict[str, str]] = None,
         verbose: bool = False,
         prefilter_mode: str = "auto",
+        retry_count: int = 1,
+        rerun_count: int = 2,
         sandbox: str = "auto",
         sandbox_config: Optional[Dict[str, Any]] = None,
         budget_usd: Optional[float] = None,
+        files: Optional[List[str]] = None,
         allowed_libs: Optional[List[str]] = None,
     ) -> None:
         """Initialize an Agent with tools and language models.
@@ -198,17 +203,19 @@ class Agent:
 
     # ─── Task execution ──────────────────────────────────────────────
 
-    def run_async(self, task: str) -> None:
+    def submit(self, task: str) -> str:
         """
-        Submit a task for execution in the background. Does not wait for completion.
+        Submit a task for background execution and return immediately (non-blocking).
 
-        The agent:
-          1. Filters which connections are relevant for the task.
-          2. Generates Python code using the LLM.
-          3. Executes the code in a background thread.
+        Use this fire-and-forget entry point when you want to track progress
+        yourself via poll() instead of waiting for the result.
 
         Args:
             task: Natural language task description.
+
+        Returns:
+            The task_id. Pass it to poll(task_id) or stream(task) to follow
+            progress. For the result directly, use run()/arun().
         """
         ...
 
@@ -260,6 +267,30 @@ class Agent:
         """
         ...
 
+    def poll(self, task_id: str) -> Any:
+        """Live snapshot (StreamSnapshot) of a submitted task: state, events, output, result."""
+        ...
+
+    # ─── HTTP serving ────────────────────────────────────────────────
+
+    def serve(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 8080,
+        api_key: Optional[Union[str, List[str]]] = None,
+        allow_origins: Optional[List[str]] = None,
+    ) -> None:
+        """Expose the agent over an embedded HTTP API (blocking)."""
+        ...
+
+    def asgi_app(
+        self,
+        api_key: Optional[Union[str, List[str]]] = None,
+        allow_origins: Optional[List[str]] = None,
+    ) -> Any:
+        """Return the HTTP API as an ASGI app to mount inside your own server."""
+        ...
+
     # ─── Human approval ──────────────────────────────────────────────
 
     def get_pending_approvals(self) -> list:
@@ -278,6 +309,10 @@ class Agent:
 
     def info(self) -> Dict[str, Any]:
         """Return current agent state: running tasks, tools, models, etc."""
+        ...
+
+    def status(self) -> Dict[str, Any]:
+        """Current agent status, including budget accounting under the "budget" key."""
         ...
 
     def get_llm_config_string(self) -> str:
@@ -307,6 +342,27 @@ class Agent:
     @property
     def total_cost_usd(self) -> float:
         """Cumulative LLM cost in USD across all run() calls on this agent."""
+        ...
+
+    @property
+    def retry_count(self) -> int:
+        """Number of auto-retries on execution failure (read/write)."""
+        ...
+
+    @retry_count.setter
+    def retry_count(self, value: int) -> None: ...
+
+    @property
+    def rerun_count(self) -> int:
+        """Max rerun() iterations per task (read/write)."""
+        ...
+
+    @rerun_count.setter
+    def rerun_count(self, value: int) -> None: ...
+
+    @property
+    def orchestrator(self) -> Any:
+        """Internal Orchestrator (advanced). E.g. agent.orchestrator.rerun_count = 1."""
         ...
 
     def reset_budget(self, budget_usd: Optional[float] = None) -> None:
@@ -342,6 +398,7 @@ __all__ = [
     "Calendar",
     "Docs",
     "WebSearch",
+    "APITool",
     # Errors
     "DelfhosConfigError",
     "ModelConfigurationError",

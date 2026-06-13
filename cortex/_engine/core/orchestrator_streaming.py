@@ -97,21 +97,25 @@ class OrchestratorStreamingMixin:
                 result=result.get("final_message") if completed else None,
                 error=None if completed else result.get("final_message"),
                 cost_usd=result.get("cost_usd"),
+                tokens_used=result.get("tokens_used"),
                 files=result.get("output_files", {}) or {},
                 trace=trace,
             )
 
-        # ── Live or queued: build from the in-flight trace + timing ledger ───
-        trace = self.current_trace
-        is_current = bool(trace and getattr(trace, "session_id", None) == task_id)
-        has_activity = is_current or bool(self.task_tool_timings.get(task_id))
+        # ── Live or queued: build from this task's trace + its timing ledger ──
+        # Index task_traces by task_id directly: get_task_snapshot is called from
+        # the caller's thread (poll()), where the per-task context var isn't set,
+        # so self.current_trace would be None. This is what makes concurrent tasks
+        # each independently pollable.
+        trace = self.task_traces.get(task_id)
+        has_activity = trace is not None or bool(self.task_tool_timings.get(task_id))
 
         if not has_activity:
             return StreamSnapshot(task_id=task_id, state="queued")
 
         elapsed_ms = 0
         task_text = ""
-        if is_current:
+        if trace is not None:
             elapsed_ms = int((datetime.now() - trace.started_at).total_seconds() * 1000)
             task_text = getattr(trace, "task", "")
 
@@ -120,7 +124,7 @@ class OrchestratorStreamingMixin:
             state="running",
             task=task_text,
             elapsed_ms=elapsed_ms,
-            events=self._live_events(task_id, trace if is_current else None),
+            events=self._live_events(task_id, trace),
             output_so_far=self.task_live_output.get(task_id, ""),
-            trace=trace if is_current else None,
+            trace=trace,
         )

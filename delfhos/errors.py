@@ -202,7 +202,8 @@ class RunChatMessageError(DelfhosConfigError, TypeError):
     message_template = "run_chat() does not accept a 'message' argument."
     resolution = (
         "run_chat() opens an interactive terminal session — the user types messages live.\n"
-        "To run a single task programmatically, use run() or run_async() instead:\n\n"
+        "To run a single task programmatically, use run(), arun(), or submit() instead:\n\n"
         "  agent.run('Your task here')          # blocking\n"
-        "  await agent.run_async('Your task')   # async"
+        "  await agent.arun('Your task')        # async\n"
+        "  agent.submit('Your task')            # background, returns task_id"
     )

@@ -20,7 +20,7 @@ That's it.
 
 import time
 import asyncio
-from typing import List, Optional, Union, Dict, Any, Callable, Iterator, AsyncIterator
+from typing import List, Optional, Union, Dict, Any, Callable
 from cortex._engine.agent import Agent
 from cortex._engine.connection import Connection
 from cortex._engine.types import Response, StreamSnapshot
@@ -98,9 +98,12 @@ class Cortex:
         verbose: bool = False,
         prefilter_mode: str = "auto",
         retry_count: int = 1,
+        rerun_count: int = 2,
         sandbox: str = "auto",
         sandbox_config: Optional[Dict[str, Any]] = None,
         budget_usd: Optional[float] = None,
+        files: Optional[List[str]] = None,
+        allowed_libs: Optional[List[str]] = None,
     ):
         """Initialize an Agent (Cortex) with tools and language models.
 
@@ -120,10 +123,16 @@ class Cortex:
             verbose: If True, print detailed execution traces and debugging info.
             prefilter_mode: Tool prefilter strategy. "auto" (default): "off" for <10 actions, "filter" for 10–49, "search" for ≥50. "filter" = single LLM call. "search" = iterative LLM search loop. "off" = no prefiltering.
             retry_count: Number of times to auto-retry execution on failure (default: 1).
+            rerun_count: Max rerun() iterations per task — each triggers a fresh code-gen pass (default: 2).
             providers: Override API keys {"google": "...", "openai": "...", etc}.
             budget_usd: Hard spending cap in USD. Once the cumulative LLM cost across all
                         run() calls reaches this limit, new tasks are blocked until
                         reset_budget() is called. Use agent.total_cost_usd to track spend.
+            files: Absolute host paths injected as read-only workspace files. In Docker mode each
+                   is bind-mounted at /workspace/<filename>; in local mode the host paths are used.
+            allowed_libs: PyPI package names added to the sandbox import allowlist (e.g. ["pandas", "numpy"]).
+                          In Docker mode they are pip-installed in the container; in local mode they
+                          must already be installed on the host.
 
         Example::
 
@@ -166,9 +175,12 @@ class Cortex:
             verbose=verbose,
             prefilter_mode=prefilter_mode,
             retry_count=retry_count,
+            rerun_count=rerun_count,
             sandbox=sandbox,
             sandbox_config=sandbox_config,
             budget_usd=budget_usd,
+            files=files,
+            allowed_libs=allowed_libs,
             _explicit_llms={
                 "light_llm": light_llm is not None,
                 "heavy_llm": heavy_llm is not None,
@@ -192,9 +204,12 @@ class Cortex:
 
     # ─── Task execution ───────────────────────────────────────────────────────
 
-    def run_async(self, task: str) -> str:
+    def submit(self, task: str) -> str:
         """
-        Submit a task for execution in the background. Does not wait for completion.
+        Submit a task for background execution and return immediately (non-blocking).
+
+        Use this fire-and-forget entry point when you want to track progress
+        yourself via poll() instead of waiting for the result.
 
         The agent:
           1. Filters which connections are relevant for the task.
@@ -206,7 +221,7 @@ class Cortex:
 
         Returns:
             The task_id. Pass it to poll(task_id) to inspect live progress, or
-            wait for completion via poll()/stream().
+            stream(task) to follow it. For the result directly, use run()/arun().
         """
         # Note: run() will auto-start the agent and print task box first
         return self._agent.run(task)
@@ -250,7 +265,7 @@ class Cortex:
             timeout: Maximum seconds to wait per message (default: 120).
 
         Raises:
-            RunChatMessageError: If a message argument is passed (use run() or run_async() instead).
+            RunChatMessageError: If a message argument is passed (use run() or submit() instead).
             ValueError: If Chat was not provided when creating the Agent.
         """
         if message is not None:
@@ -441,13 +456,13 @@ class Cortex:
 
     def poll(self, task_id: str) -> StreamSnapshot:
         """
-        Return a point-in-time snapshot of a request submitted via run_async().
+        Return a point-in-time snapshot of a request submitted via submit().
 
         The snapshot unifies request state, the live trace (tool calls, pipeline
         phases, and the agent's printed narration), and the output produced so far.
 
         Args:
-            task_id: The id returned by run_async().
+            task_id: The id returned by submit().
 
         Returns:
             StreamSnapshot — inspect .state ("queued"|"running"|"done"|"error"),
@@ -455,7 +470,7 @@ class Cortex:
 
         Example::
 
-            task_id = agent.run_async("Summarize my unread emails")
+            task_id = agent.submit("Summarize my unread emails")
             while True:
                 snap = agent.poll(task_id)
                 print(snap.state, snap.output_so_far)
@@ -465,91 +480,95 @@ class Cortex:
         """
         return self._agent.orchestrator.get_task_snapshot(task_id)
 
-    def stream(
-        self, task: str, interval: float = 0.2, timeout: float = 120.0
-    ) -> Iterator[StreamSnapshot]:
-        """
-        Submit a task and yield live snapshots until it finishes (or times out).
-
-        Args:
-            task:     Natural language task description.
-            interval: Seconds between snapshots (default 0.2).
-            timeout:  Max seconds to keep streaming (default 120).
-
-        Yields:
-            StreamSnapshot objects. The final yielded snapshot is terminal
-            (.is_terminal is True) unless the timeout was reached first.
-
-        Example::
-
-            for snap in agent.stream("Find the cheapest flight and email it to me"):
-                print(snap.state, "-", snap.output_so_far[-80:])
-        """
-        task_id = self.run_async(task)
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            snap = self.poll(task_id)
-            yield snap
-            if snap.is_terminal:
-                return
-            time.sleep(interval)
-        # Final attempt after timeout so callers always see the latest state.
-        yield self.poll(task_id)
-
-    async def astream(
-        self, task: str, interval: float = 0.2, timeout: float = 120.0
-    ) -> AsyncIterator[StreamSnapshot]:
-        """
-        Async variant of stream(): submit a task and yield live snapshots.
-
-        Args:
-            task:     Natural language task description.
-            interval: Seconds between snapshots (default 0.2).
-            timeout:  Max seconds to keep streaming (default 120).
-
-        Yields:
-            StreamSnapshot objects, ending with a terminal snapshot.
-
-        Example::
-
-            async for snap in agent.astream("Generate the weekly report"):
-                print(snap.state)
-        """
-        if not self._agent.running:
-            self._agent.start()
-        task_id = await self._agent.run_async(task)
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            snap = self.poll(task_id)
-            yield snap
-            if snap.is_terminal:
-                return
-            await asyncio.sleep(interval)
-        yield self.poll(task_id)
-
-    def serve(self, host: str = "127.0.0.1", port: int = 8080, **uvicorn_kwargs) -> None:
+    def serve(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 8080,
+        api_key=None,
+        allow_origins=None,
+        **uvicorn_kwargs,
+    ) -> None:
         """
         Expose this agent over HTTP (blocking). Serves a small FastAPI app:
 
             POST /run               body {"task": "..."} -> {"task_id": "..."}
-            GET  /tasks/{id}        -> JSON snapshot (state, events, output_so_far, ...)
-            GET  /tasks/{id}/stream -> Server-Sent Events stream of snapshots
-            GET  /health            -> {"ok": true}
+            GET  /tasks/{id}        -> JSON snapshot (state, events, output_so_far, tokens, ...)
+            GET  /health            -> {"ok": true}   (always public)
+
+        Submit with POST /run, then poll GET /tasks/{id} until ``is_terminal``.
+
+        Authentication:
+            Pass ``api_key`` (a string or list of strings) to require callers to
+            authenticate. If omitted, the ``DELFHOS_API_KEY`` env var is used
+            (comma-separated for multiple keys). Clients send the key as
+            ``Authorization: Bearer <key>`` or ``X-API-Key: <key>``. With no key
+            configured the API is left open (a warning is logged).
 
         Args:
-            host: Interface to bind (default 127.0.0.1).
+            host: Interface to bind (default 127.0.0.1; use 0.0.0.0 to expose publicly).
             port: Port to bind (default 8080).
+            api_key: API key string, list of keys, or None to read DELFHOS_API_KEY.
+            allow_origins: CORS origins (default ["*"]; pass a list to restrict).
             **uvicorn_kwargs: Extra args forwarded to uvicorn.run().
 
         To mount the app inside an existing ASGI server instead of running it
-        standalone, use: ``from cortex._engine.server import AgentServer`` and
-        access ``AgentServer(agent).app``.
+        standalone, use :meth:`asgi_app`.
+
+        Example::
+
+            agent.serve(host="0.0.0.0", port=8080, api_key="sk-my-secret")
+            # curl -H "Authorization: Bearer sk-my-secret" \\
+            #      -X POST localhost:8080/run -d '{"task":"..."}'
+
+        Raises:
+            DelfhosConfigError: If bound to a non-loopback interface (e.g. 0.0.0.0)
+                without any API key configured — refuses to serve openly.
         """
         import uvicorn
+        from cortex._engine.server import _resolve_api_keys
+
+        # Fail closed: never expose the agent on a public interface unauthenticated.
+        loopback = {"127.0.0.1", "localhost", "::1"}
+        if host not in loopback and not _resolve_api_keys(api_key):
+            from delfhos.errors import DelfhosConfigError
+            raise DelfhosConfigError(
+                f"Refusing to serve on '{host}' without authentication. Anyone who can "
+                f"reach this address could run tasks on your agent.\n\n"
+                f"Fix it one of these ways:\n"
+                f"  • Set a key:        agent.serve(host='{host}', port={port}, api_key='sk-...')\n"
+                f"  • Or via env:       export DELFHOS_API_KEY='sk-...'\n"
+                f"  • Or bind locally:  agent.serve(host='127.0.0.1', port={port})"
+            )
+
+        app = self.asgi_app(api_key=api_key, allow_origins=allow_origins)
+        uvicorn.run(app, host=host, port=port, **uvicorn_kwargs)
+
+    def asgi_app(self, api_key=None, allow_origins=None):
+        """Return this agent's HTTP API as an ASGI app, to mount in your own server.
+
+        Same endpoints and authentication as :meth:`serve`, but instead of
+        running uvicorn it hands you the app object so you can compose it with an
+        existing FastAPI/Starlette application. Keeps everything on ``Agent`` —
+        no need to import internal modules.
+
+        Args:
+            api_key: API key string, list of keys, or None to read DELFHOS_API_KEY.
+            allow_origins: CORS origins (default ["*"]; pass a list to restrict).
+
+        Returns:
+            A FastAPI application instance.
+
+        Example::
+
+            from fastapi import FastAPI
+
+            app = FastAPI()
+            app.mount("/agent", agent.asgi_app(api_key="sk-my-secret"))
+            # -> POST /agent/run, GET /agent/tasks/{id}, GET /agent/health
+        """
         from cortex._engine.server import AgentServer
 
-        server = AgentServer(self)
-        uvicorn.run(server.app, host=host, port=port, **uvicorn_kwargs)
+        return AgentServer(self, api_key=api_key, allow_origins=allow_origins).app
 
     # ─── Human approval ───────────────────────────────────────────────────────
 
@@ -604,6 +623,21 @@ class Cortex:
         self._agent.retry_count = value
 
     @property
+    def rerun_count(self) -> int:
+        """Max rerun() iterations per task. Each iteration triggers a fresh code-gen pass."""
+        return self._agent.rerun_count
+
+    @rerun_count.setter
+    def rerun_count(self, value: int):
+        self._agent.rerun_count = value
+        self._agent.orchestrator.rerun_count = value
+
+    @property
+    def orchestrator(self):
+        """The internal Orchestrator (advanced). E.g. agent.orchestrator.rerun_count = 1."""
+        return self._agent.orchestrator
+
+    @property
     def agent_id(self) -> str:
         """Unique identifier for this agent instance."""
         return self._agent.agent_id
@@ -625,6 +659,30 @@ class Cortex:
             agent.reset_budget(budget_usd=1.00)  # clear spend and raise cap to $1
         """
         self._agent.reset_budget(budget_usd=budget_usd)
+
+    def status(self) -> Dict[str, Any]:
+        """Current agent status, including budget accounting.
+
+        Returns a dict with a ``"budget"`` section::
+
+            status = agent.status()
+            status["budget"]["limit_usd"]     # configured cap (None if unset)
+            status["budget"]["spent_usd"]     # cumulative cost so far
+            status["budget"]["remaining_usd"] # limit - spent (None if no limit)
+            status["budget"]["is_exhausted"]  # True when remaining <= 0
+        """
+        limit = self._agent.budget_usd
+        spent = self._agent.total_cost_usd
+        remaining = (limit - spent) if limit is not None else None
+        return {
+            "agent_id": self.agent_id,
+            "budget": {
+                "limit_usd": limit,
+                "spent_usd": spent,
+                "remaining_usd": remaining,
+                "is_exhausted": remaining is not None and remaining <= 0,
+            },
+        }
 
     # ─── Context manager support ──────────────────────────────────────────────
 

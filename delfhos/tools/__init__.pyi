@@ -17,6 +17,7 @@ from delfhos.tools.native import (
     WebSearch as WebSearch,
     WebSearchTool as WebSearchTool,
 )
+from cortex.connections.api import APITool as APITool
 __all__ = [
     "tool",
     "ToolException",
@@ -27,6 +28,7 @@ __all__ = [
     "Calendar",
     "Docs",
     "WebSearch",
+    "APITool",
     "GmailTool",
     "SQLTool",
     "SheetsTool",

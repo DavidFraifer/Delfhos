@@ -14,6 +14,7 @@ Responsibilities kept here:
 """
 
 from typing import Any, Dict, List, Optional, Union
+from contextvars import ContextVar
 import asyncio
 import queue
 import threading
@@ -105,7 +106,12 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
         # ── Core config ────────────────────────────────────────────────────
         self.trace_mode = trace_mode
         self.trace_callback = trace_callback
-        self.current_trace = None
+        # `current_trace` is a per-task property (defined below) backed by
+        # task_traces + an asyncio context var. Each concurrent task runs as its
+        # own asyncio task with its own context, so they never clobber one
+        # another's trace even when many run in parallel.
+        self.task_traces: Dict[str, Any] = {}
+        self._active_task_id: ContextVar = ContextVar("delfhos_active_task_id", default=None)
         self.api_enrichment_info = None  # Set by Agent._configure_tools() for APITool enrichment
         self.logger = logger
         self.light_llm = light_llm
@@ -169,6 +175,28 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
 
         # ── Approval ──────────────────────────────────────────────────────
         self.approval_manager = ApprovalManager(on_confirm=on_confirm) if approval_enabled else None
+
+    # ------------------------------------------------------------------ #
+    #  Per-task trace (concurrency-safe)                                   #
+    # ------------------------------------------------------------------ #
+    # All the existing `self.current_trace.<...>` call sites keep working, but
+    # reads/writes are now routed to *this task's* trace via the context var set
+    # in _process_message_async. Cross-thread readers (get_task_snapshot, called
+    # from poll()) must index self.task_traces[task_id] directly instead.
+
+    @property
+    def current_trace(self):
+        return self.task_traces.get(self._active_task_id.get())
+
+    @current_trace.setter
+    def current_trace(self, value):
+        task_id = self._active_task_id.get()
+        if task_id is None:
+            return  # No active task context (e.g. setup); nothing to bind to.
+        if value is None:
+            self.task_traces.pop(task_id, None)
+        else:
+            self.task_traces[task_id] = value
 
     # ------------------------------------------------------------------ #
     #  Token accounting                                                    #
@@ -282,36 +310,42 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
         start_time = time.time()
 
         task_id, payload = self._unpack_message(message)
-        self.wait_times[task_id] = 0.0
-        self.logger.start_task(task_id, message, self.agent_id)
-        self._init_trace(task_id, payload)
-
+        # Bind this task_id to the async context so every `self.current_trace`
+        # access inside this task resolves to its own isolated trace.
+        token = self._active_task_id.set(task_id)
         try:
-            memory_context = await self._retrieve_memory(task_id, payload)
-            python_code = await self.llm_generate_python(
-                payload, task_id=task_id,
-                sql_schema=None,
-                relevant_connections=None,
-                memory_context=memory_context,
-            )
+            self.wait_times[task_id] = 0.0
+            self.logger.start_task(task_id, message, self.agent_id)
+            self._init_trace(task_id, payload)
 
-            if not python_code or not python_code.strip():
-                result = {
-                    "success": False,
-                    "result": (
-                        "Unable to generate code for this task. "
-                        "Please ensure all required tools are configured and try again."
-                    ),
-                    "error": "No executable Python code was generated.",
-                    "execution_time": 0,
-                }
-            else:
-                result = await self._execute_code(task_id, payload, python_code)
+            try:
+                memory_context = await self._retrieve_memory(task_id, payload)
+                python_code = await self.llm_generate_python(
+                    payload, task_id=task_id,
+                    sql_schema=None,
+                    relevant_connections=None,
+                    memory_context=memory_context,
+                )
 
-            await self._finalize_task(task_id, payload, result, start_time)
+                if not python_code or not python_code.strip():
+                    result = {
+                        "success": False,
+                        "result": (
+                            "Unable to generate code for this task. "
+                            "Please ensure all required tools are configured and try again."
+                        ),
+                        "error": "No executable Python code was generated.",
+                        "execution_time": 0,
+                    }
+                else:
+                    result = await self._execute_code(task_id, payload, python_code)
 
-        except Exception as e:
-            self._handle_task_error(task_id, e, start_time)
+                await self._finalize_task(task_id, payload, result, start_time)
+
+            except Exception as e:
+                self._handle_task_error(task_id, e, start_time)
+        finally:
+            self._active_task_id.reset(token)
 
     # ---- helpers -------------------------------------------------------
 
@@ -1184,6 +1218,9 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
                 self._active_phase_logs.pop(active_key, None)
         self.wait_times.pop(task_id, None)
         self._live_output_pending.pop(task_id, None)
+        # The trace is already persisted into task_results by finalize/error
+        # handlers before cleanup runs, so it's safe to release the live copy.
+        self.task_traces.pop(task_id, None)
         self._cleanup_wait_times_if_needed()
 
     def _handle_task_error(self, task_id: str, e: Exception, start_time: float):

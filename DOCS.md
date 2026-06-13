@@ -1,6 +1,6 @@
 # Delfhos Documentation
 
-> **Version:** 0.6.8 · **License:** Apache-2.0 · **Python:** ≥ 3.9
+> **Version:** 0.8.7.1 · **License:** Apache-2.0 · **Python:** ≥ 3.9
 
 Delfhos is a Python SDK for building AI agents that use real tools — Gmail, SQL databases, Google Drive, Sheets, Docs, Calendar, web search, REST APIs, and your own custom functions — with clean orchestration and safe, human-in-the-loop execution.
 
@@ -10,6 +10,10 @@ Delfhos is a Python SDK for building AI agents that use real tools — Gmail, SQ
 
 1. [Tutorials](#tutorials) — Learn by doing
 2. [How-to Guides](#how-to-guides) — Solve specific problems
+   → [How to run a task: blocking, async, or background](#how-to-run-a-task-blocking-async-or-background)
+   → [How to poll a running request](#how-to-poll-a-running-request)
+   → [How to run many tasks concurrently](#how-to-run-many-tasks-concurrently)
+   → [How to expose the agent over HTTP](#how-to-expose-the-agent-over-http)
    → [How to control tool permissions with `allow` and `confirm`](#how-to-control-what-a-tool-can-do-with-allow-and-confirm)
    → [How to configure the execution sandbox](#how-to-configure-the-execution-sandbox)
    → [How to allow extra Python libraries in the sandbox](#how-to-allow-extra-python-libraries-in-the-sandbox)
@@ -63,8 +67,8 @@ from delfhos import Agent, WebSearch
 
 # Create an agent with web search capability
 agent = Agent(
-    tools=[WebSearch(llm="gemini-2.0-flash")],
-    llm="gemini-2.0-flash",
+    tools=[WebSearch(llm="gemini-3.5-flash")],
+    llm="gemini-3.5-flash",
 )
 
 # Run a task
@@ -124,7 +128,7 @@ gmail = Gmail(
 
 agent = Agent(
     tools=[gmail],
-    llm="gemini-2.0-flash",
+    llm="gemini-3.5-flash",
 )
 
 result = agent.run("Summarize the 5 most recent unread emails in my inbox.")
@@ -181,7 +185,7 @@ The decorator automatically extracts the function name, docstring, and type hint
 ```python
 agent = Agent(
     tools=[calculate_discount],
-    llm="gemini-2.0-flash",
+    llm="gemini-3.5-flash",
 )
 
 result = agent.run("What is the final price of a $250 item with a 15% discount?")
@@ -237,11 +241,11 @@ from delfhos import Agent, Chat, Gmail
 
 agent = Agent(
     tools=[Gmail(oauth_credentials="client_secrets.json")],
-    llm="gemini-2.0-flash",
+    llm="gemini-3.5-flash",
     chat=Chat(
         keep=10,                          # Keep the last 10 messages
         summarize=True,                   # Auto-compress older messages
-        summarizer_llm="gemini-2.0-flash",
+        summarizer_llm="gemini-3.5-flash",
     ),
 )
 
@@ -285,8 +289,8 @@ Preferred contact: email, not Slack
 
 agent = Agent(
     tools=[Gmail(oauth_credentials="client_secrets.json")],
-    llm="gemini-2.0-flash",
-    chat=Chat(summarizer_llm="gemini-2.0-flash"),
+    llm="gemini-3.5-flash",
+    chat=Chat(summarizer_llm="gemini-3.5-flash"),
     memory=memory,
 )
 
@@ -322,7 +326,7 @@ db = SQL(
     db_type="postgresql",   # or "mysql" / "mariadb"
 )
 
-agent = Agent(tools=[db], llm="gemini-2.0-flash")
+agent = Agent(tools=[db], llm="gemini-3.5-flash")
 result = agent.run("How many users signed up last week?")
 print(result.text)
 agent.stop()
@@ -347,7 +351,7 @@ from delfhos import Agent, SQL, Sheets
 sheets = Sheets(oauth_credentials="client_secrets.json")
 db = SQL(url="postgresql://...")
 
-agent = Agent(tools=[db, sheets], llm="gemini-2.0-flash")
+agent = Agent(tools=[db, sheets], llm="gemini-3.5-flash")
 
 result = agent.run(
     "Pull last month's revenue by region from the database "
@@ -371,7 +375,7 @@ drive = Drive(
     confirm=["create", "update"],                   # Approve writes
 )
 
-agent = Agent(tools=[drive, Gmail(oauth_credentials="client_secrets.json")], llm="gemini-2.0-flash")
+agent = Agent(tools=[drive, Gmail(oauth_credentials="client_secrets.json")], llm="gemini-3.5-flash")
 
 result = agent.run(
     "Find all PDF files in the 'Reports/Q3' folder and email them to finance@company.com"
@@ -390,11 +394,11 @@ from delfhos import Agent, Docs, Calendar, WebSearch
 
 docs     = Docs(oauth_credentials="client_secrets.json")
 calendar = Calendar(oauth_credentials="client_secrets.json")
-search   = WebSearch(llm="gemini-2.0-flash")
+search   = WebSearch(llm="gemini-3.5-flash")
 
 agent = Agent(
     tools=[docs, calendar, search],
-    llm="gemini-2.0-flash",
+    llm="gemini-3.5-flash",
 )
 
 agent.run(
@@ -429,7 +433,7 @@ petstore = APITool(
     confirm=["add_pet", "delete_pet"],       # Require approval for writes
 )
 
-agent = Agent(tools=[petstore], llm="gemini-2.0-flash")
+agent = Agent(tools=[petstore], llm="gemini-3.5-flash")
 agent.run("List all available pets and show their names")
 agent.stop()
 ```
@@ -501,7 +505,7 @@ finnhub = APITool(
     headers={"X-Finnhub-Token": os.environ["FINNHUB_API_KEY"]},
     cache=True,
     enrich=True,
-    llm="gemini-2.5-flash",  # Override the model used for enrichment
+    llm="gemini-3.5-flash",  # Override the model used for enrichment
 )
 ```
 
@@ -509,7 +513,7 @@ Token usage and cost for enrichment are tracked separately from task cost and ap
 
 ```
 ║ API ENRICHMENT            1,823ms                         ║
-║   Model                   gemini-2.5-flash                ║
+║   Model                   gemini-3.5-flash                ║
 ║   Endpoints enriched      12                              ║
 ║   Tokens in/out           1,024 / 487                     ║
 ║   Cost USD                $0.000312                       ║
@@ -587,14 +591,14 @@ agent = Agent(
 agent = Agent(
     tools=[...],
     light_llm=LLMConfig(model="qwen2.5:7b", base_url="http://localhost:11434/v1"),
-    heavy_llm="gemini-2.5-flash",
+    heavy_llm="gpt-5.5",
 )
 
 # Per-model generation settings (temperature, top_k, max_tokens, etc.)
 agent = Agent(
     tools=[...],
     llm=LLMConfig(
-        model="gemini-2.5-flash",
+        model="gemini-3.5-flash",
         settings={
             "temperature": 0.8,
             "top_k": 40,
@@ -604,7 +608,7 @@ agent = Agent(
 )
 
 # Pythonic helper form
-cfg = LLMConfig(model="gemini-2.5-flash")
+cfg = LLMConfig(model="gemini-3.5-flash")
 cfg.with_settings(temperature=0.8, top_k=40, max_tokens=1200)
 
 agent = Agent(tools=[...], llm=cfg)
@@ -627,9 +631,9 @@ from delfhos import Agent, SQL, Gmail
 
 agent = Agent(
     tools=[SQL(url="..."), Gmail(oauth_credentials="...")],
-    light_llm="gemini-2.0-flash",        # Fast model for tool routing
-    heavy_llm="gemini-2.0-pro",          # Powerful model for code generation
-    vision_llm="gemini-2.0-pro",         # Override for image/multimodal tasks
+    light_llm="gemini-3.1-flash-lite",   # Fast, cheap model for tool routing
+    heavy_llm="claude-opus-4-8",         # Powerful model for code generation
+    vision_llm="gpt-5.5",                # Override for image/multimodal tasks
 )
 ```
 
@@ -643,7 +647,7 @@ Task routing map:
 | Model field | Used for these tasks | Fallback behavior |
 |-------------|----------------------|-------------------|
 | `llm` | Simple mode shortcut. Handles all tasks when you do not split models. | Internally sets both `light_llm` and `heavy_llm` to the same model. |
-| `light_llm` | Lightweight tasks: tool prefilter/routing (`enable_prefilter=True`), small parsing/classification helpers, and chat summarization when `Chat.summarizer_llm` is not set. | No fallback at config time: it must be provided together with `heavy_llm` (unless you use `llm`). |
+| `light_llm` | Lightweight tasks: tool prefilter/routing (when `prefilter_mode` is active), small parsing/classification helpers, and chat summarization when `Chat.summarizer_llm` is not set. | No fallback at config time: it must be provided together with `heavy_llm` (unless you use `llm`). |
 | `heavy_llm` | Main reasoning model: Python code generation, retry/fix loops after execution errors, and text-only calls through `llm.call(...)`. | Base default for specialized models. |
 | `vision_llm` | Image/multimodal analysis (for example `llm.call(file_data=[...], prompt=...)`). | Falls back to `heavy_llm` if not set. |
 
@@ -678,7 +682,7 @@ from delfhos import Agent, SQL
 # Read-only: the agent can inspect the schema and run SELECTs, but cannot write
 db = SQL(url="postgresql://...", allow=["schema", "query"])
 
-agent = Agent(tools=[db], llm="gemini-2.0-flash")
+agent = Agent(tools=[db], llm="gemini-3.5-flash")
 agent.run("How many users signed up last week?")   # OK
 agent.run("Delete all rows from the logs table")   # LLM never sees the write action
 ```
@@ -695,7 +699,7 @@ gmail = Gmail(
     confirm=["send"],   # Reading is automatic; sending pauses for approval
 )
 
-agent = Agent(tools=[gmail], llm="gemini-2.0-flash")
+agent = Agent(tools=[gmail], llm="gemini-3.5-flash")
 agent.run("Summarize my inbox")           # Runs automatically
 agent.run("Send a reply to Alice")        # Pauses — terminal prompt appears
 ```
@@ -719,7 +723,7 @@ sheets = Sheets(
     confirm=["create"],                            # only creating new sheets needs approval
 )
 
-agent = Agent(tools=[drive, sheets], llm="gemini-2.0-flash")
+agent = Agent(tools=[drive, sheets], llm="gemini-3.5-flash")
 ```
 
 ### Common patterns
@@ -772,7 +776,7 @@ gmail = Gmail(
     confirm=["send"],    # Only "send" needs approval; "read" does not
 )
 
-agent = Agent(tools=[gmail], llm="gemini-2.0-flash")
+agent = Agent(tools=[gmail], llm="gemini-3.5-flash")
 agent.run("Send a weekly digest to team@company.com")
 # → Terminal prompt appears: Approve / Reject
 ```
@@ -789,7 +793,7 @@ def slack_approval(request):
 
 agent = Agent(
     tools=[Gmail(oauth_credentials="...", confirm=True)],
-    llm="gemini-2.0-flash",
+    llm="claude-sonnet-4-6",
     on_confirm=slack_approval,
 )
 ```
@@ -797,10 +801,10 @@ agent = Agent(
 ### Programmatic approval (background agents)
 
 ```python
-agent = Agent(tools=[...], llm="gemini-2.0-flash")
+agent = Agent(tools=[...], llm="gemini-3.5-flash")
 agent.start()
 
-agent.run_async("Draft and send weekly reports")   # Returns immediately
+agent.submit("Draft and send weekly reports")   # Returns immediately (task_id)
 
 # Later, in a web handler or another thread:
 pending = agent.get_pending_approvals()
@@ -812,18 +816,48 @@ for req in pending:
 
 ---
 
-## How to run an agent asynchronously
+## How to run a task: blocking, async, or background
+
+Delfhos has three task entry points. Pick one based on whether you want to wait
+for the result:
+
+| Method | Blocks? | Returns | Use when |
+|--------|---------|---------|----------|
+| `run(task, timeout=60)`  | yes          | `Response`     | simple scripts — you want the answer now |
+| `arun(task, timeout=60)` | yes (`await`)| `Response`     | inside `async`/`await` code (FastAPI, asyncio apps) |
+| `submit(task)`           | no           | `task_id` (str)| fire-and-forget — track with `poll()`, or run many at once |
+
+`run_chat()` is separate: an interactive terminal chat loop (see
+[Tutorial 4](#tutorial-4--chat-mode-and-memory)). None of these names changed
+recently except that the old `run_async()` is now `submit()`.
+
+### Blocking — `run()`
+
+```python
+from delfhos import Agent, Gmail
+
+agent = Agent(tools=[Gmail(oauth_credentials="client_secrets.json")], llm="gemini-3.5-flash")
+
+resp = agent.run("Summarize unread emails")     # waits up to timeout (default 60s)
+print(resp.text)
+print(resp.cost_usd, resp.duration_ms)
+agent.stop()
+```
+
+`run()` returns a **`Response`** (`text`, `status`, `error`, `cost_usd`,
+`duration_ms`, `files`, `trace`). If the timeout elapses first you get a
+`Response` with `status=False` and `error="Timeout..."`.
+
+### Async — `arun()`
+
+Same contract as `run()`, but awaitable — use it from async code:
 
 ```python
 import asyncio
 from delfhos import Agent, Gmail
 
 async def main():
-    agent = Agent(
-        tools=[Gmail(oauth_credentials="client_secrets.json")],
-        llm="gemini-2.0-flash",
-    )
-
+    agent = Agent(tools=[Gmail(oauth_credentials="client_secrets.json")], llm="gemini-3.5-flash")
     result = await agent.arun("Summarize unread emails", timeout=60.0)
     print(result.text)
     agent.stop()
@@ -831,30 +865,41 @@ async def main():
 asyncio.run(main())
 ```
 
-Alternatively, use a context manager for automatic cleanup:
+Or with a context manager for automatic cleanup:
 
 ```python
 async def main():
-    with Agent(tools=[Gmail(oauth_credentials="...")], llm="gemini-2.0-flash") as agent:
+    with Agent(tools=[Gmail(oauth_credentials="...")], llm="gemini-3.5-flash") as agent:
         result = await agent.arun("Summarize unread emails")
         print(result.text)
 ```
 
+### Background — `submit()`
+
+Returns a `task_id` immediately and runs the task in the background. You then
+inspect progress with `poll()` (see the next section), or fire several at once
+(see [running tasks concurrently](#how-to-run-many-tasks-concurrently)).
+
+```python
+task_id = agent.submit("Draft and send the weekly report")   # returns at once
+# ... do other work, then check on it later via agent.poll(task_id)
+```
+
 ---
 
-## How to stream and poll a running request
+## How to poll a running request
 
 `run()` blocks until a task finishes. To watch a task *while it runs* — for a
-progress UI, a dashboard, or a TTS pipeline — submit it with `run_async()` and
-poll for live snapshots.
+progress UI, a dashboard, or a TTS pipeline — submit it with `submit()` and
+poll for live snapshots with `poll()`.
 
 ```python
 import time
 from delfhos import Agent, Gmail
 
-agent = Agent(tools=[Gmail(oauth_credentials="...")], llm="gemini-2.0-flash")
+agent = Agent(tools=[Gmail(oauth_credentials="...")], llm="claude-sonnet-4-6")
 
-task_id = agent.run_async("Summarize my unread emails and draft replies")
+task_id = agent.submit("Summarize my unread emails and draft replies")
 
 while True:
     snap = agent.poll(task_id)            # -> StreamSnapshot
@@ -874,14 +919,14 @@ request at that instant:
 
 | Field            | Meaning                                                            |
 |------------------|--------------------------------------------------------------------|
-| `state`          | `"queued"` → `"running"` → `"done"` / `"error"`                    |
+| `state`          | `"queued"` → `"running"` → `"done"` / `"error"` (queued is brief)  |
 | `task`           | The task text                                                      |
 | `elapsed_ms`     | Time since the request started                                     |
 | `events`         | Unified timeline — list of `StreamEvent`                          |
 | `output_so_far`  | `print()` output captured so far (grows during the run)            |
 | `result`         | Final answer once `state == "done"`                               |
 | `error`          | Error message once `state == "error"`                             |
-| `cost_usd`, `files`, `trace` | Populated once terminal                              |
+| `cost_usd`, `tokens_used`, `files`, `trace` | Populated once terminal               |
 | `is_terminal`    | `True` when `state` is `"done"` or `"error"`                       |
 
 Each **`StreamEvent`** has `kind` (`"phase"` for internal pipeline steps like
@@ -890,65 +935,129 @@ planning/prefilter, `"tool"` for a tool call labelled by its `desc=`, or
 and `duration_ms`. This is the same information the trace records — surfaced
 live instead of only at the end.
 
-### The `stream()` / `astream()` generators
+---
 
-For the common "submit and follow" case, skip the manual loop:
+## How to run many tasks concurrently
 
-```python
-for snap in agent.stream("Find the cheapest flight and email it to me"):
-    print(snap.state, "-", snap.output_so_far[-60:])
-# the last snapshot is terminal
-```
+A single agent can run **multiple tasks at the same time**. Submit them with
+`submit()` (which returns immediately) and each one runs concurrently; you poll
+each by its own `task_id` without them interfering with one another.
 
 ```python
-async for snap in agent.astream("Generate the weekly report"):
-    print(snap.state)
+import time
+from delfhos import Agent, Gmail
+
+agent = Agent(tools=[Gmail(oauth_credentials="...")], llm="gemini-3.5-flash")
+
+# Kick off three tasks at once — they run in parallel, not one after another.
+task_ids = [
+    agent.submit("Summarize today's unread emails"),
+    agent.submit("Find any pending invoices"),
+    agent.submit("Draft a reply to Ana's last email"),
+]
+
+# Poll each independently until all are done.
+pending = set(task_ids)
+while pending:
+    for tid in list(pending):
+        snap = agent.poll(tid)
+        if snap.is_terminal:
+            print(tid, "->", snap.result or snap.error)
+            pending.discard(tid)
+    time.sleep(0.3)
+
+agent.stop()
 ```
 
-Both accept `interval` (seconds between snapshots, default `0.2`) and `timeout`
-(max seconds to stream, default `120`).
+The same applies over HTTP: fire several `POST /run` calls and poll each
+returned `task_id` separately.
+
+**How it works.** Each submitted task runs as its own concurrent unit on the
+agent's background scheduler. All per-task state — the live trace, tool
+timeline, captured output, result, cost, and tokens — is keyed by `task_id`, so
+two tasks running at the same time never overwrite each other's progress or
+final result. `poll(task_id)` always reflects exactly that task.
+
+**What "concurrent" means here.** Tasks interleave while they wait on I/O —
+LLM calls, tool/API requests, network. This is the dominant cost in agent work,
+so in practice several tasks make progress together. It is *not* CPU
+parallelism: if a task's generated code does heavy synchronous computation, it
+holds the line until it yields. For CPU-bound parallelism, run separate `Agent`
+instances (e.g. one per process).
+
+**Things to keep in mind:**
+
+- **Shared connections must tolerate concurrent use.** If several tasks use the
+  *same* tool instance (e.g. one `Gmail()`), they'll call it at the same time.
+  The built-in tools are I/O clients and handle this fine; if you write a custom
+  tool with mutable shared state, make it reentrant.
+- **Console output interleaves.** Logs from parallel tasks mix in the terminal
+  (each line is tagged with its `task_id`). This is cosmetic — the structured
+  data in each `poll()` snapshot stays clean and separated.
+- **`run()` / `arun()` are unaffected.** They block until their single task
+  finishes, so they don't introduce concurrency on their own. Concurrency only
+  comes from issuing multiple `submit()` calls (or multiple `POST /run`).
 
 ---
 
 ## How to expose the agent over HTTP
 
 Call `serve()` to run a small embedded HTTP API (FastAPI + uvicorn, both bundled
-with Delfhos — no extra install):
+with Delfhos — no extra install). Everything is reachable from the `Agent`
+object; you never import internal modules.
 
 ```python
 from delfhos import Agent, Gmail
 
-agent = Agent(tools=[Gmail(oauth_credentials="...")], llm="gemini-2.0-flash")
-agent.serve(port=8080)        # blocking
+agent = Agent(tools=[Gmail(oauth_credentials="...")], llm="gpt-5.5")
+
+# Local only, open (fine for development)
+agent.serve(port=8080)
+
+# Public, authenticated (production)
+agent.serve(host="0.0.0.0", port=8080, api_key="sk-my-secret")
 ```
 
-| Endpoint                     | Purpose                                                  |
-|------------------------------|----------------------------------------------------------|
-| `POST /run`                  | Body `{"task": "..."}` → `{"task_id": "..."}`            |
-| `GET  /tasks/{id}`           | JSON `StreamSnapshot`                                     |
-| `GET  /tasks/{id}/stream`    | Server-Sent Events — one snapshot per frame until done   |
-| `GET  /health`               | `{"ok": true}`                                           |
+| Endpoint                     | Purpose                                                       | Auth |
+|------------------------------|---------------------------------------------------------------|------|
+| `POST /run`                  | Body `{"task": "..."}` → `{"task_id": "..."}`                | ✔︎   |
+| `GET  /tasks/{id}`           | JSON `StreamSnapshot` (state, events, output, cost, tokens)  | ✔︎   |
+| `GET  /health`               | `{"ok": true}` — always public (for load balancers)          | —    |
+
+Submit with `POST /run`, then poll `GET /tasks/{id}` until `is_terminal` is true.
+Multiple `POST /run` calls are accepted and run
+[concurrently](#how-to-run-many-tasks-concurrently) — poll each `task_id` on its own.
+
+### Authentication
+
+Pass `api_key` (a string or a list of keys), or set the `DELFHOS_API_KEY` env
+var (comma-separated for multiple keys). Clients authenticate with either header:
 
 ```bash
-# Submit a task
-curl -s -X POST localhost:8080/run -H 'content-type: application/json' \
+curl -H "Authorization: Bearer sk-my-secret" \
+     -X POST localhost:8080/run -H 'content-type: application/json' \
      -d '{"task": "Summarize my unread emails"}'
 # {"task_id": "..."}
 
-# Poll once
-curl -s localhost:8080/tasks/<task_id>
-
-# Follow live with Server-Sent Events
-curl -N localhost:8080/tasks/<task_id>/stream
+curl -H "X-API-Key: sk-my-secret" localhost:8080/tasks/<task_id>   # poll until is_terminal
 ```
 
-To mount the API inside an existing ASGI app instead of running it standalone,
-use the FastAPI app directly:
+**Fail-closed:** binding to a non-loopback interface (e.g. `0.0.0.0`) without any
+key raises an error rather than serving openly. Always put HTTPS (a reverse proxy
+such as Caddy/Nginx/Cloudflare) in front when exposing publicly — the API key
+travels in clear over plain HTTP.
+
+### Mounting inside your own ASGI app
+
+Use `asgi_app()` to get the FastAPI app and compose it with an existing server —
+still entirely through `Agent`:
 
 ```python
-from cortex._engine.server import AgentServer
+from fastapi import FastAPI
 
-api = AgentServer(agent).app   # a FastAPI instance you can mount/include
+app = FastAPI()
+app.mount("/agent", agent.asgi_app(api_key="sk-my-secret"))
+# -> POST /agent/run, GET /agent/tasks/{id}, GET /agent/health
 ```
 
 ---
@@ -967,7 +1076,7 @@ personal = Gmail(
     name="personal_email",
 )
 
-agent = Agent(tools=[work, personal], llm="gemini-2.0-flash")
+agent = Agent(tools=[work, personal], llm="gemini-3.5-flash")
 agent.run(
     "Forward the invoice from my work inbox to my personal email address."
 )
@@ -997,8 +1106,8 @@ from delfhos import Agent, Gmail, Sheets, Drive, SQL, WebSearch
 # "auto" (default) — Delfhos picks the right mode automatically
 agent = Agent(
     tools=[Gmail(...), Sheets(...), Drive(...), SQL(...), WebSearch(...)],
-    light_llm="gemini-2.0-flash",   # Used for prefiltering
-    heavy_llm="gemini-2.0-pro",     # Used for code generation
+    light_llm="gemini-3.1-flash-lite",   # Used for prefiltering
+    heavy_llm="gpt-5.5",                 # Used for code generation
 )
 
 agent.run("What is the weather in London?")
@@ -1012,14 +1121,14 @@ You can also pin a specific mode:
 # Force search mode (best for APITool with 50+ endpoints)
 agent = Agent(
     tools=[my_api_tool],             # e.g. 110 Finnhub endpoints
-    llm="gemini-2.0-flash",
+    llm="gemini-3.5-flash",
     prefilter_mode="search",
 )
 
 # Disable prefiltering entirely (fastest for tiny tool sets)
 agent = Agent(
     tools=[my_single_tool],
-    llm="gemini-2.0-flash",
+    llm="gemini-3.5-flash",
     prefilter_mode="off",
 )
 ```
@@ -1060,7 +1169,7 @@ Our SLA: Enterprise 2hr response, Pro 8hr response
 
 agent = Agent(
     tools=[...],
-    llm="gemini-2.0-flash",
+    llm="gemini-3.5-flash",
     memory=memory,
 )
 
@@ -1106,7 +1215,7 @@ Edit it to add new models or update rates:
 {
     "_comment": "USD per 1M tokens",
     "models": {
-        "gemini-2.0-flash": {
+        "gemini-3.1-flash-lite": {
             "input_per_million": 0.10,
             "output_per_million": 0.40
         },
@@ -1114,7 +1223,7 @@ Edit it to add new models or update rates:
             "input_per_million": 1.50,
             "output_per_million": 9.00
         },
-        "gpt-4o": {
+        "gpt-5.5": {
             "input_per_million": 2.50,
             "output_per_million": 10.00
         },
@@ -1145,7 +1254,7 @@ You can set a hard limit on the amount of money an `Agent` instance can spend.
 ```python
 agent = Agent(
     tools=[...],
-    llm="gpt-4o",
+    llm="gpt-5.5",
     budget_usd=0.50, # Block new tasks if accumulated cost reaches $0.50 USD
 )
 
@@ -1185,7 +1294,7 @@ Instead of environment variables, pass keys directly:
 ```python
 agent = Agent(
     tools=[...],
-    llm="gemini-2.0-flash",
+    llm="gemini-3.5-flash",
     providers={
         "google": "GOOGLE_API_KEY_HERE",
         "openai": "OPENAI_API_KEY_HERE",
@@ -1200,7 +1309,7 @@ agent = Agent(
 ```python
 agent = Agent(
     tools=[SQL(url="..."), Gmail(oauth_credentials="...")],
-    llm="gemini-2.0-flash",
+    llm="gemini-3.5-flash",
     system_prompt="""
 You are a data analyst for Acme Corp.
 - Always cite the SQL query you used.
@@ -1230,19 +1339,19 @@ Delfhos executes LLM-generated code in an isolated sandbox. By default it automa
 from delfhos import Agent, SQL
 
 # Default — auto-detects Docker, falls back gracefully
-agent = Agent(tools=[SQL(url="...")], llm="gemini-2.0-flash")
+agent = Agent(tools=[SQL(url="...")], llm="gemini-3.5-flash")
 
 # Force Docker (fails if Docker is not running)
 agent = Agent(
     tools=[SQL(url="...")],
-    llm="gemini-2.0-flash",
+    llm="gemini-3.5-flash",
     sandbox="docker",
 )
 
 # Pin to local sandbox (no Docker required)
 agent = Agent(
     tools=[SQL(url="...")],
-    llm="gemini-2.0-flash",
+    llm="gemini-3.5-flash",
     sandbox="local",
 )
 ```
@@ -1254,7 +1363,7 @@ Override the defaults with `sandbox_config`:
 ```python
 agent = Agent(
     tools=[...],
-    llm="gemini-2.0-flash",
+    llm="gemini-3.5-flash",
     sandbox="docker",
     sandbox_config={
         "memory_limit": "1g",   # Default: "512m"
@@ -1292,7 +1401,7 @@ build_image()            # Skips if image is up to date
 build_image(force=True)  # Rebuild unconditionally
 ```
 
-The image is version-tagged to match the installed Delfhos version (e.g. `delfhos-sandbox:0.8.6`) so upgrades automatically use a fresh image.
+The image is version-tagged to match the installed Delfhos version (e.g. `delfhos-sandbox:0.8.7`) so upgrades automatically use a fresh image.
 
 ### Checking sandbox status
 
@@ -1332,7 +1441,7 @@ from delfhos import Agent, SQL
 
 agent = Agent(
     tools=[SQL(url="postgresql://...")],
-    llm="gemini-2.0-flash",
+    llm="gemini-3.5-flash",
     allowed_libs=["pandas", "numpy"],
 )
 agent.run("Load the sales table and compute monthly totals")
@@ -1351,7 +1460,7 @@ pip install pandas numpy   # install first
 ```python
 agent = Agent(
     tools=[...],
-    llm="gemini-2.0-flash",
+    llm="gemini-3.5-flash",
     sandbox="local",
     allowed_libs=["pandas", "numpy"],
 )
@@ -1364,7 +1473,7 @@ In Docker mode (`sandbox="docker"` or `sandbox="auto"` with Docker available) De
 ```python
 agent = Agent(
     tools=[...],
-    llm="gemini-2.0-flash",
+    llm="gemini-3.5-flash",
     sandbox="docker",
     allowed_libs=["pandas", "scikit-learn", "openpyxl"],
 )
@@ -1388,7 +1497,7 @@ from delfhos import Agent, SQL
 
 agent = Agent(
     tools=[SQL(url="postgresql://...")],
-    llm="gemini-2.0-flash",
+    llm="gemini-3.5-flash",
     files=[
         "/data/sales_q3.csv",
         "/data/product_catalog.xlsx",
@@ -1438,7 +1547,7 @@ from delfhos import Agent, SQL
 
 agent = Agent(
     tools=[SQL(url="postgresql://...")],
-    llm="gemini-2.0-flash",
+    llm="gemini-3.5-flash",
 )
 
 result = agent.run(
@@ -1504,7 +1613,7 @@ Keys are the logical labels the agent chose (e.g. `"report"`, `"orders.csv"`). V
 ```python
 agent = Agent(
     tools=[...],
-    llm="gemini-2.0-flash",
+    llm="gemini-3.5-flash",
     retry_count=3,   # Retry up to 3 times on non-fatal errors
 )
 ```
@@ -1596,7 +1705,7 @@ By default the orchestrator allows up to 2 rerun iterations per task. Each rerun
 ```python
 # The cap is set on the orchestrator, not on the public Agent constructor.
 # To change it, set it after construction:
-agent = Agent(tools=[...], llm="gemini-2.0-flash")
+agent = Agent(tools=[...], llm="gemini-3.5-flash")
 agent.orchestrator.rerun_count = 1   # Allow at most 1 rerun per task
 ```
 
@@ -1635,8 +1744,10 @@ Agent(
     verbose:          bool = False,
     prefilter_mode:   str = "auto",
     retry_count:      int = 1,
+    rerun_count:      int = 2,
     sandbox:          str = "auto",
     sandbox_config:   Optional[Dict[str, Any]] = None,
+    budget_usd:       Optional[float] = None,
     files:            Optional[List[str]] = None,
     allowed_libs:     Optional[List[str]] = None,
 )
@@ -1660,6 +1771,7 @@ Agent(
 | `sandbox` | `str` | `"auto"` | Execution isolation mode: `"auto"` \| `"docker"` \| `"local"` |
 | `rerun_count` | `int` | `2` | Max rerun iterations when generated code calls `rerun()`. Each iteration triggers a fresh code-generation pass. See [`rerun()` guide](#how-to-use-rerun-for-adaptive-replanning). |
 | `sandbox_config` | `dict` | `None` | Resource limit overrides for Docker mode (see [sandbox guide](#how-to-configure-the-execution-sandbox)) |
+| `budget_usd` | `float` | `None` | Hard spending cap in USD. New `run()` calls are blocked once cumulative cost reaches this limit, until `reset_budget()` is called. See [cost guardrails](#cost-guardrails-and-budgets). |
 | `files` | `list[str]` | `None` | Absolute host paths to inject as read-only workspace files. In Docker mode each file is bind-mounted at `/workspace/<filename>`; in local mode the original paths are used. See [input file guide](#how-to-pass-input-files-to-the-agent-workspace). |
 | `allowed_libs` | `list[str]` | `None` | PyPI package names to add to the sandbox import allowlist (e.g. `["pandas", "numpy"]`). In Docker mode packages are pip-installed automatically inside the container. In local mode they must already be installed in the host environment. See [allowed libs guide](#how-to-allow-extra-python-libraries-in-the-sandbox). |
 
@@ -1670,17 +1782,18 @@ Agent(
 | `start` | `() → self` | Initialize and start the agent |
 | `stop` | `()` | Shut down and free resources |
 | `run` | `(task: str, timeout: float = 60.0) → Response` | Execute task (blocking) |
-| `run_async` | `(task: str) → str` | Submit task (background, non-blocking); returns `task_id` |
 | `arun` | `async (task: str, timeout: float = 60.0) → Response` | Execute task (async/await) |
-| `poll` | `(task_id: str) → StreamSnapshot` | Live snapshot of a submitted task. See [streaming guide](#how-to-stream-and-poll-a-running-request). |
-| `stream` | `(task: str, interval: float = 0.2, timeout: float = 120.0) → Iterator[StreamSnapshot]` | Submit a task and yield live snapshots until terminal |
-| `astream` | `async (task: str, interval: float = 0.2, timeout: float = 120.0) → AsyncIterator[StreamSnapshot]` | Async variant of `stream()` |
-| `serve` | `(host: str = "127.0.0.1", port: int = 8080) → None` | Expose the agent over HTTP (blocking). See [HTTP guide](#how-to-expose-the-agent-over-http). |
+| `submit` | `(task: str) → str` | Submit task (background, non-blocking); returns `task_id` |
+| `poll` | `(task_id: str) → StreamSnapshot` | Live snapshot of a submitted task. See [polling guide](#how-to-poll-a-running-request). |
+| `serve` | `(host: str = "127.0.0.1", port: int = 8080, api_key=None, allow_origins=None) → None` | Expose the agent over HTTP (blocking). See [HTTP guide](#how-to-expose-the-agent-over-http). |
+| `asgi_app` | `(api_key=None, allow_origins=None) → FastAPI` | Return the HTTP API as an ASGI app to mount in your own server |
 | `run_chat` | `(timeout: float = 120.0)` | Launch interactive terminal chat |
 | `get_pending_approvals` | `() → list[dict]` | List requests awaiting approval |
 | `approve` | `(request_id: str, response: str = "Approved") → bool` | Approve a pending request |
 | `reject` | `(request_id: str, reason: str = "Rejected") → bool` | Reject a pending request |
 | `info` | `() → dict` | Current agent state |
+| `status` | `() → dict` | Current status incl. `status["budget"]` (`limit_usd`, `spent_usd`, `remaining_usd`, `is_exhausted`). See [cost guardrails](#cost-guardrails-and-budgets). |
+| `reset_budget` | `(budget_usd: float = None) → None` | Reset accumulated cost to $0, optionally setting a new limit. |
 | `get_llm_config_string` | `() → str` | Human-readable LLM configuration |
 
 ### Properties
@@ -1691,8 +1804,10 @@ Agent(
 | `usage` | `TokenUsage` | Cumulative token and cost statistics |
 | `chat` | `Chat \| None` | Attached Chat instance |
 | `memory` | `Memory \| None` | Attached Memory instance |
-| `retry_count` | `int` | Current retry setting |
-| `rerun_count` | `int` | Max rerun iterations (set on `agent.orchestrator.rerun_count`) |
+| `total_cost_usd` | `float` | Cumulative LLM cost in USD across all `run()` calls |
+| `retry_count` | `int` | Current retry setting (read/write) |
+| `rerun_count` | `int` | Max rerun iterations (read/write; also settable via `agent.orchestrator.rerun_count`) |
+| `orchestrator` | `Orchestrator` | Internal orchestrator (advanced access) |
 
 ### Context manager
 
@@ -1738,9 +1853,8 @@ agent printed, mirrored onto `trace.timeline` as `say` events).
 
 ## `StreamSnapshot` and `StreamEvent`
 
-Returned by `agent.poll()` and yielded by `agent.stream()` / `agent.astream()`.
-A `StreamSnapshot` is a point-in-time view of a request; see the
-[streaming guide](#how-to-stream-and-poll-a-running-request).
+Returned by `agent.poll()`. A `StreamSnapshot` is a point-in-time view of a
+request; see the [polling guide](#how-to-poll-a-running-request).
 
 ```python
 @dataclass
@@ -1754,6 +1868,7 @@ class StreamSnapshot:
     result:        Optional[str]      # final answer once state == "done"
     error:         Optional[str]      # error message once state == "error"
     cost_usd:      Optional[float]
+    tokens_used:   Optional[int]      # total tokens once terminal
     files:         Dict[str, str]
     trace:         Any                # full Trace once terminal
 
@@ -2142,7 +2257,7 @@ LLMConfig(
 ```python
 # Dict style
 LLMConfig(
-    model="gemini-2.5-flash",
+    model="gemini-3.5-flash",
     settings={
         "temperature": 0.8,
         "top_k": 40,
@@ -2158,7 +2273,7 @@ LLMConfig(
 )
 
 # Fluent style
-cfg = LLMConfig(model="gemini-2.5-flash")
+cfg = LLMConfig(model="gemini-3.5-flash")
 cfg.with_settings(temperature=0.8, top_k=40, max_tokens=1200)
 ```
 
@@ -2266,9 +2381,9 @@ Pass a model name string for native providers, or a `LLMConfig` for any OpenAI-c
 
 | Family | Examples | Notes |
 |--------|---------|-------|
-| Google Gemini | `gemini-2.0-flash`, `gemini-2.5-flash`, `gemini-2.0-pro` | Recommended; requires `GOOGLE_API_KEY` |
-| OpenAI | `gpt-4o`, `gpt-4o-mini`, `o1`, `o3`, `o4-mini` | Requires `OPENAI_API_KEY` |
-| Anthropic Claude | `claude-3-5-sonnet`, `claude-3-haiku` | Requires `ANTHROPIC_API_KEY` |
+| Google Gemini | `gemini-3.5-flash`, `gemini-3.1-flash-lite`, `gemini-3.1-pro` | Recommended; requires `GOOGLE_API_KEY` |
+| OpenAI | `gpt-5.5`, `gpt-4o-mini`, `o3`, `o4-mini` | Requires `OPENAI_API_KEY` |
+| Anthropic Claude | `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-3-haiku` | Requires `ANTHROPIC_API_KEY` |
 | Any OpenAI-compatible | `LLMConfig(model=..., base_url=...)` | Ollama, vLLM, Groq, Together AI, LM Studio, etc. |
 
 > Claude models are not supported as the `llm` for `WebSearch`.
@@ -2368,9 +2483,10 @@ When you call `agent.run("task")`, the following pipeline executes:
        Top-k facts are injected into the system prompt.
 
 2. Tool prefiltering (optional)
-   └── If enable_prefilter=True, the light_llm reads the task and the list
+   └── Unless prefilter_mode="off", the light_llm reads the task and the list
        of available tools, then selects the relevant subset. This reduces
-       the number of tool API docs included in the next step.
+       the number of tool API docs included in the next step. ("auto" picks
+       off/filter/search based on the number of available actions.)
 
 3. Schema loading (SQL only)
    └── If a SQL connection is in the selected tools, the actual table schemas
@@ -2482,7 +2598,7 @@ The approval system is designed to be both developer-friendly and production-rea
 
 2. **Custom callback:** `on_confirm=fn` lets you integrate with external systems — Slack, email, a web dashboard — by writing a function that returns `True` (approve), `False` (reject), or `None` (fall back to default UI).
 
-3. **Programmatic:** When using `run_async()`, you poll `agent.get_pending_approvals()` and call `agent.approve()` or `agent.reject()` from your own code (e.g., a web API handler).
+3. **Programmatic:** When using `submit()`, you poll `agent.get_pending_approvals()` and call `agent.approve()` or `agent.reject()` from your own code (e.g., a web API handler).
 
 **What the LLM sees:** When a request is rejected, the rejection reason is fed back to the LLM as context so it can revise its approach.
 

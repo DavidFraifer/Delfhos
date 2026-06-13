@@ -278,6 +278,7 @@ async def llm_completion_async(
             base_url_override,
             extra_headers,
             provider_optional_settings,
+            use_web_search,
         )
 
     if provider == "anthropic":
@@ -711,6 +712,117 @@ def _anthropic_error_details(response: requests.Response) -> Dict[str, Any]:
     }
 
 
+def _extract_responses_text(data: Dict[str, Any]) -> str:
+    """Extract assistant text from an OpenAI Responses API payload.
+
+    The Responses API returns an `output` array that interleaves reasoning,
+    web_search_call, and message items. Only message/output_text carries the
+    answer. Some gateways also expose a convenience top-level `output_text`.
+    """
+    convenience = data.get("output_text")
+    if isinstance(convenience, str) and convenience.strip():
+        return convenience.strip()
+
+    parts: List[str] = []
+    for item in data.get("output", []) or []:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        for chunk in item.get("content", []) or []:
+            if isinstance(chunk, dict) and chunk.get("type") in ("output_text", "text"):
+                parts.append(str(chunk.get("text", "")))
+    return "".join(parts).strip()
+
+
+def _openai_web_search_sync(
+    model: str,
+    prompt: str,
+    system_message: str,
+    temperature: float,
+    max_tokens: int,
+    api_key: str,
+    base_url_override: Optional[str],
+    extra_headers: Optional[Dict[str, str]],
+    generation_settings: Optional[Dict[str, Any]],
+) -> tuple[str, dict]:
+    """Web-grounded OpenAI call via the Responses API + native `web_search` tool.
+
+    Chat Completions cannot do live web search (only the `*-search-preview`
+    models accept `web_search_options`), so grounded queries must go through
+    `/responses`. Tool name and generation params differ across model families,
+    so we degrade gracefully through a small set of payload variants.
+    """
+    session = _get_openai_session(api_key, base_url_override=base_url_override, extra_headers=extra_headers)
+    effective_base_url = (base_url_override or _get_openai_base_url()).rstrip("/")
+
+    input_messages: List[Dict[str, Any]] = []
+    if system_message:
+        input_messages.append({"role": "system", "content": system_message})
+    input_messages.append({"role": "user", "content": prompt})
+
+    base_payload: Dict[str, Any] = {"model": model, "input": input_messages}
+
+    # The hosted tool was renamed `web_search_preview` -> `web_search`; try both.
+    tool_variants = [
+        [{"type": "web_search"}],
+        [{"type": "web_search_preview"}],
+    ]
+    # gpt-5/o-series reject custom temperature; some reject max_output_tokens.
+    param_variants = [
+        {"temperature": temperature, "max_output_tokens": max_tokens},
+        {"max_output_tokens": max_tokens},
+        {},
+    ]
+    attempts = [(tools, params) for tools in tool_variants for params in param_variants]
+
+    response = None
+    last_error = None
+    for tools, params in attempts:
+        payload = dict(base_payload)
+        payload["tools"] = tools
+        payload.update(params)
+        response = session.post(effective_base_url + "/responses", json=payload, timeout=60)
+        if response.status_code < 400:
+            break
+
+        details = _openai_error_details(response)
+        msg_lower = (details.get("message") or "").lower()
+        code = details.get("code")
+        param = details.get("param")
+        last_error = response
+
+        recoverable = (
+            code == "unsupported_parameter"
+            or "unsupported parameter" in msg_lower
+            or "unknown parameter" in msg_lower
+            or "is not supported with this model" in msg_lower
+            or "web_search" in msg_lower
+            or param in ("temperature", "max_output_tokens", "tools")
+        )
+        if recoverable:
+            continue
+        break
+
+    if response is None or response.status_code >= 400:
+        err_response = last_error or response
+        if err_response is None:
+            _raise_llm_api_error("openai", "OpenAI web search error: request failed before receiving a response")
+        _raise_llm_api_error("openai", f"OpenAI web search error {err_response.status_code}: {err_response.text[:300]}")
+
+    data = response.json()
+    content = _extract_responses_text(data)
+    usage = data.get("usage", {}) or {}
+    input_tokens = usage.get("input_tokens", len((system_message or "") + prompt) // 4)
+    output_tokens = usage.get("output_tokens", len(content) // 4)
+
+    token_info = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": usage.get("total_tokens", input_tokens + output_tokens),
+        "image_count": 0,
+    }
+    return content, _normalize_token_info(token_info, prompt=prompt, system_message=system_message, content=content)
+
+
 def _openai_sync(
     model: str,
     prompt: str,
@@ -723,7 +835,26 @@ def _openai_sync(
     base_url_override: Optional[str] = None,
     extra_headers: Optional[Dict[str, str]] = None,
     generation_settings: Optional[Dict[str, Any]] = None,
+    use_web_search: bool = False,
 ) -> tuple[str, dict]:
+    effective_base_url = (base_url_override or _get_openai_base_url()).rstrip("/")
+
+    # Live web search is only available on OpenAI's own endpoint via the
+    # Responses API. For OpenAI-compatible local/enterprise gateways there is no
+    # hosted search tool, so fall through to a normal (ungrounded) completion.
+    if use_web_search and effective_base_url == "https://api.openai.com/v1":
+        return _openai_web_search_sync(
+            model=model,
+            prompt=prompt,
+            system_message=system_message,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            api_key=api_key,
+            base_url_override=base_url_override,
+            extra_headers=extra_headers,
+            generation_settings=generation_settings,
+        )
+
     session = _get_openai_session(api_key, base_url_override=base_url_override, extra_headers=extra_headers)
 
     user_content: Union[str, List[Dict[str, Any]]] = prompt
@@ -772,7 +903,6 @@ def _openai_sync(
     if optional_params:
         payload_variants.extend(without_optional)
 
-    effective_base_url = (base_url_override or _get_openai_base_url()).rstrip("/")
     response = None
     last_error = None
     for variant in payload_variants:

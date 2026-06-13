@@ -448,7 +448,7 @@ class PythonExecutor:
             self._baseline_keys = set(self.namespace.keys())
 
         # Capture stdout/stderr. stdout uses a streaming buffer so printed output
-        # is mirrored to the orchestrator live (for poll()/stream()) while still
+        # is mirrored to the orchestrator live (for poll()) while still
         # being fully available via getvalue() at the end.
         stdout_capture = _StreamingBuffer(self.orchestrator, self.task_id)
         stderr_capture = io.StringIO()

@@ -74,10 +74,9 @@ class StreamEvent:
 class StreamSnapshot:
     """A point-in-time view of a running (or finished) request.
 
-    Returned by ``agent.poll(task_id)`` and yielded by ``agent.stream(...)`` /
-    ``agent.astream(...)``. Carries the request state, the unified live timeline
-    (``events``), the output produced so far, and — once terminal — the final
-    result, cost, files, and full ``trace``.
+    Returned by ``agent.poll(task_id)``. Carries the request state, the unified
+    live timeline (``events``), the output produced so far, and — once terminal —
+    the final result, cost, tokens, files, and full ``trace``.
     """
     task_id: str
     state: str                 # "queued" | "running" | "done" | "error"
@@ -88,6 +87,7 @@ class StreamSnapshot:
     result: Optional[str] = None
     error: Optional[str] = None
     cost_usd: Optional[float] = None
+    tokens_used: Optional[int] = None
     files: Dict[str, str] = field(default_factory=dict)
     trace: Any = None
 
@@ -107,6 +107,7 @@ class StreamSnapshot:
             "result": self.result,
             "error": self.error,
             "cost_usd": self.cost_usd,
+            "tokens_used": self.tokens_used,
             "files": self.files,
             "is_terminal": self.is_terminal,
         }
