@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional, Union, get_type_hints
 import asyncio
 import inspect
 import re
+import warnings
 from delfhos.errors import ToolDefinitionError
 
 _original_get_event_loop = asyncio.get_event_loop
@@ -496,25 +497,21 @@ class Tool:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    _WARN  = "\033[38;2;245;158;11m"  # amber  #f59e0b
-    _MUTE  = "\033[38;2;142;142;142m"  # muted  #8e8e8e
-    _RESET = "\033[0m"
-
     def _warn_bare_dicts(self) -> None:
         """Warn if any param or return type is bare 'object' with no schema."""
         if self.parameters:
             for pname, pinfo in self.parameters.items():
                 if pinfo.get("type") == "object":
-                    print(
-                        f"  {self._WARN}!{self._RESET}  Bare dict param  "
-                        f"{self._MUTE}'{self.tool_name}.{pname}' — "
-                        f"add a TypedDict or Args: docstring section{self._RESET}"
+                    warnings.warn(
+                        f"Bare dict param '{self.tool_name}.{pname}' — "
+                        f"add a TypedDict or Args: docstring section",
+                        DelfhosToolWarning, stacklevel=3,
                     )
         if self.return_type == "object":
-            print(
-                f"  {self._WARN}!{self._RESET}  Bare dict return  "
-                f"{self._MUTE}'{self.tool_name}' — "
-                f"add a TypedDict or Returns: docstring section{self._RESET}"
+            warnings.warn(
+                f"Bare dict return '{self.tool_name}' — "
+                f"add a TypedDict or Returns: docstring section",
+                DelfhosToolWarning, stacklevel=3,
             )
 
     _PYTHON_TYPES = {

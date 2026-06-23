@@ -59,30 +59,19 @@ class APIExecutor:
         self._compiler = compiler
 
         # Validate that no header/param/path_param value is None — catches missing env vars early
-        for k, v in self._headers.items():
-            if v is None:
-                raise ToolDefinitionError(
-                    detail=(
-                        f"APITool '{tool_name}': header '{k}' is None. "
-                        f"Check that the environment variable holding the API key is set."
+        for kind, values, holds in (
+            ("header", self._headers, "API key"),
+            ("param", self._params, "API key"),
+            ("path_param", self._path_params, "value"),
+        ):
+            for k, v in values.items():
+                if v is None:
+                    raise ToolDefinitionError(
+                        detail=(
+                            f"APITool '{tool_name}': {kind} '{k}' is None. "
+                            f"Check that the environment variable holding the {holds} is set."
+                        )
                     )
-                )
-        for k, v in self._params.items():
-            if v is None:
-                raise ToolDefinitionError(
-                    detail=(
-                        f"APITool '{tool_name}': param '{k}' is None. "
-                        f"Check that the environment variable holding the API key is set."
-                    )
-                )
-        for k, v in self._path_params.items():
-            if v is None:
-                raise ToolDefinitionError(
-                    detail=(
-                        f"APITool '{tool_name}': path_param '{k}' is None. "
-                        f"Check that the environment variable holding the value is set."
-                    )
-                )
 
     def call(self, func_name: str, **kwargs) -> str:
         """Execute an API call and return formatted result."""

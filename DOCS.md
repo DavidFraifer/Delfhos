@@ -1646,7 +1646,7 @@ rerun(
 )
 ```
 
-`rerun()` exits the current script immediately. No code after the call runs. The sandbox namespace — including any variables already assigned — is preserved and made available to the next generated script.
+`rerun()` exits the current script immediately. No code after the call runs. Any variables you already assigned — fetched data, partial results — are preserved and available to the next generated script, so work done before the `rerun()` is never thrown away or re-fetched. This works the same whether you run locally or in Docker.
 
 ### Basic pattern
 
@@ -2526,16 +2526,19 @@ When you call `agent.run("task")`, the following pipeline executes:
        the current script exits cleanly — no error, no failure.
        The orchestrator runs a focused code-generation pass using the runtime context
        the script reported and the remaining-work description it provided.
-       The same sandbox namespace is reused, so any variables already assigned
-       (fetched data, partial results) are available to the new script without re-fetching.
-       This repeats up to rerun_count times (default 2).
+       Variables already assigned (fetched data, partial results) are preserved and
+       available to the new script without re-fetching — the same whether you run
+       locally or in Docker. This repeats up to rerun_count times (default 2).
        See the rerun() guide for when to use this vs. normal Python control flow.
 
 8. Retry loop
    └── If execution raises an exception, the error is fed back to the LLM
        for a corrected code generation. This repeats up to retry_count times.
-       The retry loop runs independently after the rerun loop — if a rerun pass
-       produces code that then raises an error, auto-retry applies to it as well.
+       As with rerun, any work completed before the error is preserved — the
+       retry continues from where it failed instead of redoing finished steps
+       (so a sent email or written row is never repeated). The retry loop runs
+       independently after the rerun loop — if a rerun pass produces code that
+       then raises an error, auto-retry applies to it as well.
 
 9. Result composition and return
    └── The final output (stdout, return value, or error) is collected.

@@ -7,6 +7,9 @@ These wrappers handle connection resolution, error handling, and result formatti
 
 from typing import Any, Dict, List, Optional, Tuple, Union
 import json
+import csv
+import mimetypes
+from pathlib import Path
 from delfhos.errors import ToolExecutionError, ConnectionConfigurationError
 import re
 import time
@@ -142,71 +145,6 @@ async def _request_unified_approval(
     return True
 
 
-def clean_json_from_markdown(text: str) -> str:
-    """
-    Clean JSON from markdown code blocks.
-    
-    Handles cases like:
-    - ```json\n{...}\n```
-    - ```\n{...}\n```
-    - Multiple code blocks (takes the first valid JSON)
-    - Just the JSON content
-    
-    Returns cleaned JSON string ready for parsing.
-    """
-    if not text or not isinstance(text, str):
-        return text
-    
-    text = text.strip()
-    
-    # First, try to extract JSON from markdown code blocks
-    # Match: ```json\n{...}\n``` or ```\n{...}\n```
-    # Use non-greedy matching to get the first complete block
-    code_block_pattern = r'```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```'
-    code_block_matches = list(re.finditer(code_block_pattern, text, re.DOTALL))
-    
-    if code_block_matches:
-        # Try each match until we find valid JSON
-        for match in code_block_matches:
-            potential_json = match.group(1).strip()
-            if potential_json.startswith(('{', '[')):
-                # Try to parse it to validate it's valid JSON
-                try:
-                    json.loads(potential_json)
-                    return potential_json
-                except (json.JSONDecodeError, ValueError):
-                    continue
-    
-    # If no valid code blocks found, remove any remaining markdown markers
-    text = re.sub(r'```[a-z]*\s*', '', text, flags=re.MULTILINE)
-    text = re.sub(r'\s*```', '', text, flags=re.MULTILINE)
-    text = text.strip()
-    
-    # Try to find JSON object or array in the text
-    # Look for { ... } or [ ... ] - find the longest match that's valid JSON
-    json_patterns = [
-        r'(\{.*\})',  # JSON object (greedy)
-        r'(\[.*\])',  # JSON array (greedy)
-    ]
-    
-    for pattern in json_patterns:
-        matches = list(re.finditer(pattern, text, re.DOTALL))
-        # Try matches from longest to shortest
-        matches.sort(key=lambda m: len(m.group(1)), reverse=True)
-        for match in matches:
-            potential_json = match.group(1).strip()
-            if potential_json.startswith(('{', '[')):
-                # Try to parse it to validate
-                try:
-                    json.loads(potential_json)
-                    return potential_json
-                except (json.JSONDecodeError, ValueError):
-                    continue
-    
-    # If no JSON found, return cleaned text
-    return text
-
-
 def _truncate_preview_text(content: str, limit: int = 1000) -> str:
     preview = content[:limit]
     if len(content) > limit:
@@ -234,10 +172,9 @@ def _build_file_preview_metadata(content: Union[str, bytes], filename: str) -> D
 
         if filename.endswith('.csv') or (',' in content and '\n' in content):
             try:
-                import csv as csv_module
                 from io import StringIO
 
-                csv_reader = csv_module.reader(StringIO(content))
+                csv_reader = csv.reader(StringIO(content))
                 rows = list(csv_reader)
                 if rows:
                     preview_table_data = rows[:10]
@@ -308,8 +245,6 @@ class ToolLibraryBase:
             post_process_metadata: Optional callback(result) -> dict to generate metadata from result
                                   This allows libraries to analyze results and add widget metadata
         """
-        import time
-        
         # Use the actual tool name (e.g., "gmail", "sql") not the action name (e.g., "read", "query")
         tool_name = self.tool_name
         start_time = time.time()
@@ -385,6 +320,13 @@ class ToolLibraryBase:
                     return policy
                 return True  # confirm not configured → ask for everything
         return default
+
+    def _get_active_connection(self, label: str) -> str:
+        """Get the first active connection name for a tool (label matched case-insensitively)."""
+        for conn in self.tool_manager.connections.values():
+            if getattr(conn, "tool_name", "").lower() == label.lower() and conn.is_active():
+                return conn.connection_name
+        raise ConnectionConfigurationError(tool_name=label, detail=f"No active {label} connection found")
 
 
 class SQLLibrary(ToolLibraryBase):
@@ -647,11 +589,7 @@ class SQLLibrary(ToolLibraryBase):
 
     
     def _get_sql_connection(self) -> str:
-        """Get the first active SQL connection name."""
-        for conn in self.tool_manager.connections.values():
-            if getattr(conn, "tool_name", "").lower() == "sql" and conn.is_active():
-                return conn.connection_name
-        raise ConnectionConfigurationError(tool_name="SQL", detail="No active SQL connection found")
+        return self._get_active_connection("SQL")
 
 
 class SheetsLibrary(ToolLibraryBase):
@@ -897,11 +835,7 @@ class SheetsLibrary(ToolLibraryBase):
     
 
     def _get_sheets_connection(self) -> str:
-        """Get the first active Sheets connection name."""
-        for conn in self.tool_manager.connections.values():
-            if getattr(conn, "tool_name", "").lower() == "sheets" and conn.is_active():
-                return conn.connection_name
-        raise ConnectionConfigurationError(tool_name="Sheets", detail="No active Sheets connection found")
+        return self._get_active_connection("Sheets")
 
 
 class GmailLibrary(ToolLibraryBase):
@@ -1113,11 +1047,7 @@ class GmailLibrary(ToolLibraryBase):
         return file_paths
     
     def _get_gmail_connection(self) -> str:
-        """Get the first active Gmail connection name."""
-        for conn in self.tool_manager.connections.values():
-            if getattr(conn, "tool_name", "").lower() == "gmail" and conn.is_active():
-                return conn.connection_name
-        raise ConnectionConfigurationError(tool_name="Gmail", detail="No active Gmail connection found")
+        return self._get_active_connection("Gmail")
 
 
 class DriveLibrary(ToolLibraryBase):
@@ -1245,7 +1175,6 @@ class DriveLibrary(ToolLibraryBase):
                 desc="Uploading chart"
             )
         """
-        from pathlib import Path
         import base64
         conn_name = self._get_drive_connection()
         tool_name = self.tool_name
@@ -1269,7 +1198,6 @@ class DriveLibrary(ToolLibraryBase):
         # Auto-detect mime_type from file extension
         mime_type = ""
         if file_path:
-            import mimetypes
             mime_type = mimetypes.guess_type(file_path)[0] or ""
         
         description = desc or f"Uploading {name} to Drive"
@@ -1355,11 +1283,7 @@ class DriveLibrary(ToolLibraryBase):
             raise
     
     def _get_drive_connection(self) -> str:
-        """Get the first active Drive connection name."""
-        for conn in self.tool_manager.connections.values():
-            if getattr(conn, "tool_name", "").lower() == "drive" and conn.is_active():
-                return conn.connection_name
-        raise ConnectionConfigurationError(tool_name="Drive", detail="No active Drive connection found")
+        return self._get_active_connection("Drive")
 
 
 
@@ -1373,11 +1297,7 @@ class DocsLibrary(ToolLibraryBase):
         return "docs"
     
     def _get_docs_connection(self) -> str:
-        """Get the first active Docs connection name."""
-        for conn in self.tool_manager.connections.values():
-            if getattr(conn, "tool_name", "").lower() == "docs" and conn.is_active():
-                return conn.connection_name
-        raise ConnectionConfigurationError(tool_name="Docs", detail="No active Docs connection found")
+        return self._get_active_connection("Docs")
 
     def _parse_markdown_line(self, line: str, current_index: int) -> tuple[str, list[dict]]:
         """
@@ -1590,7 +1510,6 @@ class DocsLibrary(ToolLibraryBase):
         return ops
 
     async def create(self, title: str, content: str = "", desc: str = None) -> str:
-        import time
         conn_name = self._get_docs_connection()
         start_time = time.time()
         # Track usage
@@ -1816,11 +1735,7 @@ class CalendarLibrary(ToolLibraryBase):
         }, desc=desc or f"Creating event: {summary}")
     
     def _get_calendar_connection(self) -> str:
-        """Get the first active Calendar connection name."""
-        for conn in self.tool_manager.connections.values():
-            if getattr(conn, "tool_name", "").lower() == "calendar" and conn.is_active():
-                return conn.connection_name
-        raise ConnectionConfigurationError(tool_name="Calendar", detail="No active Calendar connection found")
+        return self._get_active_connection("Calendar")
 
 
 class WebSearchLibrary(ToolLibraryBase):
@@ -1878,7 +1793,6 @@ class WebSearchLibrary(ToolLibraryBase):
         Returns:
             str - Formatted search results per your query instructions
         """
-        import time
         from ..tools.websearch import web_search
         
         tool_name = "websearch"
@@ -1942,7 +1856,6 @@ class MemoryLibrary(ToolLibraryBase):
 
     async def save(self, content: str, desc: str = None) -> bool:
         """Save memory facts. Returns True when persisted, False when skipped/no-op."""
-        import time
 
         text = (content or "").strip()
         if not text:
@@ -2078,9 +1991,7 @@ class LLMLibrary(ToolLibraryBase):
         if file_data is None and 'data' in kwargs:
             mime = kwargs.get('mime_type', 'image/jpeg')
             file_data = [{"data": kwargs['data'], "mime_type": mime}]
-            
-        import time
-        
+
         # Determine which LLM model will be used BEFORE tracking start (Agent shouldn't choose)
         if file_data:
             llm_model = self.vision_llm
@@ -2223,7 +2134,6 @@ async def _execute_tracked_callable(
 ) -> Any:
     """Execute sync/async callables with consistent start/end tracking metadata."""
     import inspect
-    import time
 
     start_time = time.time()
     await tool_tracker.track_start(call_name, description, ui_metadata=ui_metadata)
@@ -2284,7 +2194,6 @@ def _wrap_for_tracking(tool_name: str, tool_obj: Any, tool_tracker: Any) -> Any:
                 ns_name = tool_name
 
                 async def _tracked(**kwargs):
-                    import time as _time
                     call_name = ns_name
                     description = f"Calling {ns_name}.{name}"
                     ui_metadata = {
@@ -2319,11 +2228,11 @@ def _wrap_for_tracking(tool_name: str, tool_obj: Any, tool_tracker: Any) -> Any:
                     )
                     # ────────────────────────────────────────────────────────
 
-                    start_time = _time.time()
+                    start_time = time.time()
                     await tool_tracker.track_start(call_name, description, ui_metadata=ui_metadata)
                     try:
                         result = await execute(**kwargs)
-                        duration = _time.time() - start_time
+                        duration = time.time() - start_time
                         result_str = str(result)
                         await tool_tracker.track_end(
                             call_name,
@@ -2336,7 +2245,7 @@ def _wrap_for_tracking(tool_name: str, tool_obj: Any, tool_tracker: Any) -> Any:
                             tool_tracker.orchestrator.track_tool_usage(tool_tracker.task_id, ns_name)
                         return result
                     except Exception as exc:
-                        duration = _time.time() - start_time
+                        duration = time.time() - start_time
                         await tool_tracker.track_end(
                             call_name,
                             duration,
@@ -2506,7 +2415,6 @@ class FilesLibrary(ToolLibraryBase):
             - Image: base64 string (if for_llm=False) or dict with data/mime_type (if for_llm=True)
         """
         from .files import load_task_files
-        from pathlib import Path as PathLib
         await _request_unified_approval(
             tool_tracker=self.tool_tracker,
             task_id=self.task_id,
@@ -2520,7 +2428,7 @@ class FilesLibrary(ToolLibraryBase):
         # If filename is a full path, extract just the filename
         if "/" in filename or "\\" in filename:
             # It's a path, extract the filename
-            path_obj = PathLib(filename)
+            path_obj = Path(filename)
             filename = path_obj.name
         
         file_handlers = await load_task_files(self.task_id)
@@ -2593,17 +2501,13 @@ class FilesLibrary(ToolLibraryBase):
             str: File path of the saved file (usable in gmail.send attachments)
         """
         from .files import save_output_file
-        from pathlib import Path as PathLib
-        import json
-        from delfhos.errors import ToolExecutionError, ConnectionConfigurationError
-        import csv
         import io
-        
+
         # Auto-convert data to appropriate format
         if isinstance(content, list) and len(content) > 0 and isinstance(content[0], dict):
             # List of dicts -> CSV
             if not filename.endswith('.csv'):
-                filename = f"{PathLib(filename).stem}.csv"
+                filename = f"{Path(filename).stem}.csv"
             
             output = io.StringIO()
             if content:
@@ -2614,12 +2518,12 @@ class FilesLibrary(ToolLibraryBase):
         elif isinstance(content, dict):
             # Dict -> JSON
             if not filename.endswith('.json'):
-                filename = f"{PathLib(filename).stem}.json"
+                filename = f"{Path(filename).stem}.json"
             content = json.dumps(content, indent=2, ensure_ascii=False)
         elif isinstance(content, (list, tuple)) and not isinstance(content, bytes):
             # List -> JSON
             if not filename.endswith('.json'):
-                filename = f"{PathLib(filename).stem}.json"
+                filename = f"{Path(filename).stem}.json"
             content = json.dumps(content, indent=2, ensure_ascii=False)
         # If content is already str or bytes, use it as-is
         

@@ -18,17 +18,97 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import ast
 import io
-import json
 import sys
+import textwrap
 import time
 import uuid
 from contextlib import redirect_stdout, redirect_stderr
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 # proxy_libraries is copied into the container alongside this file
 from proxy_libraries import RPCClient, build_proxy_libraries
+
+
+# ── Cell splitting (mirrors python_executor.split_into_cells) ──────────
+
+@dataclass
+class _Cell:
+    """One executable unit = one top-level statement of the generated script."""
+    source: str
+    has_await: bool
+    terminal: bool = False          # a top-level `return` → stop after this cell
+    status: str = "pending"         # pending | ok | failed
+
+
+_PARSE_WRAP = "async def __m__():\n"
+
+
+class _RerunSignal(Exception):
+    """Raised by rerun() in generated code to request a replanning pass.
+
+    Mirrors python_executor._RerunSignal so Docker and local behave the same.
+    """
+
+    def __init__(self, context: str, remaining: str, carry: list):
+        super().__init__("rerun requested")
+        self.context = context
+        self.remaining = remaining
+        self.carry = carry
+
+
+def _rerun(context: str = "", remaining: str = "", carry: list = None):
+    if not isinstance(remaining, str) or not remaining.strip():
+        raise ValueError(
+            "rerun() requires a non-empty 'remaining' argument describing the work still left to do."
+        )
+    raise _RerunSignal(
+        context=str(context),
+        remaining=remaining.strip(),
+        carry=list(carry) if carry else [],
+    )
+
+
+def _contains_await(node: ast.AST) -> bool:
+    return any(isinstance(n, ast.Await) for n in ast.walk(node))
+
+
+def _live_vars(namespace: dict, protected: dict) -> list:
+    """User-defined variable names currently in the namespace (for the host's
+    rerun/retry prompts) — everything not part of the protected baseline."""
+    return sorted(k for k in namespace if k not in protected and not k.startswith("_"))
+
+
+def _split_into_cells(code: str) -> List[_Cell]:
+    """Split a generated script into ordered cells (one per top-level statement).
+
+    Wraps solely to parse so top-level ``await``/``return`` are legal, then
+    recovers each statement's source. A top-level ``return X`` becomes
+    ``__cell_result__ = (X)`` and marks the cell terminal. Raises SyntaxError
+    for genuinely invalid code (handled by the caller).
+    """
+    src = code if code.endswith("\n") else code + "\n"
+    wrapped = _PARSE_WRAP + textwrap.indent(src, "    ")
+    func = ast.parse(wrapped).body[0]
+
+    cells: List[_Cell] = []
+    for node in func.body:
+        if isinstance(node, ast.Return):
+            value = (
+                textwrap.dedent(ast.get_source_segment(wrapped, node.value))
+                if node.value is not None else "None"
+            )
+            cells.append(_Cell(f"__cell_result__ = ({value})",
+                               _contains_await(node), terminal=True))
+        else:
+            segment = ast.get_source_segment(wrapped, node)
+            if segment is None:
+                continue
+            cells.append(_Cell(textwrap.dedent(segment), _contains_await(node)))
+    return cells or [_Cell(code, _contains_await(func))]
 
 
 # ── Safe builtins (mirrors python_executor.py) ────────────────────────
@@ -171,6 +251,7 @@ def _build_namespace(
     namespace["__name__"] = "__agent_execution__"
     namespace["__file__"] = "agent_script.py"
     namespace["add_to_output_files"] = _make_add_to_output_files(output_registry)
+    namespace["rerun"] = _rerun
 
     return namespace
 
@@ -180,57 +261,67 @@ def _build_namespace(
 async def execute_code(
     code: str,
     namespace: dict,
+    protected: dict,
     timeout: float = 300,
 ) -> Dict[str, Any]:
-    """Execute agent code in the restricted namespace and return results."""
+    """Execute agent code in the restricted namespace and return results.
+
+    ``protected`` is the baseline name→value snapshot (builtins, tool libraries,
+    special vars) captured once by main() before any user code ran; it is
+    restored after every cell so user code can't clobber it, and is used to tell
+    user variables apart from the baseline for ``live_vars``.
+    """
 
     stdout_buf = io.StringIO()
     stderr_buf = io.StringIO()
 
-    # Re-bind print to fresh buffer
+    # Re-bind print to this run's fresh buffer. The baseline `protected` snapshot
+    # holds the *previous* print, so override it here — otherwise the per-cell
+    # restore (`namespace.update(protected)`) would revert print mid-script and
+    # later cells' output would be lost. Mirrors the local executor's ordering.
     def _capture_print(*args, **kwargs):
         kwargs.pop("file", None)
         kwargs.setdefault("flush", True)
         print(*args, file=stdout_buf, **kwargs)
     namespace["print"] = _capture_print
+    protected = {**protected, "print": _capture_print}
 
     start = time.time()
+    failed_index: Optional[int] = None
+    cells: List[_Cell] = []
 
     try:
-        code_to_wrap = code.rstrip() + "\n"
+        cells = _split_into_cells(code)
 
         # Auto-call uncalled async entrypoints
-        if "async def main" in code_to_wrap and "await main(" not in code_to_wrap:
-            code_to_wrap += "\nawait main()\n"
-        elif "async def run" in code_to_wrap and "await run(" not in code_to_wrap:
-            code_to_wrap += "\nawait run()\n"
+        for entry in ("main", "run"):
+            if f"async def {entry}" in code and f"await {entry}(" not in code:
+                cells.append(_Cell(f"await {entry}()", True))
+                break
 
-        _baseline_keys = set(namespace.keys())
-
-        def __export_locals__(l):
-            namespace.update({
-                k: v for k, v in l.items()
-                if not k.startswith("_") and k not in _baseline_keys
-            })
-        namespace["__export_locals__"] = __export_locals__
-        code_to_wrap += "\n__export_locals__(locals())\n"
-
-        indent = "    "
-        indented = "\n".join(
-            indent + line if line.strip() else line
-            for line in code_to_wrap.split("\n")
-        )
-        wrapped = f"async def __agent_task__():\n{indented}"
-
-        compiled = compile(wrapped, "<string>", "exec")
+        async def _run_cells() -> Any:
+            nonlocal failed_index
+            namespace.pop("__cell_result__", None)
+            for i, cell in enumerate(cells):
+                try:
+                    compiled = compile(cell.source, f"<cell {i}>", "exec",
+                                       flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+                    coro = eval(compiled, namespace)   # coroutine iff top-level await
+                    if coro is not None:
+                        await coro
+                    cell.status = "ok"
+                except Exception:
+                    cell.status = "failed"
+                    failed_index = i
+                    raise
+                finally:
+                    namespace.update(protected)
+                if cell.terminal:
+                    break
+            return namespace.pop("__cell_result__", None)
 
         with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
-            exec(compiled, namespace)
-            async_func = namespace.get("__agent_task__")
-            if async_func:
-                result = await asyncio.wait_for(async_func(), timeout=timeout)
-            else:
-                raise RuntimeError("Failed to create async task function")
+            result = await asyncio.wait_for(_run_cells(), timeout=timeout)
 
         return {
             "success": True,
@@ -238,6 +329,7 @@ async def execute_code(
             "output": stdout_buf.getvalue(),
             "error": None,
             "execution_time": time.time() - start,
+            "live_vars": _live_vars(namespace, protected),
         }
 
     except asyncio.TimeoutError:
@@ -247,79 +339,104 @@ async def execute_code(
             "output": stdout_buf.getvalue(),
             "error": f"Execution timeout after {timeout}s",
             "execution_time": time.time() - start,
+            "live_vars": _live_vars(namespace, protected),
+        }
+    except _RerunSignal as rs:
+        return {
+            "success": True,
+            "rerun_requested": True,
+            "rerun_context": rs.context,
+            "rerun_remaining": rs.remaining,
+            "rerun_carry": rs.carry,
+            "result": None,
+            "output": stdout_buf.getvalue(),
+            "error": None,
+            "execution_time": time.time() - start,
+            "live_vars": _live_vars(namespace, protected),
         }
     except Exception as e:
-        import traceback
+        cell_fields: Dict[str, Any] = {}
+        if failed_index is not None:
+            cell_fields = {
+                "failed_cell_index": failed_index,
+                "cells_total": len(cells),
+                "pending_source": "\n".join(c.source for c in cells[failed_index:]),
+            }
         return {
             "success": False,
             "result": None,
             "output": stdout_buf.getvalue(),
             "error": f"{type(e).__name__}: {e}",
             "execution_time": time.time() - start,
+            "live_vars": _live_vars(namespace, protected),
+            **cell_fields,
         }
 
 
 # ── Main entrypoint ──────────────────────────────────────────────────
 
+def _install_packages(packages: list) -> Optional[str]:
+    """Pip-install user-requested packages into /packages. Returns an error string
+    on failure, or None on success."""
+    if not packages:
+        return None
+    import subprocess as _sp
+    install_dir = "/packages"
+    res = _sp.run(
+        [sys.executable, "-m", "pip", "install", "--target", install_dir,
+         "--quiet", "--no-cache-dir"] + packages,
+        capture_output=True, text=True,
+    )
+    if res.returncode != 0:
+        return f"Failed to install packages {packages}:\n{res.stderr}"
+    if install_dir not in sys.path:
+        sys.path.insert(0, install_dir)
+    return None
+
+
 async def main(endpoint: str) -> None:
-    """Connect to host, receive code, execute, report result."""
+    """Connect to host, then loop: receive an execute message, run it against the
+    PERSISTENT namespace, report the result. Repeats until the host sends a
+    ``close`` message (or the connection drops), so variables assigned in one
+    execution survive into the next (rerun/retry) — parity with the local executor.
+    """
     rpc = RPCClient(endpoint)
     await rpc.connect()
 
+    namespace: Optional[dict] = None
+    protected: dict = {}
+    output_registry: dict = {}
+
     try:
-        # Read the execute message from the host
-        line = await rpc._reader.readline()
-        if not line:
-            return
-        msg = json.loads(line.decode("utf-8").strip())
-
-        if msg.get("type") != "execute":
-            await rpc.send_done(
-                success=False,
-                error=f"Expected 'execute' message, got '{msg.get('type')}'",
-            )
-            return
-
-        code = msg["code"]
-        manifest = msg["manifest"]
-        timeout = manifest.get("timeout", 300)
-
-        # Install user-requested packages before executing agent code.
-        packages_to_install = manifest.get("packages_to_install", [])
-        if packages_to_install:
-            import subprocess as _sp
-            _install_dir = "/packages"
-            _result = _sp.run(
-                [sys.executable, "-m", "pip", "install", "--target", _install_dir,
-                 "--quiet", "--no-cache-dir"] + packages_to_install,
-                capture_output=True, text=True,
-            )
-            if _result.returncode != 0:
+        while True:
+            msg = await rpc.next_execute()
+            if msg is None or msg.get("type") == "close":
+                break
+            if msg.get("type") != "execute":
                 await rpc.send_done(
                     success=False,
-                    error=f"Failed to install packages {packages_to_install}:\n{_result.stderr}",
+                    error=f"Expected 'execute' message, got '{msg.get('type')}'",
                 )
-                return
-            if _install_dir not in sys.path:
-                sys.path.insert(0, _install_dir)
+                continue
 
-        # Build proxy libraries
-        libraries = build_proxy_libraries(
-            manifest.get("available_tools", []),
-            rpc,
-        )
+            code = msg["code"]
+            manifest = msg["manifest"]
+            timeout = manifest.get("timeout", 300)
 
-        # Registry: name -> filename (populated by add_to_output_files)
-        output_registry: dict = {}
+            # First execution: install packages, build libraries + namespace once,
+            # then snapshot the protected baseline. Reused for every later pass.
+            if namespace is None:
+                err = _install_packages(manifest.get("packages_to_install", []))
+                if err:
+                    await rpc.send_done(success=False, error=err)
+                    continue
+                libraries = build_proxy_libraries(manifest.get("available_tools", []), rpc)
+                namespace = _build_namespace(libraries, manifest, rpc, output_registry)
+                protected = {k: namespace[k] for k in set(namespace.keys())}
 
-        # Build namespace
-        namespace = _build_namespace(libraries, manifest, rpc, output_registry)
-
-        # Execute
-        result = await execute_code(code, namespace, timeout=timeout)
-
-        # Send result back, including any output files
-        await rpc.send_done(**result, output_files=output_registry)
+            output_registry.clear()   # report only this execution's output files
+            result = await execute_code(code, namespace, protected, timeout=timeout)
+            await rpc.send_done(**result, output_files=dict(output_registry))
 
     except Exception as e:
         try:

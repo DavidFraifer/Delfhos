@@ -55,6 +55,10 @@ class RPCServer:
         # Set by DockerSandbox before the container connects — the server
         # sends this as the first message when a client connects.
         self._pending_execute: Optional[dict] = None
+        # The live container connection's writer, captured on connect, so the
+        # host can send further execute messages over the same socket (the
+        # container is kept alive across a task's rerun/retry passes).
+        self._writer: Optional[asyncio.StreamWriter] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -78,6 +82,27 @@ class RPCServer:
             raise RuntimeError("Server not started")
         return await self._result_future
 
+    def reset_result(self) -> None:
+        """Arm a fresh result future before sending the next execute message."""
+        self._result_future = asyncio.get_running_loop().create_future()
+
+    async def send_execute(self, msg: dict) -> None:
+        """Send a follow-up execute message to the already-connected container."""
+        if self._writer is None:
+            raise RuntimeError("No container connection to send execute to")
+        self._writer.write(proto.encode_message(msg))
+        await self._writer.drain()
+
+    async def send_close(self) -> None:
+        """Ask the container to exit its run loop (best-effort)."""
+        if self._writer is None:
+            return
+        try:
+            self._writer.write(proto.encode_message({"type": "close"}))
+            await self._writer.drain()
+        except Exception:
+            pass
+
     async def stop(self) -> None:
         """Shut down the server."""
         if self._server is not None:
@@ -94,10 +119,11 @@ class RPCServer:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
-        """Handle a single container connection (one per execution)."""
+        """Handle the container connection (kept alive across rerun/retry passes)."""
         logger.debug("Container connected")
+        self._writer = writer
         try:
-            # Send the pending execute message if one is queued
+            # Send the pending (first) execute message if one is queued
             if self._pending_execute is not None:
                 writer.write(proto.encode_message(self._pending_execute))
                 await writer.drain()
@@ -123,14 +149,23 @@ class RPCServer:
                         self._on_print(msg.get("text", ""))
                 elif msg_type == "execution_done":
                     if self._result_future and not self._result_future.done():
-                        self._result_future.set_result({
+                        done = {
                             "success": msg.get("success", False),
                             "result": msg.get("result"),
                             "output": msg.get("output", ""),
                             "error": msg.get("error"),
                             "execution_time": msg.get("execution_time", 0.0),
                             "output_files": msg.get("output_files", {}),
-                        })
+                        }
+                        # Cell-checkpoint fields (present only on mid-script failure)
+                        # and rerun fields (present only when code called rerun()),
+                        # so the host retry/rerun paths match the non-sandbox executor.
+                        for k in ("failed_cell_index", "cells_total", "pending_source",
+                                  "rerun_requested", "rerun_context", "rerun_remaining",
+                                  "rerun_carry", "live_vars"):
+                            if msg.get(k) is not None:
+                                done[k] = msg[k]
+                        self._result_future.set_result(done)
                 else:
                     logger.warning("Unknown message type from container: %s", msg_type)
 

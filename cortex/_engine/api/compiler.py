@@ -23,16 +23,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from delfhos.errors import ConnectionConfigurationError
 
 
-# JSON Schema type → LLM-friendly type annotation
-_TYPE_MAP = {
-    "string": "string",
-    "integer": "integer",
-    "number": "number",
-    "boolean": "boolean",
-    "array": "array",
-    "object": "object",
-}
-
 CACHE_DIR = Path.home() / "delfhos" / "api_cache"
 
 MAX_ENDPOINTS = None  # No cap — all endpoints in the spec are compiled.
@@ -979,7 +969,7 @@ class OpenAPICompiler:
             vals = schema["enum"][:6]
             return "string(" + "|".join(str(v) for v in vals) + ")"
 
-        return _TYPE_MAP.get(schema_type, schema_type)
+        return schema_type
 
     # ── Doc builders ─────────────────────────────────────────────────────────
 

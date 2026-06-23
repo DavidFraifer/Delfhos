@@ -34,12 +34,22 @@ class RPCClient:
         self._writer: Optional[asyncio.StreamWriter] = None
         self._pending: Dict[str, asyncio.Future] = {}
         self._listen_task: Optional[asyncio.Task] = None
+        self._execute_queue: Optional[asyncio.Queue] = None
 
     async def connect(self) -> None:
         self._reader, self._writer = await asyncio.open_connection(
             self._host, self._port
         )
+        self._execute_queue = asyncio.Queue()
         self._listen_task = asyncio.create_task(self._listen_loop())
+
+    async def next_execute(self) -> Optional[dict]:
+        """Block until the host sends the next execute message.
+
+        Returns the execute message dict, or None when the host asks the
+        container to shut down (``close`` message or connection closed).
+        """
+        return await self._execute_queue.get()
 
     async def close(self) -> None:
         if self._listen_task:
@@ -90,8 +100,14 @@ class RPCClient:
         error: Optional[str] = None,
         execution_time: float = 0.0,
         output_files: Optional[dict] = None,
+        **cell_info: Any,
     ) -> None:
-        """Signal execution completion to the host."""
+        """Signal execution completion to the host.
+
+        ``cell_info`` carries the optional cell-checkpoint fields
+        (failed_cell_index / cells_total / pending_source) when execution failed
+        mid-script, so the host retry path matches the non-sandbox executor.
+        """
         msg = {
             "type": "execution_done",
             "success": success,
@@ -100,6 +116,7 @@ class RPCClient:
             "error": error,
             "execution_time": execution_time,
             "output_files": output_files or {},
+            **{k: v for k, v in cell_info.items() if v is not None},
         }
         # Best-effort serialisation of result
         try:
@@ -129,6 +146,16 @@ class RPCClient:
                 future = self._pending.pop(call_id, None)
                 if future and not future.done():
                     future.set_result(msg)
+            elif msg_type == "execute":
+                # Host queued code to run — routed here (single reader) instead of
+                # a competing readline() in main(), so multiple execute cycles work.
+                if self._execute_queue is not None:
+                    self._execute_queue.put_nowait(msg)
+            elif msg_type == "close":
+                # Host asked the container to shut down its run loop.
+                if self._execute_queue is not None:
+                    self._execute_queue.put_nowait(None)
+                break
             elif msg_type == "cancel":
                 # Host asked us to stop — raise in all pending calls
                 for fut in self._pending.values():
@@ -136,6 +163,10 @@ class RPCClient:
                         fut.set_exception(asyncio.CancelledError())
                 self._pending.clear()
                 break
+
+        # Connection closed without an explicit close — unblock main()'s loop.
+        if self._execute_queue is not None:
+            self._execute_queue.put_nowait(None)
 
 
 class ProxyToolLibrary:

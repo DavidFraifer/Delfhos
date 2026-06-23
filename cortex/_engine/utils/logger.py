@@ -162,12 +162,12 @@ class CORTEXLogger:
             
             if not lines:
                 return self._empty_stats()
-            
-                stats = {"total_tasks": 0, "total_duration": 0, "total_tokens": 0, "total_input_tokens": 0,
-                    "total_output_tokens": 0, "total_llm_calls": 0, "total_iterations": 0, 
-                    "completed_tasks": 0, "total_cost_usd": None}
-            
-            for line in lines:  
+
+            stats = {"total_tasks": 0, "total_duration": 0, "total_tokens": 0, "total_input_tokens": 0,
+                "total_output_tokens": 0, "total_llm_calls": 0, "total_iterations": 0,
+                "completed_tasks": 0, "total_cost_usd": None}
+
+            for line in lines:
                 try:
                     entry = json.loads(line)
                     stats["total_tasks"] += 1

@@ -165,77 +165,93 @@ class DockerSandbox(BaseSandbox):
         self._rpc_server: Optional[RPCServer] = None
         self._container_id: Optional[str] = None
         self._stdout_lines: list[str] = []
+        self._last_live_vars: list[str] = []
 
     # ------------------------------------------------------------------
     # BaseSandbox interface
     # ------------------------------------------------------------------
 
     async def execute(self, code: str) -> Dict[str, Any]:
-        # 1. Ensure image exists
+        # 1. Ensure image + host-side tool libraries exist
         build_image()
-
-        # 2. Create host-side tool libraries (once)
         if self._libraries is None:
             self._libraries = self._create_libraries()
 
-        # 3. Start RPC server (TCP loopback)
-        self._rpc_server = RPCServer(
-            tool_libraries=self._libraries,
-            on_print=lambda text: self._stdout_lines.append(text),
-        )
-        port = await self._rpc_server.start()
-
-        try:
-            # 4. Create and start container
+        # 2. Start the RPC server + container on first use; reuse on later passes
+        # so the container's namespace persists across this task's rerun/retry
+        # (parity with the in-process local executor). Teardown happens in cleanup().
+        if self._container_id is None:
+            self._rpc_server = RPCServer(
+                tool_libraries=self._libraries,
+                on_print=lambda text: self._stdout_lines.append(text),
+            )
+            port = await self._rpc_server.start()
+            self._rpc_server._pending_execute = self._build_execute_msg(code)
             self._container_id = self._create_container(port)
             self._start_container()
+        else:
+            self._rpc_server.reset_result()
+            await self._rpc_server.send_execute(self._build_execute_msg(code))
 
-            # 5. Queue execute message — sent when container connects
-            self._queue_execute_message(code)
+        self._stdout_lines.clear()   # report only this pass's streamed output
 
-            # 6. Wait for result, but fail fast if the container exits first.
-            # Without this, a container that crashes during startup would
-            # leave us waiting the full timeout for an RPC reply that will
-            # never arrive.
-            timeout = self._config["timeout"] + 10  # grace period
-            try:
-                result = await self._wait_for_result_or_exit(timeout)
-            except asyncio.TimeoutError:
-                result = {
-                    "success": False,
-                    "result": None,
-                    "output": "\n".join(self._stdout_lines),
-                    "error": f"Container execution timeout after {self._config['timeout']}s",
-                    "execution_time": self._config["timeout"],
-                }
+        # 3. Wait for result, but fail fast if the container exits first.
+        timeout = self._config["timeout"] + 10  # grace period
+        try:
+            result = await self._wait_for_result_or_exit(timeout)
+        except asyncio.TimeoutError:
+            result = {
+                "success": False,
+                "result": None,
+                "output": "\n".join(self._stdout_lines),
+                "error": f"Container execution timeout after {self._config['timeout']}s",
+                "execution_time": self._config["timeout"],
+            }
 
-            # Merge any streamed print output
-            if self._stdout_lines:
-                existing_output = result.get("output", "")
-                streamed = "\n".join(self._stdout_lines)
-                if streamed and streamed not in existing_output:
-                    result["output"] = streamed + ("\n" + existing_output if existing_output else "")
+        # Surface the container's live variables for the host's rerun/retry prompts.
+        self._last_live_vars = result.get("live_vars", []) or []
 
-            # Remap container output_files {name: filename} → {name: host_abs_path}
-            container_files = result.pop("output_files", {}) or {}
-            output_dir = getattr(self, "_output_dir", None)
-            host_files = {}
-            if output_dir and container_files:
-                for name, filename in container_files.items():
-                    host_path = os.path.join(output_dir, filename)
-                    if os.path.isfile(host_path):
-                        host_files[name] = host_path
-            result["output_files"] = host_files
+        # Merge any streamed print output
+        if self._stdout_lines:
+            existing_output = result.get("output", "")
+            streamed = "\n".join(self._stdout_lines)
+            if streamed and streamed not in existing_output:
+                result["output"] = streamed + ("\n" + existing_output if existing_output else "")
 
-            return result
+        # Remap container output_files {name: filename} → {name: host_abs_path}
+        container_files = result.pop("output_files", {}) or {}
+        output_dir = getattr(self, "_output_dir", None)
+        host_files = {}
+        if output_dir and container_files:
+            for name, filename in container_files.items():
+                host_path = os.path.join(output_dir, filename)
+                if os.path.isfile(host_path):
+                    host_files[name] = host_path
+        result["output_files"] = host_files
 
-        finally:
-            # 7. Cleanup
-            await self._cleanup_container()
-            self._stdout_lines.clear()
+        return result
 
     async def cleanup(self) -> None:
+        # Ask the container to exit its run loop, then tear everything down. Called
+        # by the orchestrator once the task (including all rerun/retry passes) ends.
+        if self._rpc_server is not None:
+            await self._rpc_server.send_close()
         await self._cleanup_container()
+        self._stdout_lines.clear()
+        if self._rpc_server is not None:
+            await self._rpc_server.stop()
+            self._rpc_server = None
+        self._container_id = None
+
+    # Expose the container's live user variables to the host's rerun/retry prompts
+    # the same way the local executor exposes its namespace (see _build_*_prompt).
+    @property
+    def namespace(self) -> dict:
+        return {name: None for name in getattr(self, "_last_live_vars", [])}
+
+    @property
+    def _baseline_keys(self) -> set:
+        return set()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -330,12 +346,11 @@ class DockerSandbox(BaseSandbox):
             raise RuntimeError(f"Failed to start container: {result.stderr}")
         logger.debug("Started container %s", self._container_id[:12])
 
-    def _queue_execute_message(self, code: str) -> None:
-        """
-        Queue the execute message on the RPC server.
+    def _build_execute_msg(self, code: str) -> dict:
+        """Build the ``execute`` RPC message (code + manifest) for a run.
 
-        When the container connects, the server sends this as the first
-        message so the runner knows what code to execute.
+        Used both for the first execution (queued as the container's first
+        message) and for follow-up rerun/retry passes (sent over the live socket).
         """
         available_tools = list(self._libraries.keys()) if self._libraries else []
         base_imports = [
@@ -356,7 +371,7 @@ class DockerSandbox(BaseSandbox):
             "packages_to_install": self._allowed_libs,
             "timeout": self._config["timeout"],
         }
-        self._rpc_server._pending_execute = proto.msg_execute(code, manifest)
+        return proto.msg_execute(code, manifest)
 
     async def _wait_for_result_or_exit(self, timeout: float) -> Dict[str, Any]:
         """Await the RPC result, but bail out if the container exits first.

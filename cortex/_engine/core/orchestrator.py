@@ -48,18 +48,6 @@ from .orchestrator_streaming import OrchestratorStreamingMixin
 from ..trace import RerunTrace
 
 
-def _has_confirm_policy(confirm_policy: Any) -> bool:
-    if confirm_policy is None:
-        return True
-    if isinstance(confirm_policy, bool):
-        return confirm_policy
-    if isinstance(confirm_policy, list):
-        return len(confirm_policy) > 0
-    if isinstance(confirm_policy, str):
-        return confirm_policy.strip().lower() not in ("none", "false", "")
-    return False
-
-
 class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, OrchestratorCodegenMixin, OrchestratorStreamingMixin):
     """
     Orchestrates agent task execution using Python code generation.
@@ -473,6 +461,19 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
             vision_model=self.vision_llm,
         )
 
+        try:
+            return await self._run_in_executor(task_id, payload, python_code, executor)
+        finally:
+            # Release the sandbox. In Docker mode the container is kept alive across
+            # this task's rerun/retry passes (so state persists) and torn down here.
+            try:
+                await executor.cleanup()
+            except Exception:
+                pass
+
+    async def _run_in_executor(
+        self, task_id: str, payload, python_code: str, executor
+    ) -> dict:
         if self.current_trace:
             self.current_trace.add_event("exec_start", "sandbox ready")
 
@@ -723,6 +724,17 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
             else "\n\nNO variables were preserved from the previous run — start fresh."
         )
 
+        # Cell-level checkpoint: statements before the failure already ran (and
+        # their side effects happened). Only the remaining code needs regenerating.
+        pending_source = (result.get("pending_source") or "").strip()
+        resume_section = (
+            "\n\nONLY THIS CODE REMAINS (everything before it already executed successfully — "
+            "its side effects, e.g. sent emails or written rows, must NOT be repeated):\n"
+            f"```python\n{pending_source}\n```"
+            if pending_source
+            else ""
+        )
+
         if disallowed:
             instructions = (
                 "INSTRUCTIONS: The previous attempt called at least one DISALLOWED action and was blocked. "
@@ -743,7 +755,7 @@ class Orchestrator(OrchestratorTimingMixin, OrchestratorSchedulerMixin, Orchestr
             f'TASK: "{payload}"\n\n'
             f"PREVIOUS CODE THAT FAILED:\n```python\n{python_code}\n```\n\n"
             f"ERROR:\n{error_msg}"
-            f"{completed_section}{output_section}{state_section}\n\n"
+            f"{completed_section}{output_section}{state_section}{resume_section}\n\n"
             f"{instructions}"
         )
 
