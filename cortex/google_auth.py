@@ -48,6 +48,7 @@ SCOPE_MAP: Dict[str, Dict[str, List[str]]] = {
     },
     "drive": {
         "search": ["https://www.googleapis.com/auth/drive.readonly"],
+        "list":   ["https://www.googleapis.com/auth/drive.readonly"],
         "get":    ["https://www.googleapis.com/auth/drive.readonly"],
         "create": ["https://www.googleapis.com/auth/drive"],
         "update": ["https://www.googleapis.com/auth/drive"],

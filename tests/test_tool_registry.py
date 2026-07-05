@@ -7,7 +7,6 @@ import pytest
 from unittest.mock import MagicMock
 
 from cortex._engine.tools.tool_registry import (
-    get_tool_capability,
     map_frontend_action_to_registry_action,
     _parse_prefilter_part,
     _append_connection_mapping,
@@ -27,39 +26,17 @@ def _make_conn(connection_name: str, tool_name: str, allow=None, description: st
     return c
 
 
-# ── get_tool_capability ────────────────────────────────────────────────────────
-
-class TestGetToolCapability:
-    def test_known_tool_returned(self):
-        cap = get_tool_capability("gmail")
-        assert cap is not None
-        assert cap.tool_name == "gmail"
-
-    def test_case_insensitive_lookup(self):
-        assert get_tool_capability("GMAIL") is not None
-        assert get_tool_capability("Gmail") is not None
-
-    def test_unknown_tool_returns_none(self):
-        assert get_tool_capability("nonexistent_tool_xyz") is None
-
-    def test_sheets_tool_known(self):
-        assert get_tool_capability("sheets") is not None
-
-    def test_sql_tool_known(self):
-        assert get_tool_capability("sql") is not None
-
-
 # ── map_frontend_action_to_registry_action ────────────────────────────────────
 
 class TestMapFrontendAction:
     def test_gmail_read(self):
-        assert map_frontend_action_to_registry_action("gmail", "read") == "READ"
+        assert map_frontend_action_to_registry_action("gmail", "read") == "LIST"
 
     def test_gmail_send(self):
         assert map_frontend_action_to_registry_action("gmail", "send emails") == "SEND"
 
     def test_sheets_write(self):
-        assert map_frontend_action_to_registry_action("sheets", "write") == "WRITE"
+        assert map_frontend_action_to_registry_action("sheets", "write") == "UPDATE"
 
     def test_sheets_create(self):
         assert map_frontend_action_to_registry_action("sheets", "create") == "CREATE"
@@ -69,7 +46,7 @@ class TestMapFrontendAction:
         assert result == "UPDATE"
 
     def test_tool_name_case_insensitive(self):
-        assert map_frontend_action_to_registry_action("GMAIL", "read") == "READ"
+        assert map_frontend_action_to_registry_action("GMAIL", "read") == "LIST"
 
     def test_unknown_action_returns_none(self):
         assert map_frontend_action_to_registry_action("gmail", "teleport") is None
@@ -188,14 +165,14 @@ class TestGetAvailableActionsForConnections:
     def test_no_restrictions_adds_all_tool_actions(self):
         conn = _make_conn("Work Gmail", "gmail", allow=None)
         result = get_available_actions_for_connections([conn])
-        assert "READ" in result.get("gmail", set())
+        assert "LIST" in result.get("gmail", set())
         assert "SEND" in result.get("gmail", set())
 
     def test_allow_restriction_limits_actions(self):
         conn = _make_conn("ReadOnly Gmail", "gmail", allow=["read"])
         result = get_available_actions_for_connections([conn])
         gmail_actions = result.get("gmail", set())
-        assert "READ" in gmail_actions
+        assert "LIST" in gmail_actions
         assert "SEND" not in gmail_actions
 
     def test_builtins_always_included(self):

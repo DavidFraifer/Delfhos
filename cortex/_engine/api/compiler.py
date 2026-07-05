@@ -2,8 +2,8 @@
 OpenAPI Schema Compiler
 
 Transforms OpenAPI 3.x specifications into native Delfhos format:
-  - ToolCapability + ToolActionSpec for the prefilter registry
-  - COMPRESSED_API_DOCS for code generation prompts
+  - TOOL_DOCS entries for code generation prompts (prefilter summaries are
+    auto-derived from these)
   - Python function signatures from JSON Schema parameters
 
 Cache system: compiled manifests are saved to ~/delfhos/api_cache/{hash}/
@@ -319,41 +319,8 @@ class OpenAPICompiler:
             _log_compile("API CACHE", f"{self.tool_name}: corrupted cache, recompiling")
             return None
 
-    def get_capability(self, tools: Optional[List[Dict[str, Any]]] = None):
-        """Build a ToolCapability from the compiled manifest.
-
-        Returns:
-            (ToolCapability, action_summaries_dict)
-        """
-        from cortex._engine.tools.tool_registry import ToolCapability, ToolActionSpec
-
-        if not self.manifest:
-            raise ConnectionConfigurationError(
-                tool_name="api",
-                detail="No compiled manifest. Call compile() or load_cache() first.",
-            )
-
-        actions = []
-        summaries = {}
-
-        source_tools = self.manifest["tools"] if tools is None else tools
-        for tool in source_tools:
-            action_name = tool["action_name"]
-            actions.append(ToolActionSpec(
-                action=action_name,
-                description=tool["description"],
-                parameters=tool["parameters"],
-            ))
-            summaries[action_name] = tool["summary"]
-
-        capability = ToolCapability(
-            tool_name=self.tool_name,
-            actions=actions,
-        )
-        return capability, summaries
-
     def get_api_docs(self, tools: Optional[List[Dict[str, Any]]] = None) -> Dict[str, str]:
-        """Build COMPRESSED_API_DOCS entries from the compiled manifest.
+        """Build TOOL_DOCS entries from the compiled manifest.
 
         Returns:
             Dict of "tool:action" → compressed API doc string

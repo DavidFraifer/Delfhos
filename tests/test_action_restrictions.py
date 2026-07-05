@@ -4,7 +4,7 @@ sys.path.insert(0, ".")
 
 from delfhos import Calendar, Docs, Drive, Gmail, SQL, Sheets, WebSearch
 from delfhos.sandbox import MockDatabase, MockEmail
-from cortex._engine.tools.tool_registry import map_frontend_action_to_registry_action, TOOL_ACTION_SUMMARIES
+from cortex._engine.tools.tool_registry import map_frontend_action_to_registry_action, COMPRESSED_TOOL_DOCS
 
 
 def test_native_methods_are_discoverable_via_inspect_only():
@@ -33,7 +33,7 @@ def test_sandbox_mock_tools_are_discoverable_via_class_inspect():
 
 def test_dynamic_action_mapping_for_dynamic_tools():
     # Simulate dynamically-registered actions in the summaries table (e.g., APITool).
-    TOOL_ACTION_SUMMARIES["petstore"] = {
+    COMPRESSED_TOOL_DOCS["petstore"] = {
         "LIST_PETS": "List pets",
         "CREATE_PET": "Create pet",
     }
@@ -57,4 +57,5 @@ def test_native_inspect_structure_and_printing():
     assert detailed["allowed"] == "all"
     assert isinstance(detailed["methods"], list)
     assert detailed["methods"][0]["name"] == "search"
-    assert "Search the web" in detailed["methods"][0]["description"]
+    # Descriptions are now auto-derived signatures from the single TOOL_DOCS source.
+    assert "websearch.search(" in detailed["methods"][0]["description"]

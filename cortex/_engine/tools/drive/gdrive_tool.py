@@ -5,9 +5,38 @@ from typing import Optional
 from delfhos.errors import ToolExecutionError
 import sys
 import os
+import mimetypes
 
 from ...utils.console import console
 from .gdrive_client import GoogleDriveClient, GoogleDriveError
+
+
+def _resolve_mime_type(mime_type: Optional[str], mime_type_map: Dict[str, str]) -> Optional[str]:
+    """Resolve a user/LLM-supplied mime_type to a real Drive MIME type, inferring
+    from a filename/extension when possible.
+
+    - Known alias ("csv", "spreadsheet", ...) → its full MIME type.
+    - Already a full MIME type (contains "/") → passed through unchanged.
+    - A filename or extension ("prueba.csv", ".pdf", "xlsx") → inferred via
+      ``mimetypes`` (e.g. "text/csv").
+    - Still unclear → None, so we search by name only. Building a bogus
+      `mimeType='xyz'` filter would silently match nothing — the exact bug that
+      made a freshly created file un-findable. Better name-only than over-filter.
+    """
+    if not mime_type:
+        return None
+    token = mime_type.strip()
+    if not token:
+        return None
+    low = token.lower()
+    if low in mime_type_map:
+        return mime_type_map[low]
+    if "/" in token:
+        return token
+    # Infer from a filename/extension: "report.pdf", ".csv", or bare "csv".
+    fname = low if ("." in low and not low.startswith(".")) else f"x.{low.lstrip('.')}"
+    guessed, _ = mimetypes.guess_type(fname)
+    return guessed  # None when unclear → name-only search
 
 # Try to import API manager for automatic API enabling
 # Add parent directories to path to find api module
@@ -80,8 +109,17 @@ async def gdrive_tool(
     mime_type_map = {
         "spreadsheet": "application/vnd.google-apps.spreadsheet",
         "document": "application/vnd.google-apps.document",
+        "doc": "application/vnd.google-apps.document",
         "presentation": "application/vnd.google-apps.presentation",
+        "slides": "application/vnd.google-apps.presentation",
         "folder": "application/vnd.google-apps.folder",
+        "pdf": "application/pdf",
+        "csv": "text/csv",
+        "json": "application/json",
+        "txt": "text/plain",
+        "text": "text/plain",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "excel": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     }
 
     if action == "SEARCH":
@@ -93,8 +131,7 @@ async def gdrive_tool(
         page_size = params.get("pageSize") or params.get("page_size", 100)
 
         # Convert MIME type alias if provided
-        if mime_type and mime_type in mime_type_map:
-            mime_type = mime_type_map[mime_type]
+        mime_type = _resolve_mime_type(mime_type, mime_type_map)
 
         result = client.search_files(
             query=query,
@@ -117,15 +154,10 @@ async def gdrive_tool(
         file_id = params.get("fileId") or params.get("file_id")
         if not file_id:
             raise ToolExecutionError(tool_name="drive", detail="drive GET requires params.fileId.")
-        
-        result = client.get_file(file_id)
-        summary = f"Retrieved file: {result.get('name', 'Unknown')}"
 
-        return {
-            "message": summary,
-            "file": result,
-            "fileId": file_id,
-        }
+        # Return the file's CONTENT (bytes), not just metadata — drive.get()
+        # promises downloadable content the caller can decode/parse.
+        return client.download_file(file_id)
 
     if action == "CREATE":
         name = params.get("name")
@@ -137,9 +169,8 @@ async def gdrive_tool(
         content = params.get("content")  # bytes or base64 string
         
         # Convert MIME type alias if provided
-        if mime_type and mime_type in mime_type_map:
-            mime_type = mime_type_map[mime_type]
-        
+        mime_type = _resolve_mime_type(mime_type, mime_type_map)
+
         # Determine actual file content
         file_path = params.get("file_path")
         file_content = None
@@ -152,7 +183,7 @@ async def gdrive_tool(
         elif file_path and os.path.exists(file_path):
             with open(file_path, "rb") as f:
                 file_content = f.read()
-        
+
         result = client.create_file(
             name=name,
             mime_type=mime_type,
@@ -178,9 +209,8 @@ async def gdrive_tool(
         mime_type = params.get("mimeType") or params.get("mime_type")
         
         # Convert MIME type alias if provided
-        if mime_type and mime_type in mime_type_map:
-            mime_type = mime_type_map[mime_type]
-        
+        mime_type = _resolve_mime_type(mime_type, mime_type_map)
+
         # Determine actual file content
         file_path = params.get("file_path")
         file_content = None
@@ -193,7 +223,7 @@ async def gdrive_tool(
         elif file_path and os.path.exists(file_path):
             with open(file_path, "rb") as f:
                 file_content = f.read()
-        
+
         result = client.update_file(
             file_id=file_id,
             name=name,

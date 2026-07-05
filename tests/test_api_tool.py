@@ -233,26 +233,6 @@ class TestOpenAPICompiler:
         delete_op = next(t for t in manifest["tools"] if t["method"] == "DELETE")
         assert delete_op["func_name"] == "delete_pets_by_pet_id"
 
-    def test_get_capability(self):
-        compiler = OpenAPICompiler("petstore", "inline")
-        compiler.compile(spec=PETSTORE_SPEC)
-        capability, summaries = compiler.get_capability()
-
-        assert capability.tool_name == "petstore"
-        assert len(capability.actions) == 4
-        assert "LIST_PETS" in summaries
-
-    def test_get_capability_with_filtered_tools(self):
-        compiler = OpenAPICompiler("petstore", "inline")
-        manifest = compiler.compile(spec=PETSTORE_SPEC)
-        filtered = [t for t in manifest["tools"] if t["func_name"] == "list_pets"]
-        capability, summaries = compiler.get_capability(tools=filtered)
-
-        assert capability.tool_name == "petstore"
-        assert len(capability.actions) == 1
-        assert "LIST_PETS" in summaries
-        assert "CREATE_PET" not in summaries
-
     def test_get_api_docs(self):
         compiler = OpenAPICompiler("petstore", "inline")
         compiler.compile(spec=PETSTORE_SPEC)

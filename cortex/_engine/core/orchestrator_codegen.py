@@ -473,8 +473,8 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
             "\n"
             "Rules for DONE:\n"
             "  - List only the action identifier — NO parentheses, NO parameters, NO call syntax.\n"
-            "  - Correct:   DONE: finnhub:QUOTE, gmail:SEND\n"
-            "  - Wrong:     DONE: finnhub:QUOTE(SYMBOL='AAPL'), gmail:SEND(to=...)\n"
+            "  - Correct:   DONE: finnhub:QUOTE, gmail:LIST\n"
+            "  - Wrong:     DONE: finnhub:QUOTE(SYMBOL='AAPL'), gmail:LIST(query=...)\n"
             "  - Each action may be invoked many times later with different arguments — do not enumerate calls here."
         )
         return "\n".join(lines)
@@ -917,19 +917,22 @@ Now analyze the task and output ONLY the connection numbers (comma-separated) or
 
         code_rules = (
             "RULES:\n"
-            "- ONLY Python code. Minimal code. Async (await). NO asyncio.run(); define `async def main():...` & `await main()`.\n"
-            "- Use ONLY the namespaces shown above. Do NOT invent variable names. NEVER pass connection_name (auto-detected).\n"
-            '- EVERY tool call MUST include `desc="<specific action>"` (e.g. `desc="Searching AI news April 2026"`). SELF-CHECK: if any call is missing `desc=`, rewrite before returning.\n'
-            "- `files` tool ONLY reads Sandbox uploads.\n"
+            "- Output Python code ONLY. No prose, no comments. Async — use `await`. NEVER `asyncio.run()`. Define `async def main(): ...` then `await main()`.\n"
+            "- Use ONLY methods listed in the SANDBOX CONTRACT above. If a method is not listed, it does NOT exist — do not call it.\n"
+            "- Pass parameters by name when in doubt. Positional order can be wrong; named is always right.\n"
+            '- EVERY tool call MUST include `desc="<specific action>"`. Self-check before returning: missing `desc=` → rewrite.\n'
+            "- NEVER pass `connection_name=` — connections are auto-detected.\n"
+            "- Tool results are already-parsed Python objects. NEVER `json.loads()` them. Iterate / index directly.\n"
+            "- Filesystem: `open()` is BLOCKED. To write CSV/JSON/text use `await files.save(filename, content)` — it returns a path you can pass to `gmail.send(attachments=[path])` or `drive.upload(path)`.\n"
+            "- Allowed stdlib: asyncio, csv, datetime, io, json, math, pathlib, re, statistics, time. NO pandas, NO os, NO sys, NO subprocess.\n"
             f"{print_rule}"
             "- Wait for tool output before generating text that depends on it.\n"
-            "- Processing N items: ALWAYS `asyncio.gather(*[process(x) for x in items])`, NEVER sequential `for` loops with `await`.\n"
-            "- Libs: asyncio, json, re, datetime, time, math, statistics. NO pandas.\n"
-            "- APITool responses are dict/list/str. If str, parse with `json.loads(result)` before using as dict/list.\n"
+            "- Processing N items in parallel: `asyncio.gather(*[process(x) for x in items])`. Never sequential `for ... await`.\n"
+            '- APITool responses may be str. If str → `json.loads(result)` (this is the ONE legitimate use of json.loads).\n'
             '- WEBSEARCH: ask "Return ONLY JSON: {k:v}" → `safe_json_loads(response)` (None if invalid → print raw, abort).\n'
-            "- FACTS: never write a factual sentence (dates, numbers, names, yes/no) from your own knowledge — the answer MUST be built from a tool result obtained this run. websearch results are live and authoritative. Either interpolate the result directly (f\"...{search_results}...\") or, to say it naturally, pass it to `llm.call(f\"Rephrase conversationally using ONLY this data, invent nothing: {search_results}\")` and print THAT output. NEVER hardcode the conclusion in a print() literal and never decide the answer with substring checks (e.g. `if \"2026\" not in results`).\n"
-            "- Large data → `llm.call`: pre-process with Python first (filter/slice/summarise). Never pass raw bulks.\n"
-            "- To return files/datasets/large text to the user: call `add_to_output_files(name, content)` (name=logical label, content=str/bytes/dict/list). The file is saved and accessible via Response.files after the task.\n"
+            "- FACTS: never write a factual sentence (dates, numbers, names, yes/no) from your own knowledge — the answer MUST be built from a tool result obtained this run. Interpolate it (`f\"...{result}...\"`) or pass to `llm.call(f\"Rephrase using ONLY this data, invent nothing: {result}\")`. Never hardcode answers in print() literals.\n"
+            "- Large data → `llm.call`: pre-filter/slice with Python first. Never pass raw bulks.\n"
+            "- To return files/datasets to the user: `add_to_output_files(name, content)`.\n"
             f"{examples_section}\n\n"
             f"{output_rule}"
         )

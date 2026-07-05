@@ -160,6 +160,38 @@ def _format_size_display(size_bytes: int) -> str:
     return f"{size_bytes / (1024 * 1024):.2f} MB"
 
 
+# Drive query DSL fragments codegen LLMs sometimes paste when they confuse our
+# substring `name=` filter with Google Drive API's raw `q=` parameter. We do
+# NOT support that DSL — when we see it we raise a structured error that the
+# orchestrator surfaces back to the LLM verbatim on the next attempt.
+_DRIVE_QUERY_DSL_TOKENS = (
+    " in parents",
+    " and ",
+    " or ",
+    "mimeType",
+    "mimetype=",
+    "trashed",
+    " contains ",
+    " != ",
+)
+
+
+def _reject_drive_query_dsl(value: str) -> None:
+    """Reject Google Drive query DSL passed where a plain substring is expected."""
+    if not value or not isinstance(value, str):
+        return
+    lowered = value.lower()
+    if any(tok in lowered for tok in _DRIVE_QUERY_DSL_TOKENS) or " = '" in value:
+        raise ValueError(
+            "drive.search() / drive.list() expect a plain filename substring in "
+            "`name=`, NOT Google Drive query DSL. "
+            f"Got: {value!r}. "
+            "Use `name='Q3 report'` to filter by filename and "
+            "`mime_type='spreadsheet'` for file type. "
+            "No operators, no `in parents`, no quoted clauses."
+        )
+
+
 def _build_file_preview_metadata(content: Union[str, bytes], filename: str) -> Dict[str, Any]:
     """Build preview metadata for approval UI without mutating file content."""
     preview_content = None
@@ -216,7 +248,7 @@ def _build_file_preview_metadata(content: Union[str, bytes], filename: str) -> D
 
 class ToolLibraryBase:
     """Base class for all tool libraries"""
-    
+
     def __init__(self, tool_manager, task_id: str, agent_id: str, light_llm: str, heavy_llm: str, tool_tracker=None,
                  vision_llm: Optional[str] = None, search_llm: Optional[str] = None, memory: Optional[Any] = None):
         self.tool_manager = tool_manager
@@ -228,11 +260,35 @@ class ToolLibraryBase:
         self.search_llm = search_llm or self.light_llm
         self.tool_tracker = tool_tracker
         self.memory = memory
-    
+
     @property
     def tool_name(self) -> str:
         """Override in subclasses to return the tool name (e.g., 'gmail', 'sql')"""
         return "unknown"
+
+    def __getattr__(self, name: str):
+        """
+        Catch attribute lookups for methods that do not exist and raise a
+        message that tells the codegen LLM exactly which methods this tool
+        does expose. The retry loop picks this up and corrects on the next
+        attempt — turning every hallucinated name into a single self-correcting
+        round-trip instead of a hard failure.
+
+        Only fires for non-underscore names so dunder lookups (__init__, etc.)
+        still behave normally.
+        """
+        if name.startswith("_"):
+            raise AttributeError(name)
+        public = sorted(
+            m for m in dir(type(self))
+            if not m.startswith("_") and callable(getattr(type(self), m, None))
+        )
+        available = ", ".join(public) if public else "(none)"
+        raise AttributeError(
+            f"'{type(self).__name__}' has no method '{name}'. "
+            f"Available methods on this tool: {available}. "
+            f"Use one of those exactly — do not invent method names."
+        )
     
     async def _execute_tool(self, connection_name: str, context: dict, desc: str = None, post_process_metadata: callable = None) -> Any:
         """
@@ -594,12 +650,24 @@ class SQLLibrary(ToolLibraryBase):
 
 class SheetsLibrary(ToolLibraryBase):
     """
-    Google Sheets Library - Create, read, and write spreadsheets.
-    
+    Google Sheets Library - Create, get, and update spreadsheets.
+
+    Method names follow the Google Sheets API verbs:
+        - ``sheets.get(...)``    → reads cell values  (Sheets API ``values.get``)
+        - ``sheets.update(...)`` → writes cell values (Sheets API ``values.update``)
+        - ``sheets.create(...)`` → creates a new spreadsheet
+
+    IMPORTANT: all methods return ready-to-use Python objects (str / list /
+    dict). Never call json.loads / json.parse on the return value — there is
+    no JSON string to parse. ``sheets.get`` returns a plain List[List]; iterate
+    it directly.
+
     Usage:
         sheet_id = await sheets.create("Sales Report 2024", desc="Creating report")
-        await sheets.write(sheet_id, [["Name", "Amount"], ["John", 1000]], desc="Writing data")
-        data = await sheets.read(sheet_id, range="Sheet1!A1:B10", desc="Reading data")
+        await sheets.update(sheet_id, [["Name", "Amount"], ["John", 1000]], desc="Writing data")
+        rows = await sheets.get(sheet_id, range="Sheet1!A1:B10", desc="Reading data")
+        for row in rows:        # rows is already a list of lists
+            print(row)
     """
     
     @property
@@ -622,11 +690,14 @@ class SheetsLibrary(ToolLibraryBase):
         tool_name = self.tool_name
         start_time = time.time()
         description = desc or f"Creating spreadsheet: {title}"
-        
+
         # Track start
         if self.tool_tracker:
-            await self.tool_tracker.track_start(tool_name, description)
-        
+            await self.tool_tracker.track_start(
+                tool_name, description,
+                ui_metadata={"_tool_trace_args": {"title": title, "sheet": sheet}, "_tool_action": "create"},
+            )
+
         params = {"title": title}
         if data is not None:
             # Normalize data if it's List[Dict]
@@ -694,24 +765,27 @@ class SheetsLibrary(ToolLibraryBase):
                 self.tool_tracker.orchestrator.track_tool_usage(self.task_id, tool_name)
             raise
     
-    async def read(self, spreadsheet_id: str, range: str = "Sheet1", desc: str = None) -> List[List[Any]]:
+    async def get(self, spreadsheet_id: str, range: str = "Sheet1", desc: str = None) -> List[List[Any]]:
         """
-        Read data from a spreadsheet range.
-        
+        Get cell values from a spreadsheet range.
+
+        Naming follows the Google Sheets API verb (``spreadsheets.values.get``).
+
         Args:
             spreadsheet_id: Spreadsheet ID
             range: Range in 'Sheet1!A1:D10' format (default: 'Sheet1')
             desc: Optional description for UI tracking
-        
+
         Returns:
-            List[List] - 2D array of cell values
+            List[List] — 2D array of cell values, already parsed. Iterate
+            directly (`for row in result: ...`). Do NOT call json.loads on it.
         """
         conn_name = self._get_sheets_connection()
         await _request_unified_approval(
             tool_tracker=self.tool_tracker,
             task_id=self.task_id,
             tool_name="sheets",
-            action_name="read",
+            action_name="get",
             confirm_policy=self._get_confirm_policy(conn_name),
             connection_name=conn_name,
             message=desc or f"Approve reading spreadsheet: {spreadsheet_id}",
@@ -753,10 +827,12 @@ class SheetsLibrary(ToolLibraryBase):
         )
         return result.get("values", []) if isinstance(result, dict) else result
     
-    async def write(self, spreadsheet_id: str, data, sheet: str = "Sheet1", cell: str = "A1", desc: str = None) -> dict:
+    async def update(self, spreadsheet_id: str, data, sheet: str = "Sheet1", cell: str = "A1", desc: str = None) -> dict:
         """
-        Write data to a spreadsheet.
-        
+        Update cell values in a spreadsheet.
+
+        Naming follows the Google Sheets API verb (``spreadsheets.values.update``).
+
         Args:
             spreadsheet_id: Spreadsheet ID
             data: Data to write. Accepts:
@@ -768,7 +844,7 @@ class SheetsLibrary(ToolLibraryBase):
             desc: Optional description for UI tracking
         """
         conn_name = self._get_sheets_connection()
-        
+
         # Auto-detect and normalize data format
         if isinstance(data, str):
             # CSV string — use csv loader
@@ -776,7 +852,7 @@ class SheetsLibrary(ToolLibraryBase):
                 tool_tracker=self.tool_tracker,
                 task_id=self.task_id,
                 tool_name="sheets",
-                action_name="write",
+                action_name="update",
                 confirm_policy=self._get_confirm_policy(conn_name, default="write"),
                 connection_name=conn_name,
                 message=desc or f"Approve writing CSV data to {sheet}!{cell}",
@@ -800,7 +876,7 @@ class SheetsLibrary(ToolLibraryBase):
             tool_tracker=self.tool_tracker,
             task_id=self.task_id,
             tool_name="sheets",
-            action_name="write",
+            action_name="update",
             confirm_policy=self._get_confirm_policy(conn_name, default="write"),
             connection_name=conn_name,
             message=desc or f"Approve writing data to {sheet}!{cell}",
@@ -840,13 +916,18 @@ class SheetsLibrary(ToolLibraryBase):
 
 class GmailLibrary(ToolLibraryBase):
     """
-    Gmail Library - Send, read emails, and download attachments.
-    
+    Gmail Library — list and send emails, get attachments.
+
+    Method names follow the Gmail API verbs:
+        - ``gmail.list(...)``           → list/search emails  (Gmail API ``messages.list``)
+        - ``gmail.send(...)``           → send an email       (Gmail API ``messages.send``)
+        - ``gmail.get_attachments(...)`` → download attachments of a fetched email
+
     Usage:
-        emails = await gmail.read(query="is:unread", max_results=10, desc="Reading unread")
+        emails = await gmail.list(query="is:unread", max_results=10, desc="Listing unread")
         # Each email: {id, subject, from_email, body, date, attachments: [{attachment_id, filename, mime_type, size}]}
         await gmail.send(to="a@b.com", subject="Hi", body="Hello", desc="Sending email")
-        paths = await gmail.download_attachments(email, desc="Downloading")
+        paths = await gmail.get_attachments(email, desc="Downloading")
     """
     
     @property
@@ -909,29 +990,31 @@ class GmailLibrary(ToolLibraryBase):
             "params": params
         }, desc=desc or f"Sending email to {to}: {subject}{attachment_info}")
     
-    async def read(self, max_results: int = 10, query: str = "", desc: str = None) -> List[Dict]:
+    async def list(self, max_results: int = 10, query: str = "", desc: str = None) -> List[Dict]:
         """
-        Read emails from Gmail. Always includes attachment metadata.
-        
+        List (search) emails from Gmail. Always includes attachment metadata.
+
+        Naming follows the Gmail API verb (``messages.list``).
+
         Args:
             max_results: Maximum number of emails to return
             query: Gmail search query (e.g., "is:unread", "from:boss@company.com")
             desc: Optional description (e.g., "Looking for the last email")
-        
+
         Returns:
             List[Dict] with keys: id, subject, from_email, body, date, snippet, attachments
             Each attachment dict has: attachment_id, filename, mime_type, size
             Returns empty list if no emails found
         """
         conn_name = self._get_gmail_connection()
-        default_desc = f"Reading {max_results} emails"
+        default_desc = f"Listing {max_results} emails"
         if query:
             default_desc += f" matching '{query}'"
         await _request_unified_approval(
             tool_tracker=self.tool_tracker,
             task_id=self.task_id,
             tool_name="gmail",
-            action_name="read",
+            action_name="list",
             confirm_policy=self._get_confirm_policy(conn_name),
             connection_name=conn_name,
             message=desc or default_desc,
@@ -1002,29 +1085,30 @@ class GmailLibrary(ToolLibraryBase):
         
         return []
     
-    async def download_attachments(self, email: Dict, desc: str = None) -> List[str]:
+    async def get_attachments(self, email: Dict, desc: str = None) -> List[str]:
         """
-        Download all attachments from an email.
-        
+        Get (download) all attachments from a fetched email.
+
         Args:
-            email: Email dict from gmail.read() with attachments
+            email: Email dict from ``gmail.list(...)`` that contains an
+                ``attachments`` field.
             desc: Optional description for UI tracking
-            
+
         Returns:
-            List[str]: List of file paths for downloaded attachments
+            List[str]: local file paths for the fetched attachments.
         """
         if not email.get('attachments'):
             return []
-        
+
         from ..tools.gmail.gmail_client import GmailClient
         from ..tools.files import save_output_file
-        
+
         conn_name = self._get_gmail_connection()
         await _request_unified_approval(
             tool_tracker=self.tool_tracker,
             task_id=self.task_id,
             tool_name="gmail",
-            action_name="download",
+            action_name="get_attachments",
             confirm_policy=self._get_confirm_policy(conn_name),
             connection_name=conn_name,
             message=desc or f"Approve downloading {len(email.get('attachments', []))} attachment(s)",
@@ -1052,37 +1136,65 @@ class GmailLibrary(ToolLibraryBase):
 
 class DriveLibrary(ToolLibraryBase):
     """
-    Google Drive Library - Search, upload, and manage files.
-    
+    Google Drive Library — search, list, get, upload files.
+
+    Method names follow the Google Drive API verbs:
+        - ``drive.search(...)`` → find ONE file by name → returns ``file_id`` or None
+        - ``drive.list(...)``   → list MANY files       → returns ``list[dict]``
+        - ``drive.get(...)``    → download file bytes by id
+        - ``drive.upload(...)`` → upload a file or bytes
+
+    IMPORTANT: every method returns ready-to-use Python objects (str / list /
+    dict / bytes). Never call json.loads / json.parse / ast.literal_eval on
+    the return value — there is no JSON string to parse.
+
     Usage:
         from tools import drive
-        
-        # Search for files
+
+        # Search returns the file_id directly as a string (or None).
         file_id = await drive.search(name="Report", mime_type="spreadsheet")
-        
-        # Upload file
-        file_id = await drive.upload("path/to/file.pdf", name="Document")
-        
-        # Get file metadata
-        metadata = await drive.get_metadata(file_id)
+        if file_id is None:
+            return "not found"
+
+        # Chain straight into sheets — no parsing in between.
+        rows = await sheets.get(file_id, range="Sheet1!A1:Z1000")
+
+        # List many files: returns a Python list of dicts.
+        files = await drive.list(mime_type="spreadsheet")
+        for f in files:
+            print(f["name"], f["id"])
+
+        # Upload file (returns the Drive URL as a string).
+        link = await drive.upload("path/to/file.pdf", name="Document")
     """
     
     @property
     def tool_name(self) -> str:
         return "drive"
     
-    async def search(self, name: str = "", mime_type: str = "", desc: str = None) -> Optional[str]:
+    async def search(
+        self,
+        name: str = "",
+        mime_type: str = "",
+        desc: str = None,
+    ) -> Optional[str]:
         """
-        Search for a file in Google Drive.
-        
+        Search for a file in Google Drive by NAME (plain substring).
+
         Args:
-            name: File name to search for
-            mime_type: MIME type filter ("spreadsheet", "document", "pdf", etc.)
-            desc: Optional description (e.g., "Looking for the sales report")
-        
+            name: Plain filename substring to match, e.g. "Q3 report".
+                  Do NOT pass Google Drive query DSL ("name = 'X' and 'Y' in
+                  parents") — this is a simple substring filter, not the
+                  raw Drive query language.
+            mime_type: MIME shortcut ("spreadsheet", "document", "pdf", ...).
+            desc: Optional description (e.g., "Looking for the sales report").
+
         Returns:
-            File ID of first match, or None if not found
+            str | None — the file ID of the first match (plain string, NOT a
+            JSON-encoded payload), or None if nothing matched. Pass it directly
+            to sheets.get / docs.get / drive.get. Do not wrap it in json.loads.
         """
+        _reject_drive_query_dsl(name)
         conn_name = self._get_drive_connection()
         default_desc = f"Searching for file: {name}" if name else "Searching Drive"
         if mime_type:
@@ -1141,33 +1253,133 @@ class DriveLibrary(ToolLibraryBase):
                 first_file = files[0]
                 if isinstance(first_file, dict):
                     return first_file.get("id")
-        
+
         return None
-    
-    async def upload(self, file_path_or_bytes, name: str = "", folder_id: str = "", desc: str = None) -> str:
+
+    async def list(
+        self,
+        desc: str = None,
+        *,
+        name: str = "",
+        mime_type: str = "",
+    ) -> List[Dict[str, Any]]:
+        """
+        List Drive files matching optional filters.
+
+        Args:
+            name: Plain filename substring filter (e.g. "Q3"). This is NOT
+                  Google Drive query DSL — do not pass ``"name = 'X' and ...
+                  in parents"`` here.
+            mime_type: Optional MIME shortcut ("spreadsheet", "document",
+                  "pdf", ...).
+            desc: Optional UI description.
+
+        Returns:
+            list[dict] — Python list of file records, each
+            ``{"id", "name", "mimeType", ...}``. ALREADY a Python list.
+            NEVER ``json.loads`` it. Iterate directly. Empty list when
+            nothing matches.
+        """
+        _reject_drive_query_dsl(name)
+        effective_name = name
+        conn_name = self._get_drive_connection()
+        default_desc = f"Listing Drive files: {effective_name}" if effective_name else "Listing Drive files"
+        if mime_type:
+            default_desc += f" ({mime_type})"
+        await _request_unified_approval(
+            tool_tracker=self.tool_tracker,
+            task_id=self.task_id,
+            tool_name="drive",
+            action_name="list",
+            confirm_policy=self._get_confirm_policy(conn_name),
+            connection_name=conn_name,
+            message=desc or default_desc,
+            context_payload={"name": effective_name, "mime_type": mime_type},
+        )
+        result = await self._execute_tool(
+            conn_name,
+            {"action": "SEARCH", "params": {"name": effective_name, "mimeType": mime_type}},
+            desc=desc or default_desc,
+        )
+        if isinstance(result, dict):
+            files = result.get("files", [])
+            if isinstance(files, list):
+                return files
+        if isinstance(result, list):
+            return result
+        return []
+
+    async def get(self, file_id: str, desc: str = None) -> Any:
+        """
+        Get a Drive file's contents by ID.
+
+        Naming follows the Google Drive API verb (``files.get``).
+
+        Args:
+            file_id: Drive file ID (the plain string returned by ``drive.search``).
+            desc: Optional description for UI tracking.
+
+        Returns:
+            File payload as returned by the backend connector — typically raw
+            ``bytes`` for binary files, parsed metadata dict otherwise. Never a
+            JSON string: do NOT json.loads the result.
+        """
+        conn_name = self._get_drive_connection()
+        await _request_unified_approval(
+            tool_tracker=self.tool_tracker,
+            task_id=self.task_id,
+            tool_name="drive",
+            action_name="get",
+            confirm_policy=self._get_confirm_policy(conn_name),
+            connection_name=conn_name,
+            message=desc or f"Reading Drive file: {file_id}",
+            context_payload={"fileId": file_id},
+        )
+        result = await self._execute_tool(
+            conn_name,
+            {"action": "GET", "params": {"fileId": file_id}},
+            desc=desc or f"Getting Drive file: {file_id}",
+        )
+        # Pass through whatever the connector returned (bytes / dict / str).
+        return result
+
+    async def upload(
+        self,
+        file_path_or_bytes=None,
+        *,
+        name: str = "",
+        folder_id: str = "",
+        desc: str = None,
+        content=None,
+        file_content=None,
+        data=None,
+        file=None,
+        payload=None,
+        filename: str = None,
+    ) -> str:
         """
         Upload a file to Google Drive.
-        
+
         Args:
-            file_path_or_bytes: Path to file to upload (str) OR raw bytes content.
+            file_path_or_bytes: Path to file (str) OR raw bytes content.
                       For files uploaded by user: "uploads/{task_id}/filename.ext"
                       For files saved by agent: "uploads/{task_id}/output/filename.ext"
-                      Also accepts raw bytes (e.g. from io.BytesIO.getvalue())
-            name: Display name in Drive (defaults to filename from path)
-            folder_id: Optional Drive folder ID to upload to
-            desc: Optional description for UI tracking
-            
+                      Also accepts raw bytes (e.g. from io.BytesIO.getvalue()).
+            name: Display name in Drive (defaults to filename from path).
+            folder_id: Optional Drive folder ID to upload to.
+            desc: Optional description for UI tracking.
+
         Returns:
-            str: Full URL to the uploaded file in Google Drive (or File ID if URL creation failed)
-            
+            str: Full URL to the uploaded file in Google Drive (or File ID if
+            URL creation failed).
+
         Examples:
-            # Upload user's file
             link = await drive.upload(
                 "uploads/abc123/data.csv",
                 name="Sales Data Q4",
                 desc="Uploading user's data to Drive"
             )
-            
+
             # Upload raw bytes (e.g. from matplotlib)
             link = await drive.upload(
                 buf.getvalue(),
@@ -1175,6 +1387,40 @@ class DriveLibrary(ToolLibraryBase):
                 desc="Uploading chart"
             )
         """
+        # Tolerate hallucinated kwargs from codegen LLMs. The canonical first
+        # arg is positional/`file_path_or_bytes`; LLMs frequently invent
+        # ``content=``, ``file_content=``, ``data=``, ``bytes=``, ``file=``
+        # or ``payload=``. Map any of those to the canonical slot.
+        if file_path_or_bytes is None:
+            for alias in (content, file_content, data, file, payload):
+                if alias is not None:
+                    file_path_or_bytes = alias
+                    break
+        if file_path_or_bytes is None:
+            raise TypeError(
+                "drive.upload() requires a file (path or bytes) — pass it as the "
+                "first positional argument or as `file_path_or_bytes=...`."
+            )
+        # ``filename=`` is a common alias for ``name=``.
+        if not name and filename:
+            name = filename
+
+        # Sanity check: detect the common codegen mistake of swapping args, i.e.
+        # ``drive.upload(filename, content)``. In that case `name` ends up
+        # holding the file contents (multi-line, very long, non-filename chars).
+        # We refuse with a clear message so the retry loop can rewrite the call.
+        if isinstance(name, str) and name:
+            if "\n" in name or len(name) > 200:
+                raise ValueError(
+                    "drive.upload() received what looks like file CONTENT in the "
+                    "`name=` argument (multi-line or >200 chars). The first "
+                    "positional argument MUST be the content (str path or bytes), "
+                    "and `name` MUST be a short filename. "
+                    "Correct call: await drive.upload(csv_content, name='report.csv'). "
+                    "Common mistake: await drive.upload(filename, csv_content) — "
+                    "args are reversed."
+                )
+
         import base64
         conn_name = self._get_drive_connection()
         tool_name = self.tool_name
@@ -1572,13 +1818,20 @@ class DocsLibrary(ToolLibraryBase):
                 await self.tool_tracker.track_end("docs", duration, success=False, error=str(e))
             raise
 
-    async def read(self, document_id: str, desc: str = None) -> str:
+    async def get(self, document_id: str, desc: str = None) -> str:
+        """
+        Get a Google Doc's text content by document ID.
+
+        Naming follows the Google Docs API verb (``documents.get``).
+
+        Returns the document body as a plain string.
+        """
         conn_name = self._get_docs_connection()
         await _request_unified_approval(
             tool_tracker=self.tool_tracker,
             task_id=self.task_id,
             tool_name="docs",
-            action_name="read",
+            action_name="get",
             confirm_policy=self._get_confirm_policy(conn_name),
             connection_name=conn_name,
             message=desc or f"Approve reading document: {document_id}",
@@ -2441,7 +2694,14 @@ class FilesLibrary(ToolLibraryBase):
                 break
         
         if not handler:
-            raise FileNotFoundError(f"File not found: {filename}")
+            available = ", ".join(fh.file_path.name for fh in file_handlers) or "(none)"
+            raise FileNotFoundError(
+                f"No task-uploaded file named '{filename}'. files.read() only reads files "
+                f"the user attached to THIS task; uploaded files: {available}. "
+                f"If '{filename}' is a Google Drive file, do NOT use files.read — fetch it with "
+                f"`data = await drive.get(file_id)` (then `llm.call(file_data=[data])` for a PDF/image, "
+                f"or `data.decode('utf-8')` for text/CSV)."
+            )
         
         # Auto-parse based on type
         if handler.file_type == 'csv':

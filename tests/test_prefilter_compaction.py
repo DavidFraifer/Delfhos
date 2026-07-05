@@ -36,10 +36,11 @@ class TestPrefilterCompaction(unittest.TestCase):
         ]
         prompt = build_prefilter_prompt(
             "Read and send",
-            {"gmail": {"READ", "SEND"}},
+            {"gmail": {"LIST", "SEND"}},
             connections=conns,
         )
-        self.assertIn("ReadOnly Gmail (tool=gmail) call: read()", prompt)
+        # allow=["read"] maps to the gmail LIST action (Gmail API vocabulary).
+        self.assertIn("ReadOnly Gmail (tool=gmail) call: list()", prompt)
         self.assertIn("SendOnly Gmail (tool=gmail) call: send()", prompt)
 
     def test_filter_selected_actions_blocks_disallowed(self):

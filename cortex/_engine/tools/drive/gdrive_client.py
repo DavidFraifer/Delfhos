@@ -7,6 +7,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaIoBaseDownload
 from delfhos.errors import ToolExecutionError
 
 
@@ -161,7 +162,11 @@ class GoogleDriveClient:
             if not trashed:
                 query_parts.append("trashed=false")
             if name:
-                query_parts.append(f"name='{name}'")
+                # Substring match (documented contract), not exact: searching
+                # "prueba" must find "prueba.csv". Escape single quotes/backslashes
+                # so the name can't break out of the Drive query literal.
+                safe_name = name.replace("\\", "\\\\").replace("'", "\\'")
+                query_parts.append(f"name contains '{safe_name}'")
             if mime_type:
                 query_parts.append(f"mimeType='{mime_type}'")
             if folder_id:
@@ -202,6 +207,38 @@ class GoogleDriveClient:
             return request.execute()
         except HttpError as exc:
             _handle_api_error(exc, "GET")
+
+    def download_file(self, file_id: str) -> bytes:
+        """Download a file's content as bytes.
+
+        Binary/plain files use ``get_media``. Native Google docs can't be
+        downloaded directly, so they're exported (spreadsheet→CSV, doc→text,
+        else PDF). Returns raw bytes the caller can ``.decode()`` or parse.
+        """
+        import io
+        try:
+            self._ensure_service()
+            meta = self.get_file(file_id, fields="id,name,mimeType")
+            mime = meta.get("mimeType", "") or ""
+            if mime.startswith("application/vnd.google-apps."):
+                export_map = {
+                    "application/vnd.google-apps.spreadsheet": "text/csv",
+                    "application/vnd.google-apps.document": "text/plain",
+                    "application/vnd.google-apps.presentation": "text/plain",
+                }
+                request = self._service.files().export_media(
+                    fileId=file_id, mimeType=export_map.get(mime, "application/pdf"),
+                )
+            else:
+                request = self._service.files().get_media(fileId=file_id)
+            buf = io.BytesIO()
+            downloader = MediaIoBaseDownload(buf, request)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+            return buf.getvalue()
+        except HttpError as exc:
+            _handle_api_error(exc, "DOWNLOAD")
 
     def create_file(
         self,

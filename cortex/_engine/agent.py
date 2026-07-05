@@ -831,6 +831,39 @@ Never return null, "none", or plain text."""
         except (LLMExecutionError, MemoryRetrievalError, RuntimeError, ValueError) as e:
             console.error("MEMORY EXTRACTION", f"Extraction failed: {str(e)}", agent_id=self.agent_id)
 
+    def _build_task_payload(self, message: Union[str, List[Dict[str, str]]], max_history: int) -> str:
+        """Frame the chat transcript so codegen treats prior turns as already-done
+        context and acts ONLY on the latest user turn.
+
+        Without this split the whole transcript reads as "the task", so a follow-up
+        like "verify it's there" re-runs the earlier upload instead of just checking.
+        """
+        if self.chat is None:
+            if isinstance(message, list):
+                return "\n".join(
+                    f"{m.get('role', 'user').upper()}: {m.get('content', str(m))}" for m in message
+                )
+            return message
+
+        recent = self.chat.messages[-max_history:]
+        current = recent[-1]["content"] if recent else (message if isinstance(message, str) else "")
+        prior = recent[:-1]
+
+        parts: List[str] = []
+        if self.chat.summary:
+            parts.append(f"Conversation summary (context, already handled):\n{self.chat.summary}")
+        if prior:
+            history = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in prior)
+            parts.append(
+                "Conversation so far (context only — earlier turns are already DONE, do NOT redo them):\n"
+                + history
+            )
+        parts.append(
+            "CURRENT REQUEST — do ONLY this; earlier turns are history that may already be satisfied:\n"
+            + current
+        )
+        return "\n\n".join(parts)
+
     async def run_async(self, message: Union[str, List[Dict[str, str]]], max_history: int = 10):
         """Run a task with the agent (async version).
         
@@ -880,22 +913,8 @@ Never return null, "none", or plain text."""
                 
             # Launch compression as a background task so it doesn't block task execution
             asyncio.create_task(self._compress_chat_if_needed(task_id))
-            
-        task_content = ""
-        if self.chat is not None:
-            if self.chat.summary:
-                task_content += f"Conversation Summary: {self.chat.summary}\n\n"
-            
-            recent = self.chat.messages[-max_history:]
-            for m in recent:
-                task_content += f"{m['role'].upper()}: {m['content']}\n"
-        else:
-            if isinstance(message, list):
-                for m in message:
-                    task_content += f"{m.get('role', 'user').upper()}: {m.get('content', str(m))}\n"
-            else:
-                task_content = message
-            
+
+        task_content = self._build_task_payload(message, max_history)
         console.info("AGENT", f"Task payload generated ({len(task_content)} chars)", agent_id=self.agent_id, task_id=task_id)
         self.orchestrator.receive_message({"payload": task_content.strip(), "task_id": task_id})
         
@@ -959,22 +978,8 @@ Never return null, "none", or plain text."""
                 def run_in_thread():
                     asyncio.run(self._compress_chat_if_needed(task_id))
                 threading.Thread(target=run_in_thread, daemon=True).start()
-        
-        task_content = ""
-        if self.chat is not None:
-            if self.chat.summary:
-                task_content += f"Conversation Summary: {self.chat.summary}\n\n"
-            
-            recent = self.chat.messages[-max_history:]
-            for m in recent:
-                task_content += f"{m['role'].upper()}: {m['content']}\n"
-        else:
-            if isinstance(message, list):
-                for m in message:
-                    task_content += f"{m.get('role', 'user').upper()}: {m.get('content', str(m))}\n"
-            else:
-                task_content = message
-            
+
+        task_content = self._build_task_payload(message, max_history)
         console.info("AGENT", f"Task payload generated ({len(task_content)} chars)", agent_id=self.agent_id, task_id=task_id)
         self.orchestrator.receive_message({"payload": task_content.strip(), "task_id": task_id})
         

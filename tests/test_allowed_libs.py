@@ -117,7 +117,8 @@ class TestAllowedLibsPythonExecutor(unittest.TestCase):
 
         result = asyncio.run(run())
         self.assertFalse(result.get("success"))
-        self.assertIn("not allowed", result.get("error", "").lower())
+        # `os` hits the sandbox's actionable special-case message ("blocked by the sandbox").
+        self.assertIn("blocked", result.get("error", "").lower())
 
 
 class TestAllowedLibsSandboxExecutor(unittest.TestCase):

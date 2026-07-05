@@ -29,6 +29,7 @@ from delfhos.errors import ToolExecutionError
 
 from cortex._engine.utils.console import console
 from cortex._engine.tools.tool_libraries import create_tool_libraries
+from cortex._engine.tools.call_validator import validate_tool_calls, InvalidToolCall
 
 
 # Initialize ContextVar to track parallel execution blocks
@@ -69,6 +70,19 @@ def safe_json_loads(text):
     except json.JSONDecodeError as e:
         print(f"Warning: JSON parse failed ({e}). Raw response:\n{text}")
         return None
+
+
+def _summarize_binary_for_print(arg):
+    """Replace raw bytes with a short placeholder so a stray print() of file
+    content (e.g. drive.get()) can't dump a binary blob into the chat or stall
+    the renderer. The message also tells the model what to do instead."""
+    if isinstance(arg, (bytes, bytearray)):
+        return (
+            f"<{len(arg)} bytes of binary file content — NOT printable. "
+            f"To read it: pass to llm.call(file_data=[data]) for a PDF/image, "
+            f"or data.decode('utf-8') for text/CSV.>"
+        )
+    return arg
 
 
 def format_table(data, title=None, headers=None):
@@ -490,7 +504,7 @@ class PythonExecutor:
         if self.namespace is None:
             # Create tool execution tracker
             tool_tracker = ToolExecutionTracker(self.orchestrator, self.task_id)
-            
+
             # Create tool libraries with tracker
             libraries = create_tool_libraries(
                 self.tool_manager,
@@ -502,11 +516,15 @@ class PythonExecutor:
                 vision_llm=self.vision_model,
                 memory=self.orchestrator.memory if self.orchestrator else None,
             )
-            
+
             # Build safe execution namespace
             self.namespace = self._build_namespace(libraries)
             # Record the initial set of keys so user-defined vars can be identified later
             self._baseline_keys = set(self.namespace.keys())
+            # Keep a handle on the tool library instances so the static
+            # call-validator can introspect them on every code submission
+            # (the local `libraries` variable only exists on the first call).
+            self._tool_libraries = dict(libraries)
 
         # Capture stdout/stderr. stdout uses a streaming buffer so printed output
         # is mirrored to the orchestrator live (for poll()) while still
@@ -520,6 +538,10 @@ class PythonExecutor:
         def _capture_print(*args, **kwargs):
             kwargs.pop("file", None)       # always write to the capture buffer
             kwargs.setdefault("flush", True)
+            # Guard: a stray `print(<raw bytes>)` (e.g. drive.get() content) would
+            # dump a huge binary blob into the chat and wedge the renderer. Replace
+            # bytes with a short, actionable placeholder instead.
+            args = tuple(_summarize_binary_for_print(a) for a in args)
             print(*args, file=stdout_capture, **kwargs)
 
         self.namespace["print"] = _capture_print
@@ -532,6 +554,22 @@ class PythonExecutor:
                 task_id=self.task_id,
                 agent_id=self.agent_id
             )
+
+            # Static guard: catch hallucinated tool method names BEFORE we
+            # execute. The orchestrator surfaces the InvalidToolCall message
+            # back to the codegen LLM as a structured retry hint, so a single
+            # round-trip self-corrects instead of wasting a full execution.
+            tool_libs = getattr(self, "_tool_libraries", None)
+            if tool_libs:
+                try:
+                    validate_tool_calls(code, tool_libs)
+                except InvalidToolCall as bad_call:
+                    # Surface as AttributeError so the orchestrator's auto-retry
+                    # (which keys off the error type name) treats it as the
+                    # recoverable, self-correcting case — the same path a runtime
+                    # __getattr__ miss takes. PythonExecutionError would NOT match
+                    # any retryable type and would hard-fail instead of retrying.
+                    raise AttributeError(str(bad_call)) from bad_call
 
             # Execute with timeout
             with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
@@ -686,7 +724,14 @@ class PythonExecutor:
                     )
                 raise
             finally:
-                namespace.update(protected)   # keep tools/builtins intact for later cells & retries
+                # Restore ONLY protected names the cell deleted. If the user
+                # legitimately rebound one (e.g. ``from datetime import datetime``
+                # shadowing the pre-injected ``datetime`` module), keep their
+                # binding — pisarlo aquí rompe ``datetime.now()`` y similares
+                # en cells posteriores.
+                for _k, _v in protected.items():
+                    if _k not in namespace:
+                        namespace[_k] = _v
             if cell.terminal:
                 break
 
@@ -762,6 +807,25 @@ class PythonExecutor:
         def _blocked_input(*args, **kwargs):
             raise ToolExecutionError(tool_name="python_executor", detail="input() is not available in this environment.")
 
+        # ``open()`` is intentionally not exposed (sandbox). Codegen LLMs reach
+        # for it from pretraining ("just write a CSV") and then loop, since the
+        # raw NameError gives no hint. We shadow it with a structured error
+        # that names the correct alternatives so the retry loop self-corrects.
+        def _blocked_open(*args, **kwargs):
+            raise ToolExecutionError(
+                tool_name="python_executor",
+                detail=(
+                    "open() is NOT available in this sandbox. "
+                    "To write a file use `files.save(filename, content)` — it returns a path "
+                    "you can pass to gmail.send(attachments=[path]) or drive.upload(path). "
+                    "Examples:\n"
+                    "    path = await files.save('report.csv', csv_text)\n"
+                    "    await gmail.send(to='x', subject='y', body='z', attachments=[path])\n"
+                    "Or pass bytes/strings directly to drive.upload(content_or_bytes, name='X.csv') "
+                    "without touching the filesystem."
+                ),
+            )
+
         # A safe print function that always flushes
         def _safe_print(*args, **kwargs):
             print(*args, **kwargs, flush=True)
@@ -823,6 +887,20 @@ class PythonExecutor:
         def _safe_import(name, *args, **kwargs):
             root_name = name.split(".", 1)[0]
             if root_name not in allowed_import_roots:
+                # Special-case common escape attempts so the retry loop sees an
+                # actionable hint instead of a generic refusal.
+                if root_name in {"builtins", "__builtin__", "os", "sys", "subprocess"}:
+                    raise ToolExecutionError(
+                        tool_name="python_executor",
+                        detail=(
+                            f"Import of '{name}' is blocked by the sandbox. "
+                            "If you are trying to write a file, use "
+                            "`files.save(filename, content)` instead of open(). "
+                            "For shelling out or env access there is no escape — "
+                            "redesign the task to use the provided tools (sql, sheets, "
+                            "drive, gmail, files, llm)."
+                        ),
+                    )
                 raise ToolExecutionError(tool_name="python_executor", detail=f"Import of module '{name}' is not allowed in this environment")
             if root_name == "asyncio":
                 return asyncio_proxy
@@ -902,6 +980,7 @@ class PythonExecutor:
             "False": False,
             "locals": locals,
             "input": _blocked_input,
+            "open": _blocked_open,
             "format_table": format_table,
             "safe_json_loads": safe_json_loads,
         }

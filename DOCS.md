@@ -1,6 +1,6 @@
 # Delfhos Documentation
 
-> **Version:** 0.8.7.1 · **License:** Apache-2.0 · **Python:** ≥ 3.9
+> **Version:** 0.9.0 · **License:** Apache-2.0 · **Python:** ≥ 3.9
 
 Delfhos is a Python SDK for building AI agents that use real tools — Gmail, SQL databases, Google Drive, Sheets, Docs, Calendar, web search, REST APIs, and your own custom functions — with clean orchestration and safe, human-in-the-loop execution.
 
@@ -1401,7 +1401,7 @@ build_image()            # Skips if image is up to date
 build_image(force=True)  # Rebuild unconditionally
 ```
 
-The image is version-tagged to match the installed Delfhos version (e.g. `delfhos-sandbox:0.8.7`) so upgrades automatically use a fresh image.
+The image is version-tagged to match the installed Delfhos version (e.g. `delfhos-sandbox:0.9.0`) so upgrades automatically use a fresh image.
 
 ### Checking sandbox status
 
@@ -1952,8 +1952,9 @@ Gmail(
 
 | Action | Description |
 |--------|-------------|
-| `read` | List and read emails, threads, labels |
-| `send` | Compose and send emails with optional attachments |
+| `list` | List/search emails (matches Gmail API `messages.list`) — `gmail.list(query=..., max_results=...)` |
+| `send` | Compose and send emails with optional attachments — `gmail.send(...)` |
+| `get_attachments` | Download attachments of a fetched email — `gmail.get_attachments(email)` |
 
 ---
 
@@ -2003,9 +2004,9 @@ Sheets(
 
 | Action | Description |
 |--------|-------------|
-| `read` | Read cell values and ranges |
-| `write` | Write or update cell values |
-| `create` | Create new spreadsheets or sheets |
+| `get` | Get cell values and ranges — `sheets.get(sheet_id, range=...)` (matches Sheets API `values.get`) |
+| `update` | Update cell values — `sheets.update(sheet_id, data, ...)` (matches Sheets API `values.update`) |
+| `create` | Create new spreadsheets or sheets — `sheets.create(...)` |
 | `format` | Apply formatting (colors, fonts, borders) |
 | `chart` | Create charts from data ranges |
 | `batch` | Execute multiple operations in one request |
@@ -2030,8 +2031,9 @@ Drive(
 
 | Action | Description |
 |--------|-------------|
-| `search` | Search files and folders by name, type, or metadata |
-| `get` | Download or read file content |
+| `search` | Find ONE file by name — `drive.search(name=...)` → `str` (file_id) or `None` |
+| `list` | List MANY files matching filters — `drive.list(name=..., mime_type=...)` → `list[dict]` (matches Drive API `files.list`) |
+| `get` | Download a file's bytes by ID — `drive.get(file_id)` |
 | `create` | Upload or create files and folders |
 | `update` | Update file content or metadata |
 | `delete` | Permanently delete files or folders |
@@ -2059,9 +2061,9 @@ Docs(
 
 | Action | Description |
 |--------|-------------|
-| `read` | Read document content |
-| `create` | Create a new document |
-| `update` | Update document text or insert content |
+| `get` | Get document text content — `docs.get(doc_id)` (matches Docs API `documents.get`) |
+| `create` | Create a new document — `docs.create(title=..., content=...)` |
+| `update` | Update document text or insert content — `docs.update(doc_id, text)` |
 | `format` | Apply formatting (headings, bold, lists) |
 | `delete` | Delete a document |
 
@@ -2662,7 +2664,7 @@ This keeps context size bounded at `~keep` messages regardless of conversation l
 
 2. **LLM Enrichment** *(optional, `enrich=True`):* After compilation, the `OpenAPICompiler.enrich()` method sends all endpoint descriptions to an LLM in a single call. The LLM rewrites descriptions to be more actionable for an AI agent and infers response schemas for endpoints where the spec left them undocumented. The enriched manifest is written back to the cache — on all subsequent runs the manifest loads from disk and the LLM is never called again, so enrichment cost is incurred exactly once per spec version.
 
-3. **Registration:** Compiled (and optionally enriched) entries are registered into three internal stores — `TOOL_REGISTRY` (for the prefilter LLM), `TOOL_ACTION_SUMMARIES` (for prefilter ranking), and `COMPRESSED_API_DOCS` (for code generation prompts).
+3. **Registration:** Compiled (and optionally enriched) entries are registered into `TOOL_DOCS`, the single source of truth for tool documentation (used verbatim in code-generation prompts). The reduced one-line summaries the prefilter LLM sees are auto-derived from these, so the two views can never drift apart.
 
 4. **Execution:** The `APIExecutor` receives calls from the agent's generated code and maps every argument to the correct HTTP location based on the spec (`path`, `query`, `header`, or `body`). Before sending, it injects the three categories of auth/config values supplied at construction time:
    - `headers` → merged into the request headers

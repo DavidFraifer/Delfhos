@@ -124,8 +124,8 @@ class BaseConnection(_BaseConnection):
 
         descriptions: Dict[str, str] = {}
         try:
-            from cortex._engine.tools.tool_registry import TOOL_ACTION_SUMMARIES
-            descriptions = TOOL_ACTION_SUMMARIES.get(cls.TOOL_NAME.lower(), {})
+            from cortex._engine.tools.tool_registry import COMPRESSED_TOOL_DOCS
+            descriptions = COMPRESSED_TOOL_DOCS.get(cls.TOOL_NAME.lower(), {})
         except Exception:
             descriptions = {}
 
@@ -210,8 +210,8 @@ class BaseConnection(_BaseConnection):
 
         descriptions: Dict[str, str] = {}
         try:
-            from cortex._engine.tools.tool_registry import TOOL_ACTION_SUMMARIES
-            descriptions = TOOL_ACTION_SUMMARIES.get(self.tool_name.lower(), {})
+            from cortex._engine.tools.tool_registry import COMPRESSED_TOOL_DOCS
+            descriptions = COMPRESSED_TOOL_DOCS.get(self.tool_name.lower(), {})
         except Exception:
             descriptions = {}
 

@@ -324,6 +324,56 @@ def get_gemini_client(api_key: str) -> genai.Client:
     return _genai_clients[api_key]
 
 
+_GEMINI_SUPPORTED_IMAGE_MIMES = {
+    "image/png", "image/jpeg", "image/jpg", "image/webp", "image/heic", "image/heif",
+}
+
+
+def _normalize_for_gemini(img_bytes: bytes, mime_type: str) -> Optional[tuple]:
+    """Return (bytes, mime) ready for Gemini, or None to skip.
+
+    Gemini rejects BMP/GIF/TIFF/etc. with 400 INVALID_ARGUMENT. Try to re-encode
+    them as PNG via Pillow; skip non-image payloads (e.g. octet-stream)."""
+    mt = (mime_type or "").lower().strip()
+    if mt in _GEMINI_SUPPORTED_IMAGE_MIMES:
+        return (img_bytes, mt)
+    if mt == "application/pdf":
+        return (img_bytes, mt)
+    if not mt.startswith("image/"):
+        # Not an image at all — Gemini can't read it as vision input.
+        print(f"Warning: skipping unsupported attachment for Gemini vision (mime={mt!r}).")
+        return None
+    try:
+        from PIL import Image
+        import io
+        with Image.open(io.BytesIO(img_bytes)) as im:
+            buf = io.BytesIO()
+            im.convert("RGB").save(buf, format="PNG")
+            return (buf.getvalue(), "image/png")
+    except Exception as e:  # noqa: BLE001
+        print(f"Warning: could not convert {mt!r} to PNG for Gemini ({e}); skipping.")
+        return None
+
+
+def _sniff_mime(raw: bytes) -> str:
+    """Best-effort MIME detection from magic bytes (drive.get / files return raw bytes)."""
+    if raw[:4] == b"%PDF":
+        return "application/pdf"
+    if raw[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if raw[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if raw[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if raw[:2] == b"BM":
+        return "image/bmp"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "image/webp"
+    if raw[:4] in (b"II*\x00", b"MM\x00*"):
+        return "image/tiff"
+    return "application/octet-stream"
+
+
 def _prepare_gemini_image_parts(images: List[Union[str, Dict[str, Any]]]) -> List[types.Part]:
     """Helper to decode and prepare image parts for Gemini payload."""
     def _decode_base64_bytes(raw: str) -> Optional[bytes]:
@@ -349,7 +399,18 @@ def _prepare_gemini_image_parts(images: List[Union[str, Dict[str, Any]]]) -> Lis
 
     image_parts = []
     for img in images:
-        if isinstance(img, dict):
+        if isinstance(img, (bytes, bytearray)):
+            # Raw file bytes (e.g. from drive.get / files). Sniff the type so PDFs
+            # and images are passed to vision instead of being silently dropped.
+            raw = bytes(img)
+            if not raw:
+                continue
+            norm = _normalize_for_gemini(raw, _sniff_mime(raw))
+            if norm is None:
+                continue
+            img_bytes, mime_type = norm
+            image_parts.append(types.Part.from_bytes(data=img_bytes, mime_type=mime_type))
+        elif isinstance(img, dict):
             # Format: {"type": "image", "data": base64_string, "mime_type": "image/jpeg"}
             img_data = img.get("data", "")
             mime_type = img.get("mime_type", "image/jpeg")
@@ -358,7 +419,10 @@ def _prepare_gemini_image_parts(images: List[Union[str, Dict[str, Any]]]) -> Lis
                     img_bytes = _decode_base64_bytes(img_data)
                     if img_bytes is None:
                         raise ValueError("Invalid base64 image payload")
-                    # Create Part from bytes
+                    norm = _normalize_for_gemini(img_bytes, mime_type)
+                    if norm is None:
+                        continue
+                    img_bytes, mime_type = norm
                     image_parts.append(types.Part.from_bytes(
                         data=img_bytes,
                         mime_type=mime_type
@@ -385,7 +449,10 @@ def _prepare_gemini_image_parts(images: List[Union[str, Dict[str, Any]]]) -> Lis
 
                 if img_bytes is None:
                     raise ValueError("Invalid image string (not file path or decodable base64)")
-                
+                norm = _normalize_for_gemini(img_bytes, mime_type)
+                if norm is None:
+                    continue
+                img_bytes, mime_type = norm
                 image_parts.append(types.Part.from_bytes(
                     data=img_bytes,
                     mime_type=mime_type

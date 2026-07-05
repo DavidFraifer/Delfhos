@@ -286,7 +286,7 @@ class APITool(BaseConnection):
         """
         from cortex._engine.api.compiler import OpenAPICompiler
         from cortex._engine.api.executor import APIExecutor, build_api_tools
-        from cortex._engine.tools.tool_registry import TOOL_REGISTRY, COMPRESSED_API_DOCS, TOOL_ACTION_SUMMARIES
+        from cortex._engine.tools.tool_registry import TOOL_DOCS, rebuild_compressed_tool_docs
         from cortex._engine.tools.internal_tools import internal_tools
 
         started = time.perf_counter()
@@ -338,14 +338,11 @@ class APITool(BaseConnection):
                 f"{self.api_tool_name}: allow filter kept {len(selected_tools)}/{len(manifest_tools)} endpoint(s)",
             )
 
-        # 1. Register into TOOL_REGISTRY (for prefilter LLM)
-        capability, summaries = compiler.get_capability(tools=selected_tools)
-        TOOL_REGISTRY[self.api_tool_name] = capability
-        TOOL_ACTION_SUMMARIES[self.api_tool_name] = summaries
-
-        # 2. Register into COMPRESSED_API_DOCS (for code gen LLM)
+        # Register full docs into TOOL_DOCS (single source); prefilter
+        # summaries are auto-derived from them.
         docs = compiler.get_api_docs(tools=selected_tools)
-        COMPRESSED_API_DOCS.update(docs)
+        TOOL_DOCS.update(docs)
+        rebuild_compressed_tool_docs()
 
         # 2.5. LLM Enrichment (optional — requires enrich=True and llm= to be set)
         # Pass selected_tools so only the allowed endpoints are enriched — not the full spec.
@@ -367,11 +364,9 @@ class APITool(BaseConnection):
                 selected_tools = manifest_tools
 
             # Re-register updated docs
-            capability, summaries = compiler.get_capability(tools=selected_tools)
-            TOOL_REGISTRY[self.api_tool_name] = capability
-            TOOL_ACTION_SUMMARIES[self.api_tool_name] = summaries
             docs = compiler.get_api_docs(tools=selected_tools)
-            COMPRESSED_API_DOCS.update(docs)
+            TOOL_DOCS.update(docs)
+            rebuild_compressed_tool_docs()
 
         # 3. Build executor and Tool namespace
         executor = APIExecutor(
